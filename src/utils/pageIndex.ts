@@ -106,6 +106,10 @@ export async function buildPageIndex(pages: string[], llm: LLMFn): Promise<Index
       start,
       end: i + 1 < boundaries.length ? boundaries[i + 1] - 1 : pages.length - 1,
     }))
+    // Prepend pre-heading pages (title, abstract, etc.) if the first boundary is not page 0
+    if (boundaries[0] > 0) {
+      ranges.unshift({ start: 0, end: boundaries[0] - 1 })
+    }
     ranges = mergeSmallSections(ranges)
   } else {
     // 降级：固定5页切块（原有行为）

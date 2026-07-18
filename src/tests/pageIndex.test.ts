@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { scoreAndSelect } from '../utils/pageIndex'
+import { scoreAndSelect, buildPageIndex } from '../utils/pageIndex'
 import type { IndexNode } from '../utils/pageIndex'
 
 // pdfjs-dist 在 pageIndex.ts 顶层导入，测试中需要 mock
@@ -78,5 +78,27 @@ describe('scoreAndSelect', () => {
     expect(llm).not.toHaveBeenCalled()
     expect(result.sources).toHaveLength(1)
     expect(result.context).toBe('a\n\nb\n\nc')
+  })
+})
+
+describe('buildPageIndex range coverage', () => {
+  it('does not drop pages before the first detected section heading', async () => {
+    // pages 0-1: preamble (no heading), page 2: first heading, pages 3-4: more content
+    const pages = [
+      'preamble page one, no heading here',
+      'preamble page two, still no heading',
+      '1. Introduction\nFirst real section starts here',
+      'Introduction content continues here.',
+      '2. Methods\nSecond section begins.',
+    ]
+    const llm = vi.fn().mockResolvedValue('{"title":"Test","summary":"A test paper"}')
+    const tree = await buildPageIndex(pages, llm)
+
+    // The root node must span the full page range
+    expect(tree.endPage).toBe(4)
+    // Pre-heading pages (0-1) must be covered by some leaf
+    const allLeaves = tree.nodes.length > 0 ? tree.nodes : [tree]
+    const coversPage0 = allLeaves.some(n => n.startPage === 0)
+    expect(coversPage0).toBe(true)
   })
 })
