@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { initDb } from './db'
 import { registerIpc } from './ipc'
@@ -16,6 +16,24 @@ const createWindow = () => {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  })
+
+  const openExternalUrl = (url: string) => {
+    try {
+      const protocol = new URL(url).protocol
+      if (protocol === 'http:' || protocol === 'https:') void shell.openExternal(url)
+    } catch { /* Ignore malformed URLs. */ }
+  }
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalUrl(url)
+    return { action: 'deny' }
+  })
+
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url === win.webContents.getURL()) return
+    event.preventDefault()
+    openExternalUrl(url)
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {

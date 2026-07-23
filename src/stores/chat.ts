@@ -44,6 +44,8 @@ const DEFAULT_PROFILE: LLMProfile = {
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 }
 
+const MATH_FORMAT_INSTRUCTION = '数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。'
+
 const PROMPT_TEMPLATES = [
   { name: '逐段精读', prompt: '请逐段解析以下内容，解释关键概念、方法和结论。' },
   { name: '通俗解释', prompt: '请用通俗易懂的语言解释这段内容，假设我是该领域的初学者。' },
@@ -304,7 +306,11 @@ Latest question: ${query}`
 
     const profile = chatProfile.value
     const messages = [
-      { role: 'system', content: profile.systemPrompt + (context ? `\n\n参考内容：\n${context}` : '') },
+      {
+        role: 'system',
+        content: `${profile.systemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` +
+          (context ? `\n\n参考内容：\n${context}` : ''),
+      },
       ...conv.messages.slice(-20).map(m => ({ role: m.role, content: m.content })),
     ]
 

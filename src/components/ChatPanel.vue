@@ -15,7 +15,7 @@
       >
         <div class="msg-avatar" aria-hidden="true">{{ msg.role === 'user' ? '我' : 'AI' }}</div>
         <div class="msg-body">
-          <div class="msg-content" v-html="renderContent(msg.content)" />
+          <div class="msg-content" v-html="renderMarkdown(msg.content)" />
           <div v-if="msg.sources?.length" class="msg-sources">
             <el-icon aria-hidden="true"><Link /></el-icon>
             <span v-for="(s, i) in msg.sources" :key="i" class="source-chip">{{ s }}</span>
@@ -52,7 +52,7 @@
         name="chat-message"
         autocomplete="off"
         placeholder="输入问题，Enter 发送，Shift+Enter 换行…"
-        @keydown.enter.exact.prevent="send"
+        @keydown.enter.exact="handleEnter"
       />
       <el-button
         type="primary"
@@ -73,6 +73,7 @@ import { ref, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Promotion, ChatDotRound } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
+import { renderMarkdown } from '../utils/markdown'
 
 const props = defineProps<{ conversation: Conversation | null }>()
 const chatStore = useChatStore()
@@ -87,20 +88,20 @@ function addContext(text: string) {
 }
 defineExpose({ addContext })
 
-function renderContent(text: string): string {
-  return text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`(.+?)`/g, '<code>$1</code>')
-    .replace(/\n/g, '<br>')
-}
-
 async function scrollToBottom() {
   await nextTick()
   if (messagesRef.value) messagesRef.value.scrollTop = messagesRef.value.scrollHeight
 }
 
 watch(() => props.conversation?.messages.length, scrollToBottom)
+
+function handleEnter(event: KeyboardEvent) {
+  // Enter confirms the current candidate while an IME is composing. It must
+  // not submit the message until composition has finished.
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  send()
+}
 
 async function send() {
   if (!input.value.trim() || !props.conversation) {
@@ -245,6 +246,91 @@ async function send() {
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 13px;
+}
+
+.msg-content :deep(p) { margin: 0 0 0.75em; }
+.msg-content :deep(p:last-child) { margin-bottom: 0; }
+
+.msg-content :deep(h1),
+.msg-content :deep(h2),
+.msg-content :deep(h3),
+.msg-content :deep(h4),
+.msg-content :deep(h5),
+.msg-content :deep(h6) {
+  margin: 1em 0 0.5em;
+  color: var(--text-primary);
+  line-height: 1.35;
+}
+.msg-content :deep(h1:first-child),
+.msg-content :deep(h2:first-child),
+.msg-content :deep(h3:first-child) { margin-top: 0; }
+.msg-content :deep(h1) { font-size: 1.35em; }
+.msg-content :deep(h2) { font-size: 1.2em; }
+.msg-content :deep(h3) { font-size: 1.08em; }
+
+.msg-content :deep(ul),
+.msg-content :deep(ol) {
+  margin: 0.5em 0 0.75em;
+  padding-left: 1.5em;
+}
+.msg-content :deep(li + li) { margin-top: 0.25em; }
+.msg-content :deep(li > p) { margin-bottom: 0.35em; }
+
+.msg-content :deep(blockquote) {
+  margin: 0.75em 0;
+  padding: 0.25em 0 0.25em 0.9em;
+  color: var(--text-secondary);
+  border-left: 3px solid var(--accent);
+}
+
+.msg-content :deep(pre) {
+  margin: 0.75em 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  line-height: 1.5;
+}
+.msg-content :deep(pre code) {
+  padding: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.msg-content :deep(.katex-display) {
+  margin: 0.85em 0;
+  padding: 0.2em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.msg-content :deep(table) {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.75em 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.msg-content :deep(th),
+.msg-content :deep(td) {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.msg-content :deep(th) { background: var(--bg-elevated); }
+
+.msg-content :deep(a) {
+  color: var(--accent);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.msg-content :deep(a:hover) { text-decoration: underline; }
+.msg-content :deep(hr) {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
 }
 
 .msg-sources {

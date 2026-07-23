@@ -70,6 +70,10 @@ async function renderPdf() {
 async function renderPage(num: number) {
   const page = await pdfDoc.getPage(num)
   const viewport = page.getViewport({ scale: scale.value })
+  // Canvas dimensions are device pixels, while the viewport dimensions are
+  // CSS pixels. Rendering both at the same size makes PDF pages blurry on
+  // Retina/high-DPI displays because the browser has to upscale the bitmap.
+  const outputScale = window.devicePixelRatio || 1
 
   const pageDiv = document.createElement('div')
   pageDiv.className = 'pdf-page'
@@ -78,8 +82,10 @@ async function renderPage(num: number) {
   pageDiv.style.height = `${viewport.height}px`
 
   const canvas = document.createElement('canvas')
-  canvas.width = viewport.width
-  canvas.height = viewport.height
+  canvas.width = Math.floor(viewport.width * outputScale)
+  canvas.height = Math.floor(viewport.height * outputScale)
+  canvas.style.width = `${viewport.width}px`
+  canvas.style.height = `${viewport.height}px`
   const ctx = canvas.getContext('2d')!
   pageDiv.appendChild(canvas)
 
@@ -90,7 +96,10 @@ async function renderPage(num: number) {
 
   pagesRef.value!.appendChild(pageDiv)
 
-  await page.render({ canvasContext: ctx, viewport }).promise
+  const transform = outputScale === 1
+    ? undefined
+    : [outputScale, 0, 0, outputScale, 0, 0]
+  await page.render({ canvasContext: ctx, viewport, transform }).promise
 
   const textContent = await page.getTextContent()
   // @ts-ignore - renderTextLayer available in pdfjs
@@ -211,6 +220,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   border-radius: 3px;
 }
+:deep(.pdf-page canvas) { display: block; }
 :deep(.text-layer) {
   position: absolute;
   inset: 0;
