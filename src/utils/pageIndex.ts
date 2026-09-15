@@ -246,6 +246,14 @@ function formatSource(n: IndexNode): string {
   return `Pages ${n.startPage + 1}–${n.endPage + 1}: ${n.title}`
 }
 
+/**
+ * 平面索引的叶节点。单节点文档（buildPageIndex 直接返回叶子）时叶节点就是树本身——
+ * 传空数组会让下游的 MRR 静默变 0。
+ */
+export function collectLeafNodes(root: IndexNode): IndexNode[] {
+  return root.nodes.length > 0 ? root.nodes : [root]
+}
+
 export function parseAndValidateScores(raw: string, leafCount: number): NodeScore[] {
   const cleaned = raw.replace(/```(?:json)?\s*|```/gi, '').trim()
   const start = cleaned.indexOf('[')
@@ -283,7 +291,7 @@ export async function scoreAndSelect(
 ): Promise<RetrievalResult> {
   const { topK = 2, minScore = 4 } = opts
   // 收集叶节点（无子节点的节点）
-  const leaves = root.nodes.length > 0 ? root.nodes : [root]
+  const leaves = collectLeafNodes(root)
 
   // 单节点无需调用 LLM
   if (leaves.length === 1) {

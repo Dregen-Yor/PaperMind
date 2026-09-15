@@ -17,6 +17,7 @@ import { runFullContextQaTask } from './runner/fullContextQa'
 import { runTraditionalRagQaTask } from './runner/traditionalRagQa'
 import { runHybridRerankQaTask } from './runner/hybridRerankQa'
 import { runLongSectionQaTask } from './runner/longSectionQa'
+import { runSemanticTreeQaTask } from './runner/semanticTreeQa'
 import { runSummaryTask } from './runner/summary'
 import { renderReport, renderComparison } from './report'
 import { benchPath } from './paths'
@@ -193,7 +194,9 @@ for (const config of configs) {
             ? await runHybridRerankQaTask({ ...taskArgs, config })
             : config.kind === 'long-section-rag'
               ? await runLongSectionQaTask({ ...taskArgs, config })
-              : await runQaTask({ ...taskArgs, config })
+              : config.kind === 'semantic-tree'
+                ? await runSemanticTreeQaTask({ ...taskArgs, config })
+                : await runQaTask({ ...taskArgs, config })
       // --no-cache 当前只跳过读缓存，不覆写已有缓存文件（llmClient 待后续优化），如实记录口径
       result.meta.cacheMode = args.useCache ? 'normal' : 'bypass'
       result.meta.mode = args.mode

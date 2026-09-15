@@ -37,9 +37,24 @@ export interface EvalSample {
  * 刻意 Omit externalContext：它会让 runRagPipeline 跳过改写与检索，
  * 一个语法合法的配置就能静默关掉正在被评测的整条链路，而指标照常输出数字。
  */
+/**
+ * 轻量语义树建树参数（方案 §5 / §8）。
+ * 分块口径与建树输入上限都是实验变量，必须写进配置而非散落在代码里。
+ */
+export interface SemanticTreeParams {
+  evidence: { targetChars: number; maxChars: number; minChars: number }
+  maxInputChars: number
+}
+
 export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externalContext'> {
   name: string
-  kind?: 'papermind'
+  /**
+   * `semantic-tree` 与 `papermind` 共用同一条生产 RAG 管线，
+   * 唯一差别是每篇论文多一棵语义树索引（§11.2 的对照组设计）。
+   */
+  kind?: 'papermind' | 'semantic-tree'
+  /** kind === 'semantic-tree' 时必填 */
+  semanticTree?: SemanticTreeParams
 }
 
 export interface TraditionalEmbeddingConfig {
@@ -97,9 +112,12 @@ export type BaselineFamily = 'classic' | 'strong'
 /** 配置文件形态：matrix 各字段取值数组，展开为笛卡尔积。 */
 export interface ConfigFile {
   name: string
-  kind?: 'papermind'
+  /** 语义树配置与 PaperMind 共用矩阵形态，只多一个建树参数块 */
+  kind?: 'papermind' | 'semantic-tree'
+  /** kind === 'semantic-tree' 时必填 */
+  semanticTree?: SemanticTreeParams
   /** 键收敛到 BenchConfig 的可调字段，防止拼错的键静默失效 */
-  matrix: Partial<Record<Exclude<keyof PaperMindConfig, 'name' | 'kind'>, Array<number | boolean>>>
+  matrix: Partial<Record<Exclude<keyof PaperMindConfig, 'name' | 'kind' | 'semanticTree'>, Array<number | boolean>>>
 }
 
 export interface SampleError {
@@ -130,6 +148,25 @@ export interface PaperTimingRecord {
   indexCacheMisses?: number
   leafCount?: number
   error?: string
+  /** —— 语义树诊断（§11.4）；仅 kind === 'semantic-tree' 的论文写入 —— */
+  /** 建树输入的证据块数量 */
+  evidenceBlockCount?: number
+  treeNodeCount?: number
+  treeDepth?: number
+  treeLevel1Count?: number
+  treeLevel2Count?: number
+  /** 被树引用的证据块覆盖率 */
+  treeEvidenceCoverage?: number
+  /** 被多个节点共同引用的证据块比例（多重归属） */
+  treeSharedBlockRate?: number
+  /** 引用跨越非连续区块的节点比例（跨章节取证能力） */
+  treeCrossSectionNodeRate?: number
+  treeBuildLlmCalls?: number
+  treeBuildInputTokens?: number
+  treeBuildOutputTokens?: number
+  treeBuildLatencyMs?: number
+  /** 1 = 本篇建树失败并已降级到平面检索 */
+  treeBuildFailed?: number
 }
 
 /** 逐样本记录，用于错误分析——聚合分数只说好不好，这里说为什么。 */
@@ -175,7 +212,7 @@ export interface BenchResult {
     generationMaxTokens?: number
     refusalPatternVersion?: string
     rubricVersion?: string
-    retrievalAlgorithm?: 'papermind-llm' | 'cosine' | 'bm25' | 'jaccard' | 'none' | 'hybrid-rerank' | 'long-section-rag'
+    retrievalAlgorithm?: 'papermind-llm' | 'semantic-tree' | 'cosine' | 'bm25' | 'jaccard' | 'none' | 'hybrid-rerank' | 'long-section-rag'
     /** 基线家族（报表分组用），新基线必须标注，旧配置缺省由报表按 kind 推断 */
     baselineFamily?: BaselineFamily
     /** 候选/上下文粒度自证：如 '512-token passage'、'contiguous section region'、'structure node' */

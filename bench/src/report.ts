@@ -104,6 +104,9 @@ export function renderReport(
   const timingBlock = renderTimingSection(results)
   if (timingBlock.length > 0) lines.push(...timingBlock, '')
 
+  const treeBlock = renderTreeSection(results)
+  if (treeBlock.length > 0) lines.push(...treeBlock, '')
+
   lines.push(`| 配置 | 家族 | 检索算法 | 完成 | ${metricNames.join(' | ')} |`)
   lines.push(`| --- | --- | --- | --- | ${metricNames.map(() => '---').join(' | ')} |`)
   results.forEach((r, i) => {
@@ -181,6 +184,52 @@ function renderTimingSection(results: BenchResult[]): string[] {
     // 无完成题或字段缺失时 cell 渲染「—」，防止 0 ms 被误读为极速完成
     lines.push(`| ${r.config.name} | ${cell(r.metrics, 'indexBuildLatency')} | ${cell(r.metrics, 'retrievalLatency')} | ${cell(r.metrics, 'answerGenerationLatency')} | ${cell(r.metrics, 'queryEndToEndLatency')} | ${cell(r.metrics, 'llmNetworkLatency')} |`)
   }
+  return lines
+}
+
+/** token 数过大时用 k 单位，避免 41000 与 41 这类数字在同一列里视觉同权。 */
+function fmtTokens(value: number): string {
+  return value >= 10_000 ? `${(value / 1000).toFixed(1)}k` : fmt(value)
+}
+
+/** 取指标字段渲染为百分比，缺失时输出「—」。 */
+function pctCell(metrics: Record<string, number>, name: string): string {
+  const v = metrics[name]
+  return v === undefined ? '—' : fmtPct(v)
+}
+
+/**
+ * 「语义树诊断」区块（§11.4）：只在结果里真的出现过树指标时渲染，
+ * 否则旧基线报表会多出一整块空表。
+ *
+ * 这一块与主指标表并排存在，是为了让同一份结果文件同时回答
+ * 「检索有没有变好」「树是不是真的按语义长的」「产品够不够快」（§阶段 E 完成标志）。
+ */
+function renderTreeSection(results: BenchResult[]): string[] {
+  const hasTree = results.some(r => r.metrics.treeBuildFailureRate !== undefined || r.metrics.avgTreeNodeCount !== undefined)
+  if (!hasTree) return []
+
+  const lines: string[] = []
+  lines.push('### 语义树诊断')
+  lines.push('')
+  lines.push('| 配置 | 平均节点数 | 平均树深 | 一级/二级 | 证据块覆盖率 | 多重归属率 | 跨章节节点率 | 建树失败率 | 建树 P50/P95 | 建树输入/输出 token | 树使用率 | 降级率 | 单问选中节点数 |')
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |')
+  for (const r of results) {
+    const m = r.metrics
+    const num = (name: string) => (m[name] === undefined ? '—' : fmt(m[name]))
+    const token = (name: string) => (m[name] === undefined ? '—' : fmtTokens(m[name]))
+    lines.push(
+      `| ${r.config.name} | ${num('avgTreeNodeCount')} | ${num('avgTreeDepth')} | `
+      + `${num('avgTreeLevel1Count')} / ${num('avgTreeLevel2Count')} | `
+      + `${num('treeEvidenceCoverage')} | ${num('treeSharedBlockRate')} | ${num('treeCrossSectionNodeRate')} | `
+      + `${pctCell(m, 'treeBuildFailureRate')} | ${cell(m, 'treeBuildLatency')} | `
+      + `${token('avgTreeBuildInputTokens')} / ${token('avgTreeBuildOutputTokens')} | `
+      + `${pctCell(m, 'treeUsedRate')} | ${pctCell(m, 'treeDegradationRate')} | ${num('selectedNodeCount')} |`,
+    )
+  }
+  lines.push('')
+  lines.push('> 「多重归属率」「跨章节节点率」按节点数归一，后者越高说明树把分散在不同位置的证据组织到了一起；')
+  lines.push('> 「降级率」含建树失败与树取证不足两种情况，两者都不会增加查询阶段的串行模型调用。')
   return lines
 }
 

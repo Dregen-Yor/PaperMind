@@ -1,7 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { extractPages, buildPageIndex } from '../utils/pageIndex'
-import { runRagPipeline, type IndexedPaper } from '../utils/ragPipeline'
+import { runRagPipeline, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
+import { buildEvidenceBlocks, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
+import {
+  buildSemanticTree,
+  validateSemanticTree,
+  hashTreeSource,
+  semanticTreeConfigHash,
+  SEMANTIC_TREE_SCHEMA_VERSION,
+  SEMANTIC_TREE_PROMPT_VERSION,
+  DEFAULT_MAX_INPUT_CHARS,
+  type SemanticTreeBuildConfig,
+} from '../utils/semanticTree'
+import type { PaperTreeRecord } from '../types/db'
 import {
   ABSTRACT_MODEL,
   summarizeAcademicText,
@@ -49,8 +61,20 @@ const DEFAULT_PROFILE: LLMProfile = {
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 }
 
+/** 强制重建的结果摘要。分开计数是为了不让「全部失败」在 UI 上退化成「没有论文」。 */
+export interface TreeRebuildSummary {
+  /** 真正尝试建树的篇数（不含跳过） */
+  attempted: number
+  rebuilt: number
+  failed: number
+  /** 总开关关闭，或该篇已在建树中 */
+  skipped: number
+}
+
 const NEW_CONVERSATION_TITLE = '新对话'
 const LEGACY_CONVERSATION_TITLE = /^对话\s+\d+$/
+/** 语义树开关的持久化键；缺省为开启（方案 §8.2 要求关闭时功能仍完全可用）。 */
+const TREE_ENABLED_KEY = 'semantic_tree_enabled'
 
 function isUntitledConversation(title: string): boolean {
   return title === NEW_CONVERSATION_TITLE || LEGACY_CONVERSATION_TITLE.test(title)
@@ -97,6 +121,19 @@ export const useChatStore = defineStore('chat', () => {
   const indexingPapers = ref<Set<string>>(new Set())
   const indexedPapers = ref<Set<string>>(new Set())
   const abstractToken = ref('')
+  /** 轻量语义树总开关；关闭时全部检索退回现有平面路径 */
+  const treeEnabled = ref(true)
+  /** 已有可用语义树的论文 */
+  const treeReadyPapers = ref<Set<string>>(new Set())
+  /** 正在后台建树的论文 */
+  const treeIndexingPapers = ref<Set<string>>(new Set())
+  /**
+   * 每篇论文的建树代次。后台任务在写入前比对代次，
+   * 代次已变（被取消或重新建树）即丢弃结果，不写入过期语义树。
+   */
+  const treeBuildTokens = new Map<string, number>()
+  /** 就绪集合刷新的代次；并发刷新时只让最新一次的结果落地 */
+  let treeReadyToken = 0
 
   const chatProfile = computed(() =>
     profiles.value.find(p => p.id === chatProfileId.value) ?? profiles.value[0],
@@ -152,6 +189,11 @@ export const useChatStore = defineStore('chat', () => {
     const ids = await window.db.index.list()
     indexedPapers.value = new Set(ids)
     abstractToken.value = (await window.db.settings.get('huggingface_token')) ?? ''
+    // 语义树默认开启；只有显式存过 false 才关闭
+    treeEnabled.value = (await window.db.settings.get(TREE_ENABLED_KEY)) !== false
+    // 只把「当前构建配置下能直接复用」的记录算作已就绪：模型或提示词换过之后
+    // 仍留在集合里，UI 会谎报可用树的篇数（真正的校验在 parseTreeRecord）
+    await refreshTreeReadyPapers()
     loaded.value = true
   }
 
@@ -169,6 +211,8 @@ export const useChatStore = defineStore('chat', () => {
     if (idx === -1) return
     profiles.value[idx] = { ...profiles.value[idx], ...patch }
     await persistProfiles()
+    // 改的若是当前索引配置（模型/端点），已建好的树随即失效，就绪集合要重算
+    if (id === indexProfileId.value) await refreshTreeReadyPapers()
   }
 
   async function removeProfile(id: string) {
@@ -188,6 +232,8 @@ export const useChatStore = defineStore('chat', () => {
   async function setIndexProfileId(id: string) {
     indexProfileId.value = id
     await window.db.settings.set('llm_profile_index', id)
+    // 换了索引配置就直接换了一套建树配置：就绪集合必须跟着重算
+    await refreshTreeReadyPapers()
   }
 
   async function setAbstractToken(token: string) {
@@ -195,15 +241,28 @@ export const useChatStore = defineStore('chat', () => {
     await window.db.settings.set('huggingface_token', abstractToken.value)
   }
 
+  async function setTreeEnabled(enabled: boolean) {
+    treeEnabled.value = enabled
+    await window.db.settings.set(TREE_ENABLED_KEY, enabled)
+  }
+
   // ---------- LLM Call ----------
+
+  /**
+   * 解析本次调用用哪份配置。
+   * 接受 profile 对象而不只是 id：建树这类含 await 的长流程需要「开始时的快照」，
+   * 否则中途切换配置会让请求体里的模型与落库元数据对不上。
+   */
+  function resolveLlmProfile(target?: string | LLMProfile): LLMProfile {
+    if (target && typeof target !== 'string') return target
+    return (target ? profiles.value.find(p => p.id === target) : undefined) ?? chatProfile.value
+  }
 
   async function callLLM(
     messages: { role: string; content: string }[],
-    profileId?: string,
+    profileOrId?: string | LLMProfile,
   ): Promise<string> {
-    const profile =
-      (profileId ? profiles.value.find(p => p.id === profileId) : undefined) ??
-      chatProfile.value
+    const profile = resolveLlmProfile(profileOrId)
 
     if (profile.provider === 'ollama') {
       const body: Record<string, unknown> = { model: profile.model, messages, stream: false }
@@ -288,9 +347,215 @@ export const useChatStore = defineStore('chat', () => {
       const tree = await buildPageIndex(pages, llmFn)
       await window.db.index.set(paperId, JSON.stringify(tree), JSON.stringify(pages))
       indexedPapers.value = new Set([...indexedPapers.value, paperId])
+      // 语义树在后台构建：不阻塞导入、阅读与首次提问（§8.2）。
+      // 失败/超时/输出非法都只是没有树，检索自动回落平面路径。
+      void buildPaperTree(paperId, pages).catch(() => {})
     } finally {
       indexingPapers.value.delete(paperId)
     }
+  }
+
+  // ---------- Semantic Tree (Stage C) ----------
+
+  /**
+   * 建树配置（§10.3）。指纹与实际传给 buildEvidenceBlocks / buildSemanticTree 的
+   * 参数取自同一个对象，避免「改了参数但指纹没跟上」的静默失效。
+   */
+  const TREE_BUILD_CONFIG = {
+    evidence: DEFAULT_EVIDENCE_OPTIONS,
+    maxInputChars: DEFAULT_MAX_INPUT_CHARS,
+  } as const
+
+  /** 模型身份（含端点）：同名模型换端点未必是同一个模型，端点必须进指纹。 */
+  function modelIdentity(profile: LLMProfile): string {
+    return `${profile.provider}:${profile.model}@${profile.baseUrl}`
+  }
+
+  /** 建树配置指纹。传入 profile 快照而非实时读取，调用方才能保证「建树用的配置」与「指纹」是同一份。 */
+  function semanticTreeConfig(profile: LLMProfile): SemanticTreeBuildConfig {
+    return {
+      schemaVersion: SEMANTIC_TREE_SCHEMA_VERSION,
+      promptVersion: SEMANTIC_TREE_PROMPT_VERSION,
+      evidence: TREE_BUILD_CONFIG.evidence,
+      maxInputChars: TREE_BUILD_CONFIG.maxInputChars,
+      model: modelIdentity(profile),
+    }
+  }
+
+  /** 「现在」这一份索引配置对应的建树指纹（每条路径都按它判断新旧）。 */
+  function currentTreeConfigHash(): string {
+    return semanticTreeConfigHash(semanticTreeConfig(indexProfile.value))
+  }
+
+  /**
+   * 按当前建树配置重新统计可用语义树。索引模型或端点一换，旧树在
+   * `parseTreeRecord` 处就会被拒，这个集合必须跟着变——否则设置页会继续
+   * 显示一批其实已经用不上的树（§10.3）。
+   *
+   * 刷新是异步的，而配置可以被连续切换，因此用代次 + 返回后复核配置双重把关：
+   * 只有「最后一次发起」且「配置至今没再变」的结果才允许落地。
+   */
+  async function refreshTreeReadyPapers(): Promise<void> {
+    const token = ++treeReadyToken
+    const configHash = currentTreeConfigHash()
+    const ids = await window.db.tree.list({
+      schemaVersion: SEMANTIC_TREE_SCHEMA_VERSION,
+      buildConfigHash: configHash,
+    })
+    if (token !== treeReadyToken || configHash !== currentTreeConfigHash()) return
+    treeReadyPapers.value = new Set(ids)
+  }
+
+  /**
+   * 标记某篇已有可用语义树。`configHash` 是这棵树实际所属的配置：
+   * 建树期间用户可能已经切换索引配置，那这棵树就属于旧配置，
+   * 不能计入当前配置的就绪集合（否则设置页又显示一份用不上的数量）。
+   */
+  function markTreeReady(paperId: string, configHash: string): void {
+    if (configHash !== currentTreeConfigHash()) return
+    treeReadyPapers.value = new Set([...treeReadyPapers.value, paperId])
+  }
+
+  /**
+   * 把持久化记录还原成可用索引。内容不可信：schema 过期、构建配置指纹不匹配、
+   * 块为空、树结构非法一律返回 undefined，由调用方回落平面检索（§9 / §13）。
+   *
+   * `expectedConfigHash` 由调用方给出，两条路径的判断标准不同：
+   * 复用判断比的是**本次建树的配置快照**（记录只要对这个快照有效就该复用），
+   * 检索载入比的是**当前配置**（配置变过的树一律不许参与回答）。
+   * 若在这里统一读实时 profile，`tree.get` 等待期间切换配置会把一份
+   * 对快照完全匹配的有效缓存误判为失效，白白重建。
+   */
+  function parseTreeRecord(
+    record: PaperTreeRecord,
+    expectedConfigHash: string,
+  ): SemanticPaperIndex | undefined {
+    try {
+      if (record.schemaVersion !== SEMANTIC_TREE_SCHEMA_VERSION) return undefined
+      if (record.buildConfigHash !== expectedConfigHash) return undefined
+      const blocks = JSON.parse(record.blocksJson)
+      if (!Array.isArray(blocks) || blocks.length === 0) return undefined
+      // 坏树整体作废而非局部修补
+      const validation = validateSemanticTree(JSON.parse(record.treeJson), blocks)
+      if (!validation.ok || !validation.tree) return undefined
+      return { tree: validation.tree, blocks }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 后台构建单篇论文的轻量语义树（§8.2）。
+   *
+   * 每篇论文恰好一次 LLM 调用；任何失败都返回 false 并保持平面路径可用，
+   * 不写入半成品树。原文指纹与构建配置指纹都未变、且记录内容校验通过时
+   * 直接复用已存树（§10.3）；`force` 无条件重建。
+   */
+  async function buildPaperTree(
+    paperId: string,
+    providedPages?: string[],
+    opts: { force?: boolean } = {},
+  ): Promise<boolean> {
+    if (!treeEnabled.value) return false
+    if (treeIndexingPapers.value.has(paperId)) return false
+    treeIndexingPapers.value.add(paperId)
+    // 递增代次：内容变更后旧任务的结果会被丢弃，避免写入过期树
+    const token = (treeBuildTokens.get(paperId) ?? 0) + 1
+    treeBuildTokens.set(paperId, token)
+
+    try {
+      // 建树是一条含 await 的长流程，期间用户可能切换索引配置。开始时一次性快照，
+      // 后续指纹、LLM 调用与落库元数据全部取自这一份——否则会出现
+      // 「用模型 B 建树，却按模型 A 的指纹保存」，以后切回 A 会错误复用这棵树。
+      const buildProfile: LLMProfile = { ...indexProfile.value }
+      const configHash = semanticTreeConfigHash(semanticTreeConfig(buildProfile))
+
+      let pages = providedPages
+      if (!pages) {
+        const stored = await window.db.index.get(paperId)
+        // 没有平面索引就没有可靠原文，不做无根据的建树
+        if (!stored) return false
+        pages = JSON.parse(stored.pagesJson)
+      }
+      if (!Array.isArray(pages) || pages.length === 0) return false
+
+      const sourceHash = hashTreeSource(JSON.stringify(pages))
+      // 缓存键必须同时覆盖原文与构建配置：只比内容指纹会让提示词/模型/分块的
+      // 变更永远不生效，同一篇论文一直复用提示词时代产出的旧树（§10.3）
+      const existing = opts.force ? null : await window.db.tree.get(paperId)
+      if (existing && existing.sourceHash === sourceHash && existing.buildConfigHash === configHash) {
+        // 键相同不等于内容可用：损坏的记录当作没有树，走重建（§13 不猜测修复）
+        if (parseTreeRecord(existing, configHash)) {
+          markTreeReady(paperId, configHash)
+          return false
+        }
+      }
+
+      const blocks = buildEvidenceBlocks(pages, TREE_BUILD_CONFIG.evidence)
+      const llmFn = (prompt: string) =>
+        callLLM([{ role: 'user', content: prompt }], buildProfile)
+      const { tree, meta } = await buildSemanticTree(blocks, llmFn, {
+        maxInputChars: TREE_BUILD_CONFIG.maxInputChars,
+      })
+
+      // 期间发生了重新建树，本次结果已过期
+      if (treeBuildTokens.get(paperId) !== token) return false
+
+      await window.db.tree.set(paperId, {
+        treeJson: JSON.stringify(tree),
+        blocksJson: JSON.stringify(blocks),
+        schemaVersion: tree.schemaVersion,
+        promptVersion: tree.promptVersion,
+        buildModel: buildProfile.model,
+        sourceHash,
+        buildConfigHash: configHash,
+        inputTokens: meta.inputTokens,
+        outputTokens: meta.outputTokens,
+        buildLatencyMs: meta.latencyMs,
+      })
+      markTreeReady(paperId, configHash)
+      return true
+    } catch {
+      // 建树是可选的增强：失败即降级，不向导入/提问路径抛错
+      return false
+    } finally {
+      treeIndexingPapers.value.delete(paperId)
+    }
+  }
+
+  /**
+   * 载入已持久化的语义树，供检索使用。
+   * 任何一步不对（无记录、schema 变更、结构非法）都返回 undefined，
+   * 由调用方回落到平面检索（§9）。
+   */
+  async function loadSemanticIndex(paperId: string): Promise<SemanticPaperIndex | undefined> {
+    if (!treeEnabled.value) return undefined
+    try {
+      const record = await window.db.tree.get(paperId)
+      // 构建配置变过的树在这里就被判为不可用，不会带着旧提示词/旧模型的树继续答题
+      return record ? parseTreeRecord(record, currentTreeConfigHash()) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 强制重建所有已索引论文的语义树（设置页的显式路径）。
+   * 缓存键已覆盖构建配置，这里服务的是「配置没变但就是想换一棵树」：
+   * 只重建树（每篇一次调用），不必连带重跑成本更高的平面索引。逐篇串行，避免同时打出 N 个请求。
+   */
+  async function rebuildAllTrees(): Promise<TreeRebuildSummary> {
+    const summary: TreeRebuildSummary = { attempted: 0, rebuilt: 0, failed: 0, skipped: 0 }
+    for (const paperId of [...indexedPapers.value]) {
+      if (!treeEnabled.value || treeIndexingPapers.value.has(paperId)) {
+        summary.skipped++
+        continue
+      }
+      summary.attempted++
+      if (await buildPaperTree(paperId, undefined, { force: true })) summary.rebuilt++
+      else summary.failed++
+    }
+    return summary
   }
 
   // ---------- Conversation CRUD ----------
@@ -413,7 +678,13 @@ export const useChatStore = defineStore('chat', () => {
           } catch { /* ignore — no index available for this paper */ }
         }
         if (!stored) continue
-        papers.push({ tree: JSON.parse(stored.indexJson), pages: JSON.parse(stored.pagesJson) })
+        // 语义树就绪则一并挂上，由 runRagPipeline 单轮路由；否则该篇走平面路径
+        const semantic = await loadSemanticIndex(paperId)
+        papers.push({
+          tree: JSON.parse(stored.indexJson),
+          pages: JSON.parse(stored.pagesJson),
+          ...(semantic ? { semantic } : {}),
+        })
       }
     }
 
@@ -438,11 +709,12 @@ export const useChatStore = defineStore('chat', () => {
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
     loaded, indexingPapers, indexedPapers, abstractToken,
+    treeEnabled, treeReadyPapers, treeIndexingPapers,
     init,
     addProfile, updateProfile, removeProfile,
-    setChatProfileId, setIndexProfileId, setAbstractToken,
+    setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
     newConversation, addMessage, removeConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, indexPaper,
+    sendMessage, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }
 })
