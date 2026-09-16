@@ -31,9 +31,30 @@ const RESULTS_DIR = () => benchPath(import.meta.url, '../results/')
 const QASPER_LANGUAGE_INSTRUCTION = '请依据参考内容，用论文原文语言（英文）作答。'
 const FULL_CONTEXT_LIMITS = { timeoutMs: 120_000, maxTokens: 4096 } as const
 const QA_REQUEST_TIMEOUT_MS = 120_000
-// QA 正式跑批不能因短暂网络/服务端故障丢失题目。不可恢复的配置或鉴权错误仍会立即抛出；
-// 可恢复错误则持续重试，直到该请求取得答案，保证结果不会带有幸存者偏差。
-const QA_RETRY_ATTEMPTS = Number.POSITIVE_INFINITY
+// 可恢复错误有限重试，避免单题在 429/5xx/断网时永久占住整轮。失败题由 runner 记录，
+// 强基线可凭逐题 checkpoint 重启续跑。环境变量便于跑批按端点稳定性收紧超时与次数。
+function nonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} 必须是非负整数，收到：${raw}`)
+  return value
+}
+
+function positiveIntEnv(name: string, fallback: number): number {
+  const value = nonNegativeIntEnv(name, fallback)
+  if (value <= 0) throw new Error(`${name} 必须是正整数，收到：${value}`)
+  return value
+}
+
+const QA_RETRY_ATTEMPTS = nonNegativeIntEnv('BENCH_QA_RETRY_ATTEMPTS', 3)
+const EFFECTIVE_QA_REQUEST_TIMEOUT_MS = positiveIntEnv('BENCH_QA_REQUEST_TIMEOUT_MS', QA_REQUEST_TIMEOUT_MS)
+const retryLog = (event: { attempt: number; retryAttempts: number; delayMs: number; error: string }) => {
+  process.stderr.write(
+    `[LLM 重试 ${event.attempt}/${event.retryAttempts}] ${event.error}; ` +
+    `${Math.ceil(event.delayMs / 1000)} 秒后重试\n`,
+  )
+}
 
 function gitSha(): string {
   try {
@@ -163,13 +184,14 @@ for (const config of configs) {
       const client = createLlmClient({
         ...env,
         useCache: args.useCache,
-        timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : QA_REQUEST_TIMEOUT_MS,
+        timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS,
         retryAttempts: QA_RETRY_ATTEMPTS,
+        onRetry: retryLog,
         ...(args.mode === 'full-context' ? { maxTokens: FULL_CONTEXT_LIMITS.maxTokens } : {}),
       })
       // judge 只换模型，凭据与端点沿用主配置；缓存与主 client 共目录但 key 含模型名，互不污染
       const judgeClient = args.judge
-        ? createLlmClient({ ...env, model: judgeModel!, useCache: args.useCache, timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : QA_REQUEST_TIMEOUT_MS, retryAttempts: QA_RETRY_ATTEMPTS, ...(args.mode === 'full-context' ? { maxTokens: FULL_CONTEXT_LIMITS.maxTokens } : {}) })
+        ? createLlmClient({ ...env, model: judgeModel!, useCache: args.useCache, timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS, retryAttempts: QA_RETRY_ATTEMPTS, onRetry: retryLog, ...(args.mode === 'full-context' ? { maxTokens: FULL_CONTEXT_LIMITS.maxTokens } : {}) })
         : undefined
 
       process.stdout.write(`\n[QA] ${config.name}（${source}，${group.length} 篇）...\n`)
@@ -190,9 +212,25 @@ for (const config of configs) {
         : config.kind === 'traditional-rag'
           ? await runTraditionalRagQaTask({ ...taskArgs, config })
           : config.kind === 'hybrid-rerank'
-            ? await runHybridRerankQaTask({ ...taskArgs, config })
+            ? await runHybridRerankQaTask({
+              ...taskArgs,
+              config,
+              checkpointPath: join(cacheDir, `checkpoint-${source}-${configLabel(config)}.json`),
+              onProgress: event => process.stdout.write(
+                `[进度] ${config.name} ${event.processed}/${event.total}；` +
+                `成功 ${event.completed}，本轮失败 ${event.errors}；${event.status} ${event.sampleId}\n`,
+              ),
+            })
             : config.kind === 'long-section-rag'
-              ? await runLongSectionQaTask({ ...taskArgs, config })
+              ? await runLongSectionQaTask({
+                ...taskArgs,
+                config,
+                checkpointPath: join(cacheDir, `checkpoint-${source}-${configLabel(config)}.json`),
+                onProgress: event => process.stdout.write(
+                  `[进度] ${config.name} ${event.processed}/${event.total}；` +
+                  `成功 ${event.completed}，本轮失败 ${event.errors}；${event.status} ${event.sampleId}\n`,
+                ),
+              })
               : await runQaTask({ ...taskArgs, config })
       // --no-cache 当前只跳过读缓存，不覆写已有缓存文件（llmClient 待后续优化），如实记录口径
       result.meta.cacheMode = args.useCache ? 'normal' : 'bypass'

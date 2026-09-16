@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { runHybridRerankQaTask } from '../runner/hybridRerankQa'
 import { runLongSectionQaTask } from '../runner/longSectionQa'
 import type { LlmClient } from '../llmClient'
@@ -155,5 +158,45 @@ describe('long-section-rag runner', () => {
     })
     expect(result.errors.every(e => e.stage === 'retrieve' && e.message.includes('无法解析'))).toBe(true)
     expect(result.perSample).toHaveLength(0)
+  })
+
+  it('resumes completed questions from an atomic checkpoint', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strong-checkpoint-'))
+    const checkpointPath = join(dir, 'long.json')
+    try {
+      const firstCalls: string[] = []
+      const first = await runLongSectionQaTask({
+        samples: [sample], config: longConfig, client, systemPrompt: 's', gitSha: 'x', model: 'm', deps,
+        checkpointPath,
+        generateAnswer: async (_system, question) => {
+          firstCalls.push(question)
+          if (question === 'zeta') throw new Error('temporary failure')
+          return `ans:${question}`
+        },
+      })
+      expect(first.perSample.map(record => record.id)).toEqual(['q1'])
+      expect(first.errors).toHaveLength(1)
+
+      const resumedCalls: string[] = []
+      const progress: string[] = []
+      const resumed = await runLongSectionQaTask({
+        samples: [sample], config: longConfig, client, systemPrompt: 's', gitSha: 'x', model: 'm', deps,
+        checkpointPath,
+        onProgress: event => progress.push(`${event.status}:${event.sampleId}`),
+        generateAnswer: async (_system, question) => {
+          resumedCalls.push(question)
+          return `ans:${question}`
+        },
+      })
+      expect(firstCalls).toEqual(['alpha', 'zeta'])
+      expect(resumedCalls).toEqual(['zeta'])
+      expect(progress).toContain('resumed:q1')
+      expect(resumed.perSample.map(record => record.id)).toEqual(['q1', 'q2'])
+      expect(resumed.errors).toEqual([])
+      expect(resumed.meta.completed).toBe(2)
+      expect(resumed.meta.total).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

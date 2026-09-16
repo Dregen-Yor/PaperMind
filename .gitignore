@@ -35,6 +35,7 @@ Thumbs.db
 # Benchmark 产物
 bench/cache/
 bench/results/
+bench/minibatch/
 bench/datasets/qasper/qasper.jsonl
 bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/
