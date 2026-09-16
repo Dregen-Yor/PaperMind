@@ -1,5 +1,11 @@
-import { scoreAndSelect, type IndexNode, type RetrievalResult, type ScoreOptions } from './pageIndex'
+import { collectLeafNodes, scoreAndSelect, type IndexNode, type RetrievalResult, type ScoreOptions } from './pageIndex'
 import { rewriteQuery, type ChatTurn } from './queryRewrite'
+import {
+  routeWithSemanticTree,
+  type SemanticRouteDiagnostics,
+} from './semanticRoute'
+import type { EvidenceBlock } from './evidenceBlock'
+import type { SemanticTree } from './semanticTree'
 import type { ChatLLMFn, LLMFn } from './llm'
 
 /** 数学公式格式约束，追加在 system 提示词之后。 */
@@ -13,10 +19,30 @@ const REWRITE_HISTORY_WINDOW = 3
 /** 生成回答时携带的最近历史轮数（不含当前提问）。 */
 const GENERATE_HISTORY_WINDOW = 19
 
+/**
+ * 已构建好的轻量语义树索引（§4：语义树与原文证据块分离保存）。
+ * 树缺失或未就绪时该字段为 undefined，检索退回平面路径。
+ */
+export interface SemanticPaperIndex {
+  tree: SemanticTree
+  blocks: EvidenceBlock[]
+}
+
+/**
+ * 单篇论文的检索结果。走语义树路由时额外带 `semantic` 诊断，
+ * 评测据此统计 `treeUsed` / `treeDegraded` / `selectedNodeCount`（§11.4）。
+ */
+export type PipelineRetrieval = RetrievalResult & { semantic?: SemanticRouteDiagnostics }
+
 /** 已建好索引的单篇论文。 */
 export interface IndexedPaper {
   tree: IndexNode
   pages: string[]
+  /**
+   * 轻量语义树索引。提供时检索走单轮树路由（§9），否则走平面 scoreAndSelect。
+   * 两者消耗同样数量的串行 LLM 调用。
+   */
+  semantic?: SemanticPaperIndex
 }
 
 export interface RagOptions extends ScoreOptions {
@@ -49,8 +75,11 @@ export interface RagPipelineDeps {
 
 export interface RagResult {
   answer: string
-  /** 每篇论文一份检索结果，顺序与入参 papers 一致 */
-  retrievals: RetrievalResult[]
+  /**
+   * 每篇论文一份检索结果，顺序与入参 papers 一致。
+   * 走语义树路由的论文额外带 `semantic` 诊断字段（§11.4）。
+   */
+  retrievals: PipelineRetrieval[]
   /** 实际用于检索的查询（未改写时等于原始 query） */
   retrievalQuery: string
   /** 是否发生了查询改写 */
@@ -61,6 +90,8 @@ export interface RagResult {
   sources: string[]
   /** 本次问答实际发出的 LLM 请求数 */
   llmCalls: number
+  /** 本次检索是否至少有一篇论文走了轻量语义树路由 */
+  treeRouted: boolean
   /** Whether retrieval context was clipped to maxContextChars. */
   contextTruncated: boolean
   /** 本问热路径的时延分阶段口径 */
@@ -109,11 +140,21 @@ export async function runRagPipeline(
     rewritten = retrievalQuery !== query
   }
 
-  // Call 2（每篇论文，单叶节点时短路不发请求）：评分多选
-  const retrievals: RetrievalResult[] = []
+  // Call 2（每篇论文，单叶节点或单节点树时短路不发请求）：评分多选
+  const retrievals: PipelineRetrieval[] = []
+  let treeRouted = false
   if (!skipRetrieval) {
     for (const paper of papers) {
-      const result = await scoreAndSelect(paper.tree, paper.pages, retrievalQuery, llm, scoreOpts)
+      // 有语义树时整棵小树在一次判断里用掉，调用数与平面路径相同（§10.1）。
+      // 平面叶节点一并交给树路由打分：树取不到证据时才能在同一次调用里就地回落（§9）。
+      const result = paper.semantic
+        ? await routeWithSemanticTree(paper.semantic.tree, paper.semantic.blocks, retrievalQuery, llm, {
+            ...scoreOpts,
+            ...(maxContextChars !== undefined ? { maxContextChars } : {}),
+            flat: { leaves: collectLeafNodes(paper.tree), pages: paper.pages },
+          })
+        : await scoreAndSelect(paper.tree, paper.pages, retrievalQuery, llm, scoreOpts)
+      if (paper.semantic) treeRouted = true
       if (result.llmCalled) llmCalls++
       retrievals.push(result)
     }
@@ -151,5 +192,5 @@ export async function runRagPipeline(
     queryEndToEndLatencyMs: Math.max(0, now() - pipelineStartedAt),
   }
 
-  return { answer, retrievals, retrievalQuery, rewritten, context, sources, llmCalls, contextTruncated, timing }
+  return { answer, retrievals, retrievalQuery, rewritten, context, sources, llmCalls, treeRouted, contextTruncated, timing }
 }

@@ -42,6 +42,12 @@ const db = {
     get: (paperId: string) => ipcRenderer.invoke('index:get', paperId),
     set: (paperId: string, indexJson: string, pagesJson: string) => ipcRenderer.invoke('index:set', paperId, indexJson, pagesJson),
   },
+  tree: {
+    list: (filter?: unknown) => ipcRenderer.invoke('tree:list', filter),
+    get: (paperId: string) => ipcRenderer.invoke('tree:get', paperId),
+    set: (paperId: string, record: unknown) => ipcRenderer.invoke('tree:set', paperId, record),
+    remove: (paperId: string) => ipcRenderer.invoke('tree:remove', paperId),
+  },
 }
 
 contextBridge.exposeInMainWorld('db', db)

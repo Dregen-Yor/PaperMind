@@ -23,6 +23,11 @@ export function initDb() {
   if (!highlightCols.includes('start_offset')) db.exec('ALTER TABLE highlights ADD COLUMN start_offset INTEGER DEFAULT 0')
   if (!highlightCols.includes('end_offset')) db.exec('ALTER TABLE highlights ADD COLUMN end_offset INTEGER DEFAULT 0')
 
+  // 语义树建树配置指纹（2026-09-15）。旧记录留空串即可：空串永远不等于任何
+  // 真实指纹，那些树会被当作过期并重建，不需要回填。
+  const treeCols = (db.prepare('PRAGMA table_info(paper_trees)').all() as Array<{ name: string }>).map(c => c.name)
+  if (!treeCols.includes('build_config_hash')) db.exec("ALTER TABLE paper_trees ADD COLUMN build_config_hash TEXT DEFAULT ''")
+
   // Seed default knowledge base
   const count = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
   if (count === 0) {
@@ -198,6 +203,65 @@ export const indexApi = {
   },
 }
 
+// ---------- Paper Semantic Trees ----------
+// 轻量语义树（方案 2026-09-15）：tree_json 保存导航结构，blocks_json 保存原文证据块。
+// 建树元信息（模型 / 提示版本 / 指纹 / token / 时延）随行保存，供判断是否需要重建（§10.3）。
+function deserializeTree(row: any) {
+  return {
+    paperId: row.paper_id,
+    treeJson: row.tree_json,
+    blocksJson: row.blocks_json,
+    schemaVersion: row.schema_version,
+    promptVersion: row.prompt_version,
+    buildModel: row.build_model,
+    sourceHash: row.source_hash,
+    buildConfigHash: row.build_config_hash ?? '',
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    buildLatencyMs: row.build_latency_ms,
+    createdAt: row.created_at,
+  }
+}
+
+export const treeApi = {
+  /**
+   * 传 filter 时只返回「当前建树配置下可直接复用」的论文：
+   * 配置变过或结构过期的树不能在 UI 里报成可用（§10.3）。
+   * 只查 id，不把 tree_json 拖过 IPC。
+   */
+  list: (filter?: { schemaVersion?: number; buildConfigHash?: string }) => {
+    const rows = (filter
+      ? db.prepare('SELECT paper_id FROM paper_trees WHERE schema_version = ? AND build_config_hash = ?')
+          .all(filter.schemaVersion, filter.buildConfigHash)
+      : db.prepare('SELECT paper_id FROM paper_trees').all()) as any[]
+    return rows.map(r => r.paper_id as string)
+  },
+  get: (paperId: string) => {
+    const row = db.prepare('SELECT * FROM paper_trees WHERE paper_id = ?').get(paperId) as any
+    return row ? deserializeTree(row) : null
+  },
+  set: (paperId: string, record: any) => {
+    db.prepare(`INSERT INTO paper_trees
+      (paper_id, tree_json, blocks_json, schema_version, prompt_version, build_model,
+       source_hash, build_config_hash, input_tokens, output_tokens, build_latency_ms, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(paper_id) DO UPDATE SET
+        tree_json=excluded.tree_json, blocks_json=excluded.blocks_json,
+        schema_version=excluded.schema_version, prompt_version=excluded.prompt_version,
+        build_model=excluded.build_model, source_hash=excluded.source_hash,
+        build_config_hash=excluded.build_config_hash,
+        input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
+        build_latency_ms=excluded.build_latency_ms, created_at=excluded.created_at`)
+      .run(
+        paperId, record.treeJson, record.blocksJson, record.schemaVersion, record.promptVersion,
+        record.buildModel, record.sourceHash, record.buildConfigHash ?? '',
+        record.inputTokens ?? 0, record.outputTokens ?? 0,
+        record.buildLatencyMs ?? 0, Date.now(),
+      )
+  },
+  remove: (paperId: string) => db.prepare('DELETE FROM paper_trees WHERE paper_id = ?').run(paperId),
+}
+
 export function exportAll() {
   const paperRows = db.prepare('SELECT * FROM papers ORDER BY added_at DESC').all() as any[]
   const papers = paperRows.map(row => ({
@@ -212,6 +276,7 @@ export function exportAll() {
     conversations: chatApi.listConversations(),
     highlights: db.prepare('SELECT * FROM highlights').all(),
     paperIndexes: db.prepare('SELECT paper_id, index_json, pages_json FROM paper_indexes').all(),
+    paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
     settings: db.prepare('SELECT * FROM settings').all(),
   }
 }
@@ -232,6 +297,7 @@ export function importAll(data: any) {
   const conversations = Array.isArray(data.conversations) ? data.conversations : []
   const highlights = Array.isArray(data.highlights) ? data.highlights : []
   const indexes = Array.isArray(data.paperIndexes) ? data.paperIndexes : []
+  const trees = Array.isArray(data.paperTrees) ? data.paperTrees : []
   const settings = Array.isArray(data.settings) ? data.settings : []
 
   // 1) 先写回备份中的 PDF（幂等覆盖，不影响旧库）
@@ -243,7 +309,7 @@ export function importAll(data: any) {
 
   // 2) DB 事务：清空旧行并按依赖顺序写入
   const insert = db.transaction(() => {
-    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -278,6 +344,21 @@ export function importAll(data: any) {
     for (const ix of indexes) {
       db.prepare('INSERT INTO paper_indexes (paper_id, index_json, pages_json, created_at) VALUES (?, ?, ?, ?)')
         .run(ix.paper_id ?? ix.paperId, ix.index_json ?? ix.indexJson, ix.pages_json ?? ix.pagesJson, Date.now())
+    }
+
+    for (const t of trees) {
+      db.prepare(`INSERT INTO paper_trees
+        (paper_id, tree_json, blocks_json, schema_version, prompt_version, build_model,
+         source_hash, build_config_hash, input_tokens, output_tokens, build_latency_ms, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          t.paper_id ?? t.paperId, t.tree_json ?? t.treeJson, t.blocks_json ?? t.blocksJson,
+          t.schema_version ?? t.schemaVersion ?? 1, t.prompt_version ?? t.promptVersion ?? '',
+          t.build_model ?? t.buildModel ?? '', t.source_hash ?? t.sourceHash ?? '',
+          t.build_config_hash ?? t.buildConfigHash ?? '',
+          t.input_tokens ?? t.inputTokens ?? 0, t.output_tokens ?? t.outputTokens ?? 0,
+          t.build_latency_ms ?? t.buildLatencyMs ?? 0, t.created_at ?? t.createdAt ?? Date.now(),
+        )
     }
 
     for (const s of settings) {

@@ -3,6 +3,7 @@
 # electron/db/ — SQLite 数据层
 
 **变更记录**
+- 2026-09-15: 新增 `paper_trees` 表与 `treeApi`——轻量语义树的持久化（树 JSON + 原文证据块 JSON + schema/提示版本 + 建树模型 + 原文指纹 + token/时延），`exportAll`/`importAll` 同步纳入
 - 2026-08-02T15:49:42: 新建文档——建表 SQL、各 api 命名空间、序列化约定、PageIndex 索引存储
 
 ## 模块职责
@@ -31,6 +32,7 @@
 | `highlights` | `id` | `paper_id` FK→paper（CASCADE）、`page_num`、`color`、`note` |
 | `settings` | `key` | `value`（JSON 字符串，非空） |
 | `paper_indexes` | `paper_id` | FK→paper（CASCADE）、`index_json`、`pages_json`、`created_at` |
+| `paper_trees` | `paper_id` | FK→paper（CASCADE）、`tree_json`、`blocks_json`、`schema_version`、`prompt_version`、`build_model`、`source_hash`、`build_config_hash`、`input_tokens`、`output_tokens`、`build_latency_ms`、`created_at` |
 
 索引：`idx_papers_kb`、`idx_messages_conv`、`idx_highlights_paper`。
 
@@ -44,7 +46,8 @@
 | `highlightApi` | `listByPaper / create / remove` | 按 paper 查询 |
 | `settingsApi` | `get / set` | `set` 用 `INSERT ... ON CONFLICT(key) DO UPDATE`；值 `JSON.stringify`，读时 `JSON.parse` |
 | `indexApi` | `list / get / set` | PageIndex：`list` 返回已建索引的 `paper_id[]`；`get` 返回 `{ indexJson, pagesJson }`；`set` upsert |
-| （顶层） | `exportAll / clearAll` | 导出 kb+papers+conversations+settings；清空全部并重建默认 KB |
+| `treeApi` | `list / get / set / remove` | 轻量语义树：`list` 返回已建树的 `paper_id[]`，可传 `{ schemaVersion, buildConfigHash }` 只取当前构建配置下可复用的论文（只查 id，不把 `tree_json` 拖过 IPC）；`get` 经 `deserializeTree` 转 camelCase（去掉 `build_model` 等模型元数据外的列映射）；`set` upsert |
+| （顶层） | `exportAll / clearAll` | 导出 kb+papers+conversations+settings+paper_indexes+paper_trees；清空全部并重建默认 KB |
 
 ## 序列化约定
 
@@ -56,12 +59,14 @@
 
 - PDF 二进制**不入库**，仅 `papers.file_path` 指向 `userData/papers/<id>.pdf`；`readFile` 按需读盘转 base64
 - `paper_indexes.pages_json` 缓存逐页文本，`index_json` 缓存 `IndexNode` 树；`chat.ts` 的 `readPaperPages` 优先读此缓存，避免重复解析 PDF
-- `data:export` **不含** highlights 与 paper_indexes（仅 kb/papers/conversations/settings）
+- `data:export` **不含** highlights、paper_indexes 与 paper_trees（仅 kb/papers/conversations/settings）
+- `paper_trees.source_hash` 是原文指纹（FNV-1a），`build_config_hash` 是建树配置指纹（schema / 提示词 / 模型端点 / 分块与输入上限）。两者共同构成缓存键：只比原文会让提示词或模型的更新永远不生效（方案 §10.3）。`initDb()` 按 `PRAGMA table_info` 守卫 `ALTER TABLE` 补列，旧记录留空串——空串不等于任何真实指纹，那些树会被当作过期并在下次建树时重建，无需回填
 
 ## 相关文件
 
 - `electron/db/schema.ts` — `SCHEMA` 建表字符串
 - `electron/db/index.ts` — `initDb` + 全部 api 对象 + `exportAll`/`clearAll`
+- `src/utils/semanticTree.ts` / `src/utils/evidenceBlock.ts` — `tree_json` / `blocks_json` 的结构定义
 - 调用方：`electron/ipc.ts`（channel 映射）、`electron/preload.ts`（`window.db`）
 
 ## 常见问题

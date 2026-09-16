@@ -65,6 +65,24 @@ CREATE TABLE IF NOT EXISTS paper_indexes (
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
 );
 
+-- 轻量语义树索引（方案 2026-09-15 §10.3）：与 paper_indexes 分离存放。
+-- 树的导航元数据与原文证据块分区保存，树可以重建而原文不受影响（§4）。
+CREATE TABLE IF NOT EXISTS paper_trees (
+  paper_id         TEXT PRIMARY KEY,
+  tree_json        TEXT NOT NULL,
+  blocks_json      TEXT NOT NULL,
+  schema_version   INTEGER NOT NULL,
+  prompt_version   TEXT NOT NULL,
+  build_model      TEXT NOT NULL,
+  source_hash      TEXT NOT NULL,   -- pages_json 指纹：内容未变时复用已有树
+  build_config_hash TEXT DEFAULT '', -- 建树配置指纹（schema/提示词/模型/分块）：配置变了旧树必须失效
+  input_tokens     INTEGER DEFAULT 0,
+  output_tokens    INTEGER DEFAULT 0,
+  build_latency_ms INTEGER DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_papers_kb ON papers(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_paper ON highlights(paper_id);

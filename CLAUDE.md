@@ -1,6 +1,7 @@
 # PaperMind
 
 **变更记录**
+- 2026-09-15: 轻量语义树索引实验（分支 `exp/tree`）——新增原文证据块（`src/utils/evidenceBlock.ts`）、单次 LLM 调用建树（`src/utils/semanticTree.ts`）、单轮树路由与原文取证（`src/utils/semanticRoute.ts`，树节点与平面叶节点在同一次打分判断里评分，取证不足即就地回落平面，统一 24000 字符上下文预算）；`paper_trees` 表（含 `build_config_hash` 建树配置指纹）+ `tree` IPC 命名空间持久化；`useChatStore` 后台建树（默认开启，设置页可关，并提供「重建全部语义树」）；bench 新增 `semantic-tree` 配置、树诊断指标与 `npm run bench:trees` 人工结构检查
 - 2026-09-09: 移除 `pageindex-adapted` 基线——上游 PageIndex 适配（Python 桥）端到端吞吐过低（推理模型逐题 agentic 检索），决策放弃：删 `bench/adapters/pageindex/`、`runner/pageindexQa.ts`、配置校验与 `upstreamCommit` meta 透传；强基线组保留 `hybrid-rerank` / `long-section-rag`（均已完成 qasper 179 篇全量）
 - 2026-09-08: 强基线矩阵（bench）——新增 `hybrid-rerank`（BM25+BGE-M3→RRF→交叉编码器重排）与 `long-section-rag`（章节内连续阅读）两条可评测基线：`bench/src/baselines/` 原语、共享引擎 `strongBaselineQa.ts`、冻结 4096 上下文预算的严格配置校验、configs/README/CLAUDE.md 同步
 - 2026-09-04: 新增 `bench/` 评测套件（QA 检索/答案 + 摘要 benchmark，配置矩阵消融，Node CLI）；RAG 管线抽出为 `src/utils/ragPipeline.ts` 纯函数以供评测复用
@@ -24,7 +25,7 @@ Renderer Process (Vue 3)          Main Process (Node/Electron)
 │  Pinia Stores            │      │  electron/ipc.ts            │
 │  Element Plus UI         │◄────►│  electron/db/index.ts       │
 │  pdfjs-dist (PDF 渲染)   │ IPC  │  electron/db/schema.ts      │
-│  markdown-it + KaTeX     │      │  better-sqlite3（7 张表）    │
+│  markdown-it + KaTeX     │      │  better-sqlite3（8 张表）    │
 │  直接 fetch → LLM API    │      │  磁盘：papermind.db + papers/│
 │  直接 fetch → HF 摘要 API │      └─────────────────────────────┘
 └──────────────────────────┘
@@ -33,6 +34,7 @@ Renderer Process (Vue 3)          Main Process (Node/Electron)
 - `contextBridge` 将 `window.db` 注入渲染层，所有数据库操作通过 IPC 通道调用主进程（同步 better-sqlite3）。
 - LLM 请求与 Hugging Face 摘要请求由渲染层直接发出（fetch），**不经过主进程**；凭据存于 `settings` 表。
 - 论文导入后在后台构建 PageIndex 语义索引，序列化后存入 `paper_indexes` 表；对话检索时读取索引做评分多选（RAG）。
+- 索引完成后另起**后台任务**构建轻量语义树（整篇一次 LLM 调用），树与原文证据块存入 `paper_trees` 表。树只承担导航职责，最终回答仍回到原文证据块与原始页码；建树失败、开关关闭或树取证不足时完全回落平面检索。建树缓存同时看原文指纹与构建配置指纹（提示词 / 模型端点 / 分块参数），任一变化都会让旧树失效。
 
 ## 模块结构
 
@@ -64,12 +66,12 @@ graph TD
 | 模块 | 路径 | 职责 |
 |------|------|------|
 | 主进程 | `electron/` | Electron 入口、生命周期、外链拦截、IPC 注册 |
-| 数据层 | `electron/db/` | SQLite 建表（7 表）+ 全部 CRUD / 索引 / 导出 API |
+| 数据层 | `electron/db/` | SQLite 建表（8 表）+ 全部 CRUD / 索引 / 导出 API |
 | 应用入口 | `src/` | Vue 引导、App 布局、全局样式、路由/测试/类型汇总 |
 | 状态管理 | `src/stores/` | Pinia stores（论文/知识库、对话/多 LLM 配置/索引/摘要） |
 | 页面视图 | `src/views/` | 知识库、阅读器、对话、设置四个路由页面 |
 | 公共组件 | `src/components/` | PdfViewer、ChatPanel、ParamPanel |
-| 工具函数 | `src/utils/` | PDF 解析、PageIndex 检索、Markdown 渲染、摘要分块 |
+| 工具函数 | `src/utils/` | PDF 解析、PageIndex 检索、轻量语义树（证据块/建树/树路由）、Markdown 渲染、摘要分块 |
 | 路由 | `src/router/` | Vue Router hash 模式路由配置 |
 | 评测 | `bench/` | QA / 摘要 benchmark，配置矩阵消融，Node CLI |
 
@@ -93,6 +95,9 @@ npm run rebuild
 
 # 评测（需先配置 BENCH_* 环境变量，见 bench/README.md）
 npm run bench -- --task qa --dataset smoke --limit 5
+
+# 语义树结构人工检查（只建树、不跑问答，输出 Markdown 供逐层核对）
+npm run bench:trees -- --config semantic-tree --dataset qasper --limit 5 --out bench/results/trees.md
 ```
 
 构建产物：`dist/`（渲染层）、`dist-electron/`（主进程）、`release/`（安装包）。
@@ -138,6 +143,7 @@ npm run test:ui     # 浏览器 UI
 - **LLM 配置为多 profile**：`chat.ts` 维护 `profiles[]` + `chatProfileId` / `indexProfileId`；对话用 `chatProfile`，索引用 `indexProfile`；持久化键 `llm_profiles`、`llm_profile_chat`、`llm_profile_index`（旧单一 `llm_config` 会在 init 时迁移）
 - **对话主流程**在 `chat.ts` 的 `sendMessage`：先判 `/abstract` 命令（走 `generateAbstract` → Hugging Face），否则走 RAG 3-call（查询改写 `rewriteQuery`（有历史时）→ 评分多选 `scoreAndSelect` → 生成回答 `callLLM`）
 - **检索/索引逻辑**在 `src/utils/pageIndex.ts`：`buildPageIndex` 构建语义分块索引，`scoreAndSelect` 做评分多选（旧 `retrieve` 已删除）；索引经 `window.db.index.set` 持久化到 `paper_indexes` 表
+- **轻量语义树**（分支 `exp/tree`）在 `src/utils/evidenceBlock.ts` / `semanticTree.ts` / `semanticRoute.ts`：每篇论文**恰好一次** LLM 调用建树（≤16 节点、根外两层），提问时单轮路由回原文证据块取证——查询阶段串行调用数与平面 `scoreAndSelect` 相同（树节点与平面叶节点在同一次判断里打分，取证不足即就地用这批平面打分回落）；树存 `paper_trees`（经 `window.db.tree.*`），缓存键 = 原文指纹 + 构建配置指纹。开关 `treeEnabled` 默认开启，建树失败或关闭时完全回落平面路径
 - **摘要逻辑**在 `src/utils/abstractSummarizer.ts`：`splitAbstractText` 分块 + `summarizeAcademicText` 递归归约调用 T5 模型；需 `huggingface_token` 设置项
 - **消息渲染**用 `src/utils/markdown.ts` 的 `renderMarkdown`（markdown-it + texmath/KaTeX + DOMPurify 净化）；模型输出的 `\(...\)` / `\[...\]` 会被归一为 `$` 语法
 - PDF.js 使用兼容 Electron 31 的 legacy 构建；worker 使用相对路径 `./pdf.worker.min.mjs`（`public/` 目录），由 `vite.config.ts` 启动时从 `node_modules/pdfjs-dist/legacy/build/` 复制，兼容开发服务器与打包后的 `file://`，且离线可用

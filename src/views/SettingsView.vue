@@ -67,6 +67,40 @@
         </div>
       </section>
 
+      <!-- ── 语义树检索 ── -->
+      <section class="settings-card">
+        <h3>语义树检索</h3>
+        <p class="card-desc">
+          论文导入后在后台额外构建一棵轻量语义导航树（每篇论文一次模型调用）。
+          提问时先在树上做单轮路由，再回到原文证据块取证，不增加串行模型调用。
+          关闭后全部检索退回原有平面路径，问答功能不受影响。
+        </p>
+        <div class="setting-row">
+          <label>启用语义树</label>
+          <el-switch
+            v-model="treeEnabledLocal"
+            @change="onTreeEnabledChange"
+          />
+          <span class="card-desc inline-hint">
+            {{ treeReadyPapers.size }} 篇论文已有可用语义树
+          </span>
+        </div>
+        <div class="setting-row">
+          <el-button
+            data-test="rebuild-trees"
+            size="small"
+            :loading="rebuildingTrees"
+            @click="onRebuildTrees"
+          >
+            重建全部语义树
+          </el-button>
+          <span class="card-desc inline-hint">
+            索引模型、提示词或分块参数变更后，旧树会在下次建树时自动失效；
+            这里用于手动重来一遍（每篇论文一次模型调用，不重跑平面索引）。
+          </span>
+        </div>
+      </section>
+
       <!-- ── 论文摘要模型 ── -->
       <section class="settings-card">
         <h3>论文摘要模型</h3>
@@ -204,12 +238,15 @@ import { useChatStore, PROMPT_TEMPLATES, type LLMProfile } from '../stores/chat'
 import { storeToRefs } from 'pinia'
 
 const chatStore = useChatStore()
-const { profiles, chatProfileId, indexProfileId, abstractToken } = storeToRefs(chatStore)
+const { profiles, chatProfileId, indexProfileId, abstractToken, treeEnabled, treeReadyPapers } =
+  storeToRefs(chatStore)
 
 // 本地绑定，避免直接修改 store ref（select @change 时再写入）
 const chatProfileIdLocal = ref(chatProfileId.value)
 const indexProfileIdLocal = ref(indexProfileId.value)
 const abstractTokenLocal = ref(abstractToken.value)
+const treeEnabledLocal = ref(treeEnabled.value)
+const rebuildingTrees = ref(false)
 
 // ── Dialog state ──
 const dialogVisible = ref(false)
@@ -270,6 +307,40 @@ async function doRemove(id: string) {
 async function saveAbstractToken() {
   await chatStore.setAbstractToken(abstractTokenLocal.value)
   ElMessage.success('Hugging Face Token 已保存')
+}
+
+async function onTreeEnabledChange(value: string | number | boolean) {
+  await chatStore.setTreeEnabled(value === true)
+  ElMessage.success(treeEnabled.value ? '语义树检索已启用' : '语义树检索已关闭，检索回到平面路径')
+}
+
+async function onRebuildTrees() {
+  try {
+    await ElMessageBox.confirm(
+      '将为每篇已索引论文各发起一次模型调用重建语义树，是否继续？',
+      '重建语义树',
+      { type: 'warning' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  rebuildingTrees.value = true
+  try {
+    const { attempted, rebuilt, failed, skipped } = await chatStore.rebuildAllTrees()
+    // 「重建成 0 篇」有两种截然不同的原因，不能合并成一句话：
+    // 没有候选（跳过）与真的失败（网络/输出非法/输入超限）必须分开报
+    if (attempted > 0 && rebuilt === 0) {
+      ElMessage.error(`语义树重建失败（${failed}/${attempted} 篇）`)
+    } else if (failed > 0) {
+      ElMessage.warning(`已重建 ${rebuilt} 篇，${failed} 篇失败`)
+    } else if (rebuilt > 0) {
+      ElMessage.success(`已重建 ${rebuilt} 篇论文的语义树`)
+    } else {
+      ElMessage.info(skipped > 0 ? '没有可重建的论文（语义树已关闭，或正在建树中）' : '没有可重建的论文')
+    }
+  } finally {
+    rebuildingTrees.value = false
+  }
 }
 
 function onProviderChange() {
@@ -410,6 +481,8 @@ async function clearData() {
   margin-bottom: 18px;
 }
 .setting-row label { width: 80px; font-size: 13px; color: var(--text-secondary); flex-shrink: 0; }
+
+.card-desc.inline-hint { margin-bottom: 0; font-size: 12px; }
 
 .action-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .abstract-token-row { display: flex; gap: 8px; }

@@ -1,0 +1,18 @@
+{
+  "name": "semantic-tree",
+  "kind": "semantic-tree",
+  "matrix": {
+    "topK": [2],
+    "minScore": [4],
+    "chunkPages": [5],
+    "minSectionPages": [2],
+    "maxSectionPages": [12],
+    "maxContextChars": [24000],
+    "forceFixedChunk": [false],
+    "enableRewrite": [true]
+  },
+  "semanticTree": {
+    "evidence": { "targetChars": 2400, "maxChars": 3200, "minChars": 1600 },
+    "maxInputChars": 120000
+  }
+}
