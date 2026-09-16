@@ -5,6 +5,9 @@
  * 计划 §1.1 冻结契约：原始问题直投（无改写）、4096 token 预算、
  * 失败记入 errors 且不伪造上下文、index 阶段 LLM 调用恒为 0。
  */
+import { createHash } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, SampleError } from '../types'
 import type { PageSpan, ScoredPageSpan } from '../metrics/retrieval'
 import type { LlmClient } from '../llmClient'
@@ -57,15 +60,68 @@ export interface StrongBaselineQaArgs {
   meta: { retrievalAlgorithm: NonNullable<BenchResult['meta']['retrievalAlgorithm']>; baselineFamily: BenchResult['meta']['baselineFamily']; config: BenchResult['config'] }
   /** 测试注入，替换真实 LLM 生成 */
   generateAnswer?: (system: string, question: string) => Promise<string>
+  /** 强基线逐题断点；签名不匹配时忽略旧文件，避免串用数据集/模型/配置。 */
+  checkpointPath?: string
+  /** CLI 进度观察；测试默认静默。processed 包含成功与失败题。 */
+  onProgress?: (event: { processed: number; total: number; completed: number; errors: number; sampleId: string; status: 'completed' | 'failed' | 'resumed' }) => void
 }
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e)
 
+interface StrongCheckpoint {
+  version: 1
+  signature: string
+  startedAt: string
+  elapsedMs: number
+  records: PerSampleRecord[]
+  llmLatencies: number[]
+  cacheHits: number
+  cacheMisses: number
+}
+
+function checkpointSignature(args: StrongBaselineQaArgs): string {
+  const allQuestionIds = args.samples.flatMap(sample => sample.questions.map(question => question.id))
+  const questionIds = args.limit === undefined ? allQuestionIds : allQuestionIds.slice(0, args.limit)
+  return createHash('sha256').update(JSON.stringify({
+    version: 1,
+    model: args.model,
+    gitSha: args.gitSha,
+    config: args.meta.config,
+    questionIds,
+  })).digest('hex')
+}
+
+function readCheckpoint(path: string | undefined, signature: string): StrongCheckpoint | undefined {
+  if (!path) return undefined
+  try {
+    const checkpoint = JSON.parse(readFileSync(path, 'utf-8')) as StrongCheckpoint
+    if (checkpoint.version !== 1 || checkpoint.signature !== signature || !Array.isArray(checkpoint.records)) return undefined
+    return checkpoint
+  } catch {
+    return undefined
+  }
+}
+
+function writeCheckpoint(path: string | undefined, checkpoint: StrongCheckpoint) {
+  if (!path) return
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.tmp.${process.pid}`
+  writeFileSync(tmp, JSON.stringify(checkpoint, null, 2))
+  renameSync(tmp, path)
+}
+
 export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promise<BenchResult> {
   const now = args.now ?? Date.now
   const started = now()
-  const startedAt = new Date().toISOString()
-  const records: PerSampleRecord[] = []
+  const signature = checkpointSignature(args)
+  const checkpoint = readCheckpoint(args.checkpointPath, signature)
+  const startedAt = checkpoint?.startedAt ?? new Date().toISOString()
+  const elapsedBeforeResume = checkpoint?.elapsedMs ?? 0
+  const priorLlmLatencies = checkpoint?.llmLatencies ?? []
+  const priorCacheHits = checkpoint?.cacheHits ?? 0
+  const priorCacheMisses = checkpoint?.cacheMisses ?? 0
+  const records: PerSampleRecord[] = checkpoint ? [...checkpoint.records] : []
+  const completedIds = new Set(records.map(record => record.id))
   const perPaper: PaperTimingRecord[] = []
   const errors: SampleError[] = []
   let total = 0
@@ -79,6 +135,24 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
   const baseSystemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`
     : args.systemPrompt
+  const targetTotal = Math.min(
+    args.samples.reduce((sum, sample) => sum + sample.questions.length, 0),
+    args.limit ?? Number.POSITIVE_INFINITY,
+  )
+
+  const saveCheckpoint = () => {
+    const stats = args.client.stats()
+    writeCheckpoint(args.checkpointPath, {
+      version: 1,
+      signature,
+      startedAt,
+      elapsedMs: elapsedBeforeResume + Math.max(0, now() - started),
+      records,
+      llmLatencies: [...priorLlmLatencies, ...args.client.latencies()],
+      cacheHits: priorCacheHits + stats.hits,
+      cacheMisses: priorCacheMisses + stats.misses,
+    })
+  }
 
   for (const sample of args.samples) {
     if (args.limit !== undefined && total >= args.limit) break
@@ -91,6 +165,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
       perPaper.push({ paperId: sample.paperId, source: sample.source, pageCount: sample.pages.length, questionCount, indexBuildLatencyMs: Math.max(0, now() - indexStart), error: message(e) })
       for (const q of sample.questions.slice(0, questionCount)) errors.push({ sampleId: q.id, stage: 'index', message: message(e) })
       total += questionCount
+      saveCheckpoint()
       continue
     }
     perPaper.push({
@@ -108,6 +183,10 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
         if (question.evidenceMapping === 'mapped') mappedEvidenceQuestions++
         else if (question.evidenceMapping === 'ambiguous') ambiguousEvidenceQuestions++
         else unmappedEvidenceQuestions++
+      }
+      if (completedIds.has(question.id)) {
+        args.onProgress?.({ processed: total, total: targetTotal, completed: records.length, errors: errors.length, sampleId: question.id, status: 'resumed' })
+        continue
       }
       const queryStart = now()
       let stage: SampleError['stage'] = 'retrieve'
@@ -156,25 +235,33 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
         }
 
         records.push({ id: question.id, paperId: sample.paperId, source: sample.source, metrics, timing, retrievalQuery: question.question, selectedPages: expandPages(outcome.selected), evidencePages: question.evidencePages, answer })
+        completedIds.add(question.id)
+        args.onProgress?.({ processed: total, total: targetTotal, completed: records.length, errors: errors.length, sampleId: question.id, status: 'completed' })
       } catch (e) {
         errors.push({ sampleId: question.id, stage, message: message(e) })
+        args.onProgress?.({ processed: total, total: targetTotal, completed: records.length, errors: errors.length, sampleId: question.id, status: 'failed' })
+      } finally {
+        saveCheckpoint()
       }
     }
   }
 
   const finishedAt = new Date().toISOString()
-  const { hits, misses } = args.client.stats()
+  const currentStats = args.client.stats()
+  const hits = priorCacheHits + currentStats.hits
+  const misses = priorCacheMisses + currentStats.misses
+  const llmLatencies = [...priorLlmLatencies, ...args.client.latencies()]
   const values = {
     indexBuildLatency: perPaper.flatMap(p => p.indexBuildLatencyMs === undefined ? [] : [p.indexBuildLatencyMs]),
     retrievalLatency: records.map(r => r.timing!.retrievalLatencyMs),
     answerGenerationLatency: records.map(r => r.timing!.answerGenerationLatencyMs),
     queryEndToEndLatency: records.map(r => r.timing!.queryEndToEndLatencyMs),
-    llmNetworkLatency: args.client.latencies(),
+    llmNetworkLatency: llmLatencies,
   }
   const raw = aggregate(records)
   const counts = metricSampleCounts(records)
   for (const metric of ['evidenceRecall', 'evidenceHit', 'contextPrecision', 'mrr']) if (counts[metric] !== undefined) raw[`${metric}SampleCount`] = counts[metric]
-  const metrics = withPercentiles(withLatencyStats(renameQaRates(raw), args.client.latencies()), values)
+  const metrics = withPercentiles(withLatencyStats(renameQaRates(raw), llmLatencies), values)
   return {
     task: 'qa',
     config: args.meta.config,
@@ -185,7 +272,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
       gitSha: args.gitSha,
       startedAt,
       finishedAt,
-      runWallClockMs: Math.max(0, now() - started),
+      runWallClockMs: elapsedBeforeResume + Math.max(0, now() - started),
       cacheHits: hits,
       cacheMisses: misses,
       cacheHitRate: hits + misses ? hits / (hits + misses) : 0,

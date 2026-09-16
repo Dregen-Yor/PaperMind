@@ -4,8 +4,10 @@
  * 复用 src/utils/ 的生产实现（buildPageIndex / runRagPipeline），
  * 评测与应用跑同一份代码，这是 benchmark 有效性的前提。
  */
-import { buildPageIndex, type IndexNode, type IndexOptions } from '../../../src/utils/pageIndex'
+import { buildPageIndex, collectLeafNodes, type IndexNode, type IndexOptions } from '../../../src/utils/pageIndex'
 import { runRagPipeline, type RagOptions } from '../../../src/utils/ragPipeline'
+import type { SemanticTreeHook } from '../metrics/treeDiagnostics'
+import { summarizeTreeDiagnostics, treeRecordFields } from '../metrics/treeDiagnostics'
 import type { PaperMindConfig, BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, SampleError } from '../types'
 import type { LlmClient } from '../llmClient'
 import { computeRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
@@ -21,6 +23,7 @@ export interface QaTaskDeps {
   buildIndex?: typeof buildPageIndex
   runPipeline?: typeof runRagPipeline
 }
+
 
 export interface QaTaskArgs {
   samples: EvalSample[]
@@ -43,6 +46,11 @@ export interface QaTaskArgs {
   now?: () => number
   /** 注入替换生产实现，单测无需真实 LLM */
   deps?: QaTaskDeps
+  /**
+   * 提供时启用轻量语义树索引（§11.2 对照组的唯一变量）：
+   * 同一条生产 RAG 管线，只是每篇论文多挂一棵树。
+   */
+  semanticTree?: SemanticTreeHook
 }
 
 /** 只透传 config 中显式给出的分块字段，未设置的字段让生产代码用默认值。 */
@@ -131,8 +139,12 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     const indexFinishedMs = now()
     const indexClientAfter = client.stats()
     // 单节点文档（buildPageIndex 直接返回叶子）时叶节点是树本身，
-    // 传空数组会让 mrr 静默变 0
-    const leaves = tree.nodes.length > 0 ? tree.nodes : [tree]
+    // 与生产 pipeline 里的树路由用同一个取法，保证两边的候选集合一致
+    const leaves = collectLeafNodes(tree)
+
+    // 语义树在平面索引之后单独建：树的输入是原文证据块，与平面索引互不依赖。
+    // 建树失败只是没有树，本篇所有问题照常走平面路径（§8.2）
+    const treeInfo = args.semanticTree ? await args.semanticTree(sample) : undefined
 
     // questionCount 为本篇在 limit 约束下实际将执行的问题数，而不是原始总数
     const paperQuestionCount = countExecutedQuestions(sample, limit, total)
@@ -149,6 +161,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       indexCacheHits: indexClientAfter.hits - indexClientBefore.hits,
       indexCacheMisses: indexClientAfter.misses - indexClientBefore.misses,
       leafCount: leaves.length,
+      ...treeRecordFields(treeInfo),
     })
 
     for (const question of sample.questions) {
@@ -166,7 +179,11 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       try {
         const questionStartedMs = now()
         const result = await runPipeline(
-          [{ tree, pages: sample.pages }],
+          [{
+            tree,
+            pages: sample.pages,
+            ...(treeInfo?.semantic ? { semantic: treeInfo.semantic } : {}),
+          }],
           question.question,
           [],                       // 单轮评测，无历史；rewriteRate 因此在本评测中恒为 0
           client.complete,
@@ -185,10 +202,28 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
           leafCount: leaves.length,
           contextTruncated: result.contextTruncated ? 1 : 0,
         }
+        // 树诊断（§11.4）：本篇根本没建出树时记 treeDegraded，与「有树但没被选中」区分开。
+        // 降级有两种来源，漏掉任何一种都会把失败路由统计成成功：
+        // - 树取证不足（insufficientEvidence，已就地回落平面）
+        // - 打分本身失败（retrieval.degraded：JSON 非法 / 覆盖不全 / 请求异常）
+        if (treeInfo) {
+          const semantic = retrieval?.semantic
+          metrics.treeUsed = semantic ? 1 : 0
+          metrics.treeDegraded = semantic
+            ? (semantic.insufficientEvidence || retrieval?.degraded ? 1 : 0)
+            : 1
+          if (semantic) {
+            metrics.selectedNodeCount = semantic.selectedNodeCount
+            metrics.routableNodeCount = semantic.routableNodeCount
+          }
+        }
 
         if (retrieval) {
           const retrievalEligible = question.evidencePages.length > 0 && question.evidenceMapping !== 'ambiguous' && question.evidenceMapping !== 'unmapped'
           if (retrievalEligible) {
+            // scores 的 id 必须与 leaves 同坐标系，否则 MRR 会把分数映射到别的页区间。
+            // 树路由返回的 scores 已由 semanticRoute 保证只含平面叶节点下标（树域打分一律为空），
+            // 走平面回落时这两个集合本来就是同一批叶节点。
             Object.assign(metrics, computeRetrievalMetrics({
               selected: retrieval.selected,
               leaves,
@@ -291,11 +326,14 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   for (const metric of ['evidenceRecall', 'evidenceHit', 'contextPrecision', 'mrr']) {
     if (counts[metric] !== undefined) raw[`${metric}SampleCount`] = counts[metric]
   }
+  // 树诊断与检索质量指标合流进同一份 metrics，报表才能在同一行同时回答
+  // 「检索有没有变好」与「树是什么样、贵不贵、失败得多不多」（§阶段 E）
+  const treeAgg = summarizeTreeDiagnostics(perPaper)
   // 重命名 0/1 指标的聚合结果为「率」，让报表列名自解释；
   // withLatencyStats 追加既有 latencyP50/P95（与 llmNetworkLatency* 同值，deprecated 待移除）
   const metrics = withPercentiles(
-    withLatencyStats(renameQaRates(raw), client.latencies()),
-    collectTimingValues(perSample, perPaper, client),
+    { ...withLatencyStats(renameQaRates(raw), client.latencies()), ...treeAgg.metrics },
+    { ...collectTimingValues(perSample, perPaper, client), treeBuildLatency: treeAgg.latencies },
   )
 
   return {
@@ -315,7 +353,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       gitSha,
       refusalPatternVersion: REFUSAL_PATTERN_VERSION,
       rubricVersion: RUBRIC_VERSION,
-      retrievalAlgorithm: 'papermind-llm',
+      retrievalAlgorithm: args.semanticTree ? 'semantic-tree' : 'papermind-llm',
       completed: perSample.length,
       total,
       ...(sawUnanswerable

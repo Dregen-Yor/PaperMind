@@ -243,3 +243,48 @@ describe('renderReport 耗时与缓存', () => {
     expect(renderReport([summary])).not.toContain('### 耗时与缓存')
   })
 })
+
+describe('renderReport — 语义树诊断区块（§11.4）', () => {
+  const treeResult = (metrics: Record<string, number>) => result('semantic-tree', metrics, {
+    config: { name: 'semantic-tree', kind: 'semantic-tree' },
+    meta: {
+      model: 'gpt-4o', timestamp: '2026-09-15T12:00:00.000Z', gitSha: 'abc1234',
+      completed: 10, total: 10, retrievalAlgorithm: 'semantic-tree',
+    },
+  })
+
+  const treeMetrics = {
+    evidenceRecall: 0.9,
+    treeBuildFailureRate: 0.05,
+    avgTreeNodeCount: 12.5,
+    avgTreeDepth: 2,
+    avgTreeLevel1Count: 3.5,
+    avgTreeLevel2Count: 8,
+    treeEvidenceCoverage: 0.82,
+    treeSharedBlockRate: 0.16,
+    treeCrossSectionNodeRate: 0.33,
+    treeBuildLatencyP50Ms: 4200,
+    treeBuildLatencyP95Ms: 9000,
+    avgTreeBuildInputTokens: 41000,
+    avgTreeBuildOutputTokens: 1200,
+    treeUsedRate: 0.94,
+    treeDegradationRate: 0.06,
+    selectedNodeCount: 1.7,
+  }
+
+  it('有树指标时渲染诊断表，覆盖结构、成本与降级', () => {
+    const md = renderReport([treeResult(treeMetrics)])
+    expect(md).toContain('### 语义树诊断')
+    expect(md).toContain('12.500')          // 平均节点数
+    expect(md).toContain('5%')              // 建树失败率
+    expect(md).toContain('4.20 s / 9.00 s') // 建树 P50/P95
+    expect(md).toContain('0.820')           // 证据块覆盖率
+    expect(md).toContain('94%')             // 树使用率
+    expect(md).toContain('41.0k')           // 平均建树输入 token
+  })
+
+  it('无树结果时不渲染该区块（不污染既有基线报表）', () => {
+    const md = renderReport([result('default', { evidenceRecall: 0.7 })])
+    expect(md).not.toContain('### 语义树诊断')
+  })
+})

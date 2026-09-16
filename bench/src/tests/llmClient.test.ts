@@ -79,6 +79,24 @@ describe('recoverable request retries', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3)
   })
 
+  it('reports retry reason and bounded attempt information', async () => {
+    const onRetry = vi.fn()
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => 'rate limited' } as unknown as Response)
+      .mockResolvedValue(okResponse('recovered'))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir,
+      retryAttempts: 2, retryBaseDelayMs: 0, onRetry,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    await expect(client.complete('q')).resolves.toBe('recovered')
+    expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: 1,
+      retryAttempts: 2,
+      error: expect.stringContaining('429'),
+    }))
+  })
+
   it('does not retry non-recoverable authorization failures', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 401, text: async () => 'unauthorized' } as unknown as Response)
     const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, retryAttempts: 3, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })

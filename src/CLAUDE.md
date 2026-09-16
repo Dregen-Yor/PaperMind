@@ -3,6 +3,7 @@
 # src/ — 应用入口与全局配置
 
 **变更记录**
+- 2026-09-15: `types/db.d.ts` 增加 `tree` 命名空间与 `PaperTreeRecord`；测试目录扩充（证据块 / 语义树 / 树路由 / 管线接入 / 设置页开关）
 - 2026-08-02T15:49:42: 修正面包屑（root 为 `../CLAUDE.md`）；补记 `main.ts` 引导、新增 CSS 变量、router 拆分为独立模块、测试目录扩充至 6 文件、`src/types` 说明
 - 2026-07-19T14:49:32: UI 美化——主色改为青绿、侧栏/卡片/空态/对话气泡视觉升级
 - 2026-06-07T21:33:55: 初始化
@@ -83,20 +84,26 @@
 
 ## src/types/ — 类型声明
 
-- `db.d.ts` — `window.db` 的 `DbApi` 接口（含 `index` 命名空间），并 `declare global { interface Window { db: DbApi } }`
+- `db.d.ts` — `window.db` 的 `DbApi` 接口（含 `index` 与 `tree` 命名空间，后者配 `PaperTreeRecord` / `PaperTreeRecordInput`），并 `declare global { interface Window { db: DbApi } }`
 - `markdown-it-texmath.d.ts` — 为无类型的 `markdown-it-texmath` 提供 `TexmathOptions` 声明
 - `shims-vue.d.ts` — `*.vue`（`DefineComponent`）与 `*.png`（`string`）模块声明，支撑 `ChatPanel` 引入头像
 
-## src/tests/ — 测试目录（6 文件）
+## src/tests/ — 测试目录
 
 | 文件 | 覆盖 |
 |------|------|
-| `setup.ts` | 全局 `window.db` mock（含 `index` 命名空间），所有测试自动注入 |
+| `setup.ts` | 全局 `window.db` mock（含 `index` / `tree` 命名空间），所有测试自动注入 |
 | `paper.store.test.ts` | usePaperStore 7 用例 |
 | `chat.store.test.ts` | useChatStore 12 用例（含 profiles、RAG 次数、`/abstract`） |
 | `pdfUtils.test.ts` | base64ToUrl + detectSectionBoundaries + mergeSmallSections（11 用例） |
 | `pageIndex.test.ts` | scoreAndSelect + buildPageIndex（6 用例） |
 | `abstractSummarizer.test.ts` | splitAbstractText + summarizeAcademicText 递归（2 用例） |
 | `markdown.test.ts` | renderMarkdown 结构/安全/LaTeX（7 用例） |
+| `evidenceBlock.test.ts` | buildEvidenceBlocks 结构契约/原文正确性/分块无损（26 用例） |
+| `semanticTree.test.ts` | buildSemanticTree 单次调用、校验与诊断、建树配置指纹（54 用例） |
+| `semanticRoute.test.ts` | routeWithSemanticTree 单轮路由、原文取证、上下文预算与平面回落（35 用例） |
+| `ragPipelineSemantic.test.ts` | 树路由接入 runRagPipeline 的调用次数、就地回落与预算（11 用例） |
+| `semanticTreeStore.test.ts` | 开关、后台建树、缓存身份（原文+构建配置）、配置快照与切换竞态、就绪集合刷新、强制重建摘要、非法树回落（31 用例） |
+| `settingsViewTree.test.ts` | 设置页语义树开关与强制重建按钮及其成败提示（挂载 Element Plus，7 用例） |
 
 > 依赖 `pageIndex.ts` 的测试文件顶部需 `vi.mock('pdfjs-dist/legacy/build/pdf.mjs')`，否则 Node 环境缺 `DOMMatrix` 报错。

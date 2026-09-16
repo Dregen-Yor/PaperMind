@@ -53,6 +53,8 @@ export function renameQaRates(metrics: Record<string, number>): Record<string, n
     contextTruncated: 'contextTruncatedRate',
     partialScoreCoverage: 'partialScoreCoverageRate',
     llmCalls: 'llmCallsPerQuery',
+    treeUsed: 'treeUsedRate',
+    treeDegraded: 'treeDegradationRate',
   }
   return Object.fromEntries(Object.entries(metrics).map(([key, value]) => [names[key] ?? key, value]))
 }

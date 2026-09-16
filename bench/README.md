@@ -50,6 +50,9 @@ npm run bench -- --task qa --mode full-context             # 无检索全文直�
 npm run bench -- --task qa --config rag-bm25               # 传统 BM25 基线
 npm run bench -- --task qa --config hybrid-rerank          # 强基线：BM25+BGE-M3 → RRF → 交叉编码器重排
 npm run bench -- --task qa --config long-section-rag       # 强基线：BM25 锚点 + 章节内连续阅读
+npm run bench -- --task qa --config semantic-tree          # 语义树索引（同一条平面管线，仅多一棵树）
+npm run bench:trees -- --config semantic-tree --dataset qasper --limit 5 --out bench/results/trees.md
+                                                           # 只建树不答题：把树逐层打印供人工核对
 npm run bench -- --compare results/a.json results/b.json  # 对比两次结果
 ```
 
@@ -77,6 +80,14 @@ npm run bench -- --compare results/a.json results/b.json  # 对比两次结果
 
 `emptyRate` 高意味着 HF 端点在返回空串，而非模型质量差 —— 这两种情况必须分开看。注意：生产 `callAbstractModel` 对空返回会抛错，真实跑分时空串多落在 errors[] 而非 emptyRate；emptyRate 主要捕捉「返回了空白串」的场景。
 
+**语义树** —— `treeUsedRate`、`treeDegradationRate`、`selectedNodeCount`、`avgTreeNodeCount`、`avgTreeDepth`、`treeEvidenceCoverage`、`treeSharedBlockRate`、`treeCrossSectionNodeRate`、`treeBuildFailureRate`、`treeBuildLatencyP50/P95`、`avgTreeBuildInputTokens` / `avgTreeBuildOutputTokens`
+
+`treeUsedRate` 是「真的走了树路由」的样本占比，`treeDegradationRate` 是「没用上树**或**降级」的占比，两者互补但不严格相加（未建树的论文同时计入后者的分子与分母）。降级要把**两种来源都算上**：树取证不足（已在同一次打分调用里就地回落平面）与打分本身失败（`degraded`：JSON 非法 / 覆盖不全 / 请求异常）——只统计前者会把「路由失败但根节点碰巧有证据」记成成功。建树失败率的分母是**所有尝试过的论文**，而结构/成本的均值只在**建树成功**的论文上算——两种口径混在一个分母里会互相稀释，报表里因此分列；建树失败也会照记那次已发生的调用与 token（模型返回了、只是输出不可用），只有调用前就被拒才是零成本。`selectedNodeCount` 只在走了树路由的样本上有值，与平面路径的 `leafCount` **不同分母**，不可直接相减。
+
+**MRR 分母提醒**：`computeMrr(leaves, scores, …)` 里的 `leaves` 取自**平面** PageIndex，`scores[i].id` 必须与它同坐标系。树域打分因此一律不写出（树路由样本 `scores` 为空 → 自动从 MRR 分母缺席），只有真正走了平面回落才写回平面域打分。跨方法比较 MRR 前先确认分母一致。
+
+> 自动指标能回答「树有多大」，回答不了「树是不是把目录换了个说法」。后者只能人工看：跑 `npm run bench:trees`，把生成的 Markdown 大纲逐层读一遍（阶段 E 第 4 步）。
+
 **管线诊断** —— `degradedRate`、`rewriteRate`、`llmCallsPerQuery`、`leafCount`、`latencyP50` / `latencyP95`。`leafCount` 为均值（分布可由结果 JSON 的 perSample 导出 p50/p95）；`semanticChunkRate` 未实现（可由 perSample 的分块信息后续补充）
 
 ## 基线分组（2026-09-08 强基线矩阵）
@@ -86,6 +97,7 @@ npm run bench -- --compare results/a.json results/b.json  # 对比两次结果
 | Classic | full-context / jaccard / bm25 / cosine | 既有对照组，口径见上文 |
 | Strong | `hybrid-rerank`、`long-section-rag` | 强基线组（计划 §0）：成熟检索栈、结构化阅读 |
 | Primary | PaperMind 当前管线 | 被评测的生产方法 |
+| Tree | `semantic-tree` | Primary 的变体：同一条 `runRagPipeline` 管线，仅把平面 `scoreAndSelect` 换成单轮树路由——树的收益是唯一变量 |
 
 **强基线共同契约**（计划 `docs/superpowers/plans/2026-09-08-baseline-matrix.md` §1 冻结）：与所有基线同一份数据集/原文/原始问题/最终作答模型/4096 token 上下文预算/指标与错误口径；无查询改写，单个候选不截断，预算不足整段停止。
 
@@ -102,6 +114,7 @@ npm run bench -- --compare results/a.json results/b.json  # 对比两次结果
 - **ROUGE 分词复用 `normalizeAnswer`**（去冠词、无词干化），与官方 ROUGE-1.5.5 不一致，**不宜与论文发表的 ROUGE 分数直接对比**
 - **`rewriteRate` 恒为 0**：两个数据集都是单轮问答，无对话历史，`rewriteQuery` 不会触发。评测查询改写需要多轮数据集
 - **evidence 反查天花板约 92%**：图注类 evidence 存于 QASPER 独立字段，不在正文段落中——检索指标读数接近 92% 不代表检索已完美
+- **语义树结构在本数据集上只能部分可信**：QASPER 的伪页是按字符数切的，`detectSectionBoundaries` 的章节边界因此不准，证据块的边界与树的一/二级模块划分都受此影响；树的**规模与成本**指标（节点数、token、时延、失败率）可信，**结构语义**的可读性主要在冒烟集（真实 PDF）上评估。此外 `maxInputChars` 默认 12 万字符，超出即整篇 `input-too-large` 放弃建树（计入失败率），长论文上会看到失败的集中
 - **`unanswerableAccuracy` 有两种口径**：默认正则模式匹配（`REFUSAL_PATTERN_VERSION`），`--judge` 时用 judge 判定；judge 不可用时会回落到正则并如实记为 `pattern`。结果 JSON 的 `meta.unanswerableMethod` 标注了实际口径，跨口径的数字不可直接对比
 
 ## 缓存

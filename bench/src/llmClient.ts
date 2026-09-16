@@ -19,6 +19,8 @@ export interface LlmClientOptions {
   retryAttempts?: number
   /** 第一次重试的退避毫秒数；后续指数增长并加抖动。 */
   retryBaseDelayMs?: number
+  /** 可观测重试事件；不得包含凭据。CLI 用它输出错误、次数与退避时长。 */
+  onRetry?: (event: { attempt: number; retryAttempts: number; delayMs: number; error: string }) => void
   /** 注入 fetch，测试用 */
   fetchImpl?: typeof fetch
 }
@@ -181,6 +183,12 @@ export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
         if (attempt === retries || !isRetryable(error)) throw error
         // capped exponential backoff + deterministic bounded jitter prevents reconnect storms.
         const delay = Math.min(30_000, baseDelay * 2 ** attempt) + Math.floor(Math.random() * Math.max(1, baseDelay))
+        opts.onRetry?.({
+          attempt: attempt + 1,
+          retryAttempts: retries,
+          delayMs: delay,
+          error: retryErrorMessage(error),
+        })
         await sleep(delay)
       }
     }
@@ -255,6 +263,17 @@ function isRetryable(error: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function retryErrorMessage(error: unknown): string {
+  const primary = error instanceof Error ? error.message : String(error)
+  const cause = error && typeof error === 'object' ? (error as { cause?: unknown }).cause : undefined
+  if (!cause || typeof cause !== 'object') return primary
+  const detail = cause as { code?: unknown; message?: unknown }
+  const suffix = [detail.code, detail.message]
+    .filter(value => typeof value === 'string' && value.length > 0)
+    .join(': ')
+  return suffix ? `${primary} (${suffix})` : primary
 }
 
 /** 读缓存；文件损坏或结构不符（如 content 为 null）时返回 null，由调用方当 miss 处理。 */

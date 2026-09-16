@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
-import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
+import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, SemanticTreeParams, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
 import { benchPath } from './paths'
 
 const DEFAULT_CONFIG_DIR = () => benchPath(import.meta.url, '../configs/')
@@ -11,12 +11,18 @@ const positiveInt = (v: unknown): v is number => typeof v === 'number' && Number
 const nonNegative = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
 
 export function expandMatrix(file: ConfigFile): PaperMindConfig[] {
-  const keys = Object.keys(file.matrix) as Array<Exclude<keyof PaperMindConfig, 'name' | 'kind'>>
-  if (!keys.length) return [{ name: file.name }]
+  const keys = Object.keys(file.matrix) as Array<keyof NonNullable<ConfigFile['matrix']>>
+  // semanticTree 与「非默认 kind」不属于矩阵维度，但展开时必须原样带到每个配置上。
+  // 默认 kind（papermind）刻意不写回，保持既有配置对象形态不变
+  const carried: Partial<PaperMindConfig> = {
+    ...(file.kind && file.kind !== 'papermind' ? { kind: file.kind } : {}),
+    ...(file.semanticTree ? { semanticTree: file.semanticTree } : {}),
+  }
+  if (!keys.length) return [{ ...carried, name: file.name }]
   let combos: Array<Record<string, number | boolean>> = [{}]
   for (const key of keys) combos = combos.flatMap(combo => file.matrix[key]!.map(v => ({ ...combo, [key]: v })))
   const single = combos.length === 1
-  return combos.map(combo => ({ ...combo, name: single ? file.name : `${file.name}[${Object.entries(combo).map(([k, v]) => `${k}=${v}`).join(',')}]` })) as PaperMindConfig[]
+  return combos.map(combo => ({ ...carried, ...combo, name: single ? file.name : `${file.name}[${Object.entries(combo).map(([k, v]) => `${k}=${v}`).join(',')}]` })) as PaperMindConfig[]
 }
 
 function validateTraditional(raw: Record<string, unknown>, path: string): TraditionalRagConfig {
@@ -123,6 +129,29 @@ function validateLongSectionRag(raw: Record<string, unknown>, path: string): Lon
   }
 }
 
+/**
+ * 语义树建树参数（§5 分块 / §8.1 输入上限）。
+ * 分块口径直接决定树看到的证据块粒度，写错等于换了个实验，故逐项校验关系而非只查类型。
+ */
+function validateSemanticTreeParams(value: unknown, path: string): SemanticTreeParams {
+  if (!obj(value)) fail(path, 'semanticTree', '缺失或不是对象')
+  const raw = value as Record<string, unknown>
+  if (!positiveInt(raw.maxInputChars)) fail(path, 'semanticTree.maxInputChars', '必须为正整数')
+  if (!obj(raw.evidence)) fail(path, 'semanticTree.evidence', '缺失或不是对象')
+  const e = raw.evidence as Record<string, unknown>
+  if (!positiveInt(e.targetChars) || !positiveInt(e.maxChars) || !positiveInt(e.minChars)) {
+    fail(path, 'semanticTree.evidence', 'targetChars/maxChars/minChars 必须为正整数')
+  }
+  const targetChars = e.targetChars as number
+  const maxChars = e.maxChars as number
+  const minChars = e.minChars as number
+  // 三者乱序会产生「永远关闭不了的块」这类静默退化，配置期就拒绝
+  if (minChars > targetChars || targetChars > maxChars) {
+    fail(path, 'semanticTree.evidence', '必须满足 minChars ≤ targetChars ≤ maxChars')
+  }
+  return { evidence: { targetChars, maxChars, minChars }, maxInputChars: raw.maxInputChars as number }
+}
+
 function validatePaperMind(raw: Record<string, unknown>, path: string): ConfigFile {
   if (typeof raw.name !== 'string' || !raw.name) fail(path, 'name', '缺失或不是非空字符串')
   if (!obj(raw.matrix)) fail(path, 'matrix', '缺失或不是对象')
@@ -134,6 +163,14 @@ function validatePaperMind(raw: Record<string, unknown>, path: string): ConfigFi
     const list = values as unknown[]
     if (list.some(v => typeof v !== 'number' && typeof v !== 'boolean')) fail(path, `matrix.${key}`, '必须为 number/boolean 数组')
     if (!list.length) fail(path, `matrix.${key}`, '展开为 0 个配置')
+  }
+  if (raw.kind === 'semantic-tree') {
+    return {
+      name: raw.name as string,
+      kind: 'semantic-tree',
+      semanticTree: validateSemanticTreeParams(raw.semanticTree, path),
+      matrix: matrix as ConfigFile['matrix'],
+    }
   }
   return { name: raw.name as string, kind: 'papermind', matrix: matrix as ConfigFile['matrix'] }
 }
@@ -152,8 +189,10 @@ export async function loadConfigs(nameOrPath: string, configDir: string = DEFAUL
   try { raw = JSON.parse(await readFile(path, 'utf-8')) } catch (e) { throw new Error(`配置文件 ${path} 不是合法 JSON：${e instanceof Error ? e.message : String(e)}`) }
   if (!obj(raw)) fail(path, '根对象', '必须为对象')
   const record = raw as Record<string, unknown>
-  if (record.kind !== undefined && record.kind !== 'papermind' && !KIND_VALIDATORS[record.kind as string]) fail(path, 'kind', '未知')
-  if (record.kind && record.kind !== 'papermind') return [KIND_VALIDATORS[record.kind as string](record, path)]
+  // semantic-tree 走 PaperMind 的矩阵校验器（它只多一个建树参数块），其余 kind 走各自校验器
+  const isMatrixKind = record.kind === undefined || record.kind === 'papermind' || record.kind === 'semantic-tree'
+  if (!isMatrixKind && !KIND_VALIDATORS[record.kind as string]) fail(path, 'kind', '未知')
+  if (!isMatrixKind) return [KIND_VALIDATORS[record.kind as string](record, path)]
   return expandMatrix(validatePaperMind(record, path))
 }
 

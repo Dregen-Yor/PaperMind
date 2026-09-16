@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, exportAll, clearAll, importAll } from './db'
+import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, exportAll, clearAll, importAll } from './db'
 
 // Register all IPC handlers. Each channel maps to a db api call.
 // Renderer invokes via window.db.* (see preload.ts).
@@ -38,6 +38,11 @@ export function registerIpc() {
     'index:list': () => indexApi.list(),
     'index:get': (_e, paperId) => indexApi.get(paperId),
     'index:set': (_e, paperId, indexJson, pagesJson) => indexApi.set(paperId, indexJson, pagesJson),
+    // paper semantic trees (lightweight semantic index)
+    'tree:list': (_e, filter) => treeApi.list(filter),
+    'tree:get': (_e, paperId) => treeApi.get(paperId),
+    'tree:set': (_e, paperId, record) => treeApi.set(paperId, record),
+    'tree:remove': (_e, paperId) => treeApi.remove(paperId),
   }
 
   for (const [channel, fn] of Object.entries(handlers)) {

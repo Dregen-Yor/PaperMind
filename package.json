@@ -18,6 +18,7 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "bench": "tsx bench/src/cli.ts",
+    "bench:trees": "tsx bench/src/treeInspectCli.ts",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },
