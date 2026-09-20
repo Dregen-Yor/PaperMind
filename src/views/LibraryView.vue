@@ -87,7 +87,7 @@
               </div>
               <div class="card-content">
                 <h3 class="card-title font-display">{{ paper.title || paper.fileName }}</h3>
-                <p class="card-authors">{{ paper.authors?.join(', ') || '作者信息待补充' }}<span v-if="paper.year" class="card-year tabular-nums">{{ paper.year }}</span></p>
+                <p class="card-authors">{{ formatAuthors(paper.authors) }}<span v-if="paper.year" class="card-year tabular-nums">{{ paper.year }}</span></p>
                 <p v-if="paper.abstract" class="card-abstract">{{ paper.abstract }}</p>
                 <p v-else class="card-abstract no-abstract">打开论文，开始阅读与批注。</p>
                 <div class="card-footer">
@@ -207,7 +207,7 @@ import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from 
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
 import { parsePdfMeta } from '../utils/pdfUtils'
-import { filterLibraryPapers, type LibraryFilters } from '../utils/libraryFilters'
+import { filterLibraryPapers, formatAuthors, type LibraryFilters } from '../utils/libraryFilters'
 
 const store = usePaperStore()
 const chatStore = useChatStore()

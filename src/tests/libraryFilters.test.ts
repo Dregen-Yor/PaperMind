@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Paper } from '../stores/paper'
-import { filterLibraryPapers } from '../utils/libraryFilters'
+import { filterLibraryPapers, formatAuthors } from '../utils/libraryFilters'
 
 const papers: Paper[] = [
   { id: 'attention', title: 'Attention Is All You Need', authors: ['Ashish Vaswani'], abstract: '', year: 2017, tags: ['Transformer'], status: 'reading', fileName: 'attention.pdf', addedAt: 10, knowledgeBaseId: 'default' },
@@ -32,5 +32,18 @@ describe('library search and reading filters', () => {
     expect(filterLibraryPapers(papers, { query: 'no such paper' })).toEqual([])
     expect(filterLibraryPapers(papers, { query: ' ', status: 'all' })).toHaveLength(3)
     expect(filterLibraryPapers([], { status: 'reading' })).toEqual([])
+  })
+})
+
+describe('作者展示（#9）', () => {
+  it('4 位以内原样展示', () => {
+    expect(formatAuthors(['A', 'B'])).toBe('A, B')
+  })
+  it('超过 4 位截断为「等 N 位作者」', () => {
+    expect(formatAuthors(['A', 'B', 'C', 'D', 'E', 'F'])).toBe('A, B, C, D 等 2 位作者')
+  })
+  it('空/缺省回退占位文案', () => {
+    expect(formatAuthors([])).toBe('作者信息待补充')
+    expect(formatAuthors(undefined)).toBe('作者信息待补充')
   })
 })
