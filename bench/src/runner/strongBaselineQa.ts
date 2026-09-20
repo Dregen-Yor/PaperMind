@@ -12,16 +12,19 @@
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, SampleError } from '../types'
+import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, QueryTimeline, SampleError } from '../types'
 import type { PageSpan } from '../metrics/retrieval'
 import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
 import type { EvaluationContract } from '../evaluationContract'
-import type { LlmClient } from '../llmClient'
+import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { MATH_FORMAT_INSTRUCTION } from '../../../src/utils/ragPipeline'
 import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
 import { isRetrievalEligible } from '../evaluationContract'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
+import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
+import { startQueryTimeline } from '../speed/queryTimeline'
+import { assertStrongSpeedPolicy } from '../speed/policy'
 
 export interface StrongRetrievalOutcome {
   /**
@@ -100,6 +103,8 @@ export interface StrongBaselineQaArgs {
   generationSettings?: StrongGenerationSettings
   /** judge 是否启用；缺省按是否提供 judgeClient 判定。与 judgeModel 一并进入断点签名。 */
   judgeEnabled?: boolean
+  /** 提供时启用查询时间线与流式最终回答；speed 模式禁止任何断点路径或续跑条目。 */
+  speed?: SpeedRunnerOptions
 }
 
 /** 断点里逐题登记的条目：record 是已落盘的逐样本记录，pendingContext 标记「检索已产出、生成未完成」。 */
@@ -178,6 +183,11 @@ function writeCheckpoint(path: string | undefined, checkpoint: StrongCheckpoint)
 }
 
 export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promise<BenchResult> {
+  assertStrongSpeedPolicy({
+    speed: args.speed !== undefined,
+    checkpointPath: args.checkpointPath,
+    client: args.client as StreamingLlmClient,
+  })
   const now = args.now ?? Date.now
   const started = now()
   const signature = checkpointSignature(args)
@@ -271,6 +281,9 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
       }
       try {
         const existingEntry = entryById.get(question.id)
+        if (args.speed && existingEntry) {
+          throw new Error('speed mode cannot resume checkpoint entries')
+        }
         // 生成已完成、打分非 failed（completed 或 skipped）的题整套续跑跳过。
         // judgeStatus==='skipped' 表示 judge 未启用或该题不适用，必须保持跳过，不重放。
         if (existingEntry && existingEntry.record.generationStatus === 'completed' && existingEntry.record.judgeStatus !== 'failed') {
@@ -301,6 +314,12 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
 
         const eligible = isRetrievalEligible(question)
         const queryStart = now()
+        const speedClient = args.speed ? args.client as StreamingLlmClient : undefined
+        let timeline: QueryTimeline | undefined
+        if (args.speed && speedClient) {
+          const before = speedClient.tokenSnapshot()
+          timeline = startQueryTimeline(args.speed.now ?? now, before)
+        }
 
         // ---------- 检索阶段 ----------
         let context: MaterializedContext
@@ -317,6 +336,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
             const retrievalLatencyMs = Math.max(0, now() - retrievalStart)
             // 最终 token 预算由注入的物化器施加；上下文文本与页序同源产出（§3.1）
             context = args.materialize(outcome.contextGroups)
+            timeline?.markEvidenceReady()
             const metrics = record.metrics
             metrics.llmCalls = 1 + (outcome.retrievalLlmCalls ?? 0)
             metrics.rewrite = 0
@@ -350,6 +370,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
             entryById.set(record.id, entry)
             saveCheckpoint()
           } catch (e) {
+            if (timeline && speedClient) record.speed = timeline.partial(speedClient.tokenSnapshot())
             // 检索失败：有效题补四个零观测，整题记 retrieve 错误；不登记断点，续跑时整题重试
             skipSampleRecord(record, eligible, eligible ? 'failed' : 'ineligible')
             records.push(record)
@@ -363,20 +384,50 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
 
         // ---------- 生成阶段 ----------
         const systemPrompt = `${baseSystemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` + (context.text ? `\n\n参考内容：\n${context.text}` : '')
-        const generationStart = now()
         let answer: string
-        try {
-          answer = args.generateAnswer
-            ? await args.generateAnswer(systemPrompt, question.question)
-            : await args.client.chat([{ role: 'system', content: systemPrompt }, { role: 'user', content: question.question }])
-        } catch (e) {
-          // 生成失败不得丢弃已落盘的检索指标与断点：pendingContext 保留，续跑直接重跑生成
-          record.generationStatus = 'failed'
-          record.judgeStatus = 'skipped'
-          errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
-          continue
+        let answerGenerationLatencyMs: number
+        if (args.speed && timeline && speedClient) {
+          let generationStartedAt: number | undefined
+          let generationFinishedAt: number | undefined
+          try {
+            answer = await generateSpeedAnswer({
+              context: context.text,
+              question: question.question,
+              systemPrompt: baseSystemPrompt,
+              timeline,
+              client: speedClient,
+              record,
+              streamAnswer: args.speed.streamAnswer,
+              onStreamStarted: () => { generationStartedAt = now() },
+              onStreamCompleted: () => { generationFinishedAt = now() },
+            })
+          } catch (e) {
+            // 流异常由 adapter 附 partial；complete() 的时间线不变量失败则使整轮失效。
+            if (record.speed === undefined) throw e
+            record.generationStatus = 'failed'
+            record.judgeStatus = 'skipped'
+            errors.push({ sampleId: question.id, stage: 'stream', message: errorMessage(e) })
+            continue
+          }
+          if (generationStartedAt === undefined || generationFinishedAt === undefined) {
+            throw new Error('speed generation did not report legacy timing boundaries')
+          }
+          answerGenerationLatencyMs = Math.max(0, generationFinishedAt - generationStartedAt)
+        } else {
+          const generationStart = now()
+          try {
+            answer = args.generateAnswer
+              ? await args.generateAnswer(systemPrompt, question.question)
+              : await args.client.chat([{ role: 'system', content: systemPrompt }, { role: 'user', content: question.question }])
+          } catch (e) {
+            // 生成失败不得丢弃已落盘的检索指标与断点：pendingContext 保留，续跑直接重跑生成
+            record.generationStatus = 'failed'
+            record.judgeStatus = 'skipped'
+            errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
+            continue
+          }
+          answerGenerationLatencyMs = Math.max(0, now() - generationStart)
         }
-        const answerGenerationLatencyMs = Math.max(0, now() - generationStart)
         // 续跑路径的检索时延来自检索阶段写入记录的 metrics（检索本身不再重放）
         // queryEndToEndLatencyMs 只量本进程此次迭代：续跑题的检索发生在上一进程，端到端仅覆盖
         // 生成半程，故含续跑题的整轮 queryEndToEndLatencyP50/P95 天然偏低——这是「题内续跑」的
@@ -440,5 +491,6 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
     extraMeta: { baselineFamily: args.meta.baselineFamily, candidateGranularity: args.retrieval.granularity },
+    ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }

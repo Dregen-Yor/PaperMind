@@ -15,6 +15,8 @@ import { detectSections, type Section } from '../baselines/sections'
 import { expandWithinSection } from '../baselines/contiguous'
 import { benchPath } from '../paths'
 import { runStrongBaselineQaTask, type StrongBaselineQaArgs, type StrongRetrievalRuntime } from './strongBaselineQa'
+import type { StreamingLlmClient } from '../llmClient'
+import { assertStrongSpeedPolicy } from '../speed/policy'
 
 const modelCacheDir = () => benchPath(import.meta.url, '../../cache/models/')
 
@@ -63,6 +65,11 @@ export async function createLongSectionRetrieval(config: LongSectionRagConfig, d
 }
 
 export async function runLongSectionQaTask(args: LongSectionQaArgs): Promise<BenchResult> {
+  assertStrongSpeedPolicy({
+    speed: args.speed !== undefined,
+    checkpointPath: args.checkpointPath,
+    client: args.client as StreamingLlmClient,
+  })
   const retrieval = await createLongSectionRetrieval(args.config, args.deps)
   return runStrongBaselineQaTask({
     ...args,

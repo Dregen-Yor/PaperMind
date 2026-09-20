@@ -5,7 +5,7 @@ describe('parseArgs', () => {
   it('无参数时用默认值', () => {
     const a = parseArgs([])
     expect(a).toMatchObject({
-      task: 'all', dataset: 'all', config: 'default', judge: false, useCache: true,
+      task: 'all', dataset: 'all', config: 'default', judge: false, useCache: true, speed: false,
     })
     expect(a.limit).toBeUndefined()
   })
@@ -28,6 +28,18 @@ describe('parseArgs', () => {
     const a = parseArgs(['--judge', '--no-cache'])
     expect(a.judge).toBe(true)
     expect(a.useCache).toBe(false)
+  })
+
+  it('仅在显式选择 QA task 时解析 --speed', () => {
+    expect(parseArgs(['--task', 'qa', '--speed']).speed).toBe(true)
+  })
+
+  it.each([
+    ['没有显式 task', ['--speed']],
+    ['summary task', ['--task', 'summary', '--speed']],
+    ['all task', ['--task', 'all', '--speed']],
+  ])('--speed 拒绝 $0', (_label, argv) => {
+    expect(() => parseArgs(argv)).toThrow(/--speed.*--task qa/)
   })
 
   it('解析 --compare 的两个路径', () => {

@@ -1,5 +1,5 @@
-import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, SampleError, TraditionalRagConfig } from '../types'
-import type { LlmClient } from '../llmClient'
+import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, QueryTimeline, SampleError, TraditionalRagConfig } from '../types'
+import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
 import type { EvaluationContract } from '../evaluationContract'
 import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
@@ -15,6 +15,9 @@ import type { BenchChunk, BuiltRetriever, TextTokenizer } from '../traditionalRa
 import { benchPath } from '../paths'
 import { MATH_FORMAT_INSTRUCTION } from '../../../src/utils/ragPipeline'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
+import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
+import { startQueryTimeline } from '../speed/queryTimeline'
+import { assertSpeedAnswerClient } from '../speed/policy'
 
 export interface TraditionalRagQaArgs {
   samples: EvalSample[]; config: TraditionalRagConfig; client: LlmClient; systemPrompt: string; answerLanguageInstruction?: string; limit?: number; gitSha: string; model: string; judgeClient?: LlmClient; judgeModel?: string; now?: () => number
@@ -29,11 +32,14 @@ export interface TraditionalRagQaArgs {
    * 全量写入结果 meta，并据此校验「有效题数 == contextPageMrr 观测数」的固定分母不变量。
    */
   evaluationContract: EvaluationContract
+  /** 提供时启用查询时间线与流式最终回答；缺省路径保持现有注入与生成语义。 */
+  speed?: SpeedRunnerOptions
   deps?: { tokenizer?: TextTokenizer; buildRetriever?: (chunks: ReturnType<typeof chunkPages>, config: TraditionalRagConfig) => Promise<BuiltRetriever>; generateAnswer?: (system: string, question: string) => Promise<string> }
 }
 const modelCacheDir = () => benchPath(import.meta.url, '../../cache/models/')
 
 export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promise<BenchResult> {
+  if (args.speed) assertSpeedAnswerClient(args.client as StreamingLlmClient)
   const now = args.now ?? Date.now; const startedAt = new Date().toISOString(); const runStartedMs = now(); const contract = args.evaluationContract; const records: PerSampleRecord[] = []; const perPaper: PaperTimingRecord[] = []; const errors: SampleError[] = []; let total = 0
   // judge 阶段累计口径状态：sawUnanswerable 决定 meta.unanswerableMethod 是否落盘，
   // usedPatternFallback（judge 不可用/失败而回落正则）决定该标注为 judge 还是 pattern
@@ -82,6 +88,12 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
       const record = newSampleRecord(sample, question)
       // 先入列：后续任何阶段的失败只更新状态，生成异常不得把这条记录整条删掉（§6.3）
       records.push(record)
+      const speedClient = args.speed ? args.client as StreamingLlmClient : undefined
+      let timeline: QueryTimeline | undefined
+      if (args.speed && speedClient) {
+        const before = speedClient.tokenSnapshot()
+        timeline = startQueryTimeline(args.speed.now ?? now, before)
+      }
 
       // ---------- 检索阶段 ----------
       // 只取用 contextGroups（物化输入）与 selected（诊断包络）两样；selectContext 的
@@ -98,7 +110,9 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
         // 最终 token 预算由注入的物化器施加（Task 9 冻结）；上下文文本与页序同源产出，
         // 四个检索指标只认这份 pageOrder，禁止事后从候选包络反推（§3.1）
         context = args.materialize(contextGroups)
+        timeline?.markEvidenceReady()
       } catch (e) {
+        if (timeline && speedClient) record.speed = timeline.partial(speedClient.tokenSnapshot())
         skipSampleRecord(record, eligible, eligible ? 'failed' : 'ineligible')
         errors.push({ sampleId: question.id, stage: 'retrieve', message: errorMessage(e) })
         continue
@@ -124,22 +138,53 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
       // ---------- 生成阶段 ----------
       const systemPrompt = `${baseSystemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` + (context.text ? `\n\n参考内容：\n${context.text}` : '')
       let answer: string
-      try {
-        const generateStarted = now()
-        answer = generate ? await generate(systemPrompt, question.question) : await args.client.chat([{ role: 'system', content: systemPrompt }, { role: 'user', content: question.question }])
-        const timing: PipelineTiming = { queryRewriteLatencyMs: 0, retrievalLatencyMs, answerGenerationLatencyMs: Math.max(0, now() - generateStarted), queryEndToEndLatencyMs: Math.max(0, now() - queryStarted) }
-        record.timing = { ...timing }
-        metrics.queryRewriteLatencyMs = timing.queryRewriteLatencyMs
-        metrics.retrievalLatencyMs = timing.retrievalLatencyMs
-        metrics.answerGenerationLatencyMs = timing.answerGenerationLatencyMs
-        metrics.queryEndToEndLatencyMs = timing.queryEndToEndLatencyMs
-      } catch (e) {
-        // 生成失败不得丢弃已算出的检索指标：检索产物在上一阶段就已落盘（§6.2 / §6.3）
-        record.generationStatus = 'failed'
-        record.judgeStatus = 'skipped'
-        errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
-        continue
+      let answerGenerationLatencyMs: number
+      if (args.speed && timeline && speedClient) {
+        let generationStartedAt: number | undefined
+        let generationFinishedAt: number | undefined
+        try {
+          answer = await generateSpeedAnswer({
+            context: context.text,
+            question: question.question,
+            systemPrompt: baseSystemPrompt,
+            timeline,
+            client: speedClient,
+            record,
+            streamAnswer: args.speed.streamAnswer,
+            onStreamStarted: () => { generationStartedAt = now() },
+            onStreamCompleted: () => { generationFinishedAt = now() },
+          })
+        } catch (e) {
+          // 流异常由 adapter 附 partial；complete() 的时间线不变量失败则使整轮失效。
+          if (record.speed === undefined) throw e
+          record.generationStatus = 'failed'
+          record.judgeStatus = 'skipped'
+          errors.push({ sampleId: question.id, stage: 'stream', message: errorMessage(e) })
+          continue
+        }
+        if (generationStartedAt === undefined || generationFinishedAt === undefined) {
+          throw new Error('speed generation did not report legacy timing boundaries')
+        }
+        answerGenerationLatencyMs = Math.max(0, generationFinishedAt - generationStartedAt)
+      } else {
+        try {
+          const generateStarted = now()
+          answer = generate ? await generate(systemPrompt, question.question) : await args.client.chat([{ role: 'system', content: systemPrompt }, { role: 'user', content: question.question }])
+          answerGenerationLatencyMs = Math.max(0, now() - generateStarted)
+        } catch (e) {
+          // 生成失败不得丢弃已算出的检索指标：检索产物在上一阶段就已落盘（§6.2 / §6.3）
+          record.generationStatus = 'failed'
+          record.judgeStatus = 'skipped'
+          errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
+          continue
+        }
       }
+      const timing: PipelineTiming = { queryRewriteLatencyMs: 0, retrievalLatencyMs, answerGenerationLatencyMs, queryEndToEndLatencyMs: Math.max(0, now() - queryStarted) }
+      record.timing = { ...timing }
+      metrics.queryRewriteLatencyMs = timing.queryRewriteLatencyMs
+      metrics.retrievalLatencyMs = timing.retrievalLatencyMs
+      metrics.answerGenerationLatencyMs = timing.answerGenerationLatencyMs
+      metrics.queryEndToEndLatencyMs = timing.queryEndToEndLatencyMs
       record.generationStatus = 'completed'
       record.answer = answer
 
@@ -181,5 +226,6 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
     mappedEvidenceQuestions,
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
+    ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }

@@ -2,6 +2,7 @@ import type { BenchResult } from './types'
 import { REFUSAL_PATTERN_VERSION } from './metrics/answerF1'
 import { aggregate } from './metrics/aggregate'
 import { MRR_DEFINITION } from './evaluationContract'
+import { SPEED_DEFINITION, speedComparisonIssues } from './speed/contract'
 
 /** 各任务的主指标，用于在矩阵报表中标出最优行（legacy 历史表按此加粗）。 */
 export const PRIMARY_METRIC: Record<'qa' | 'summary', string> = {
@@ -67,6 +68,19 @@ export const TIMING_SECTION_METRICS: string[] = [
   'queryEndToEndLatencyP50Ms', 'queryEndToEndLatencyP95Ms',
   'llmNetworkLatencyP50Ms', 'llmNetworkLatencyP95Ms',
 ]
+
+/** Query-timeline headline values plus their supporting denominator diagnostics. */
+const SPEED_HEADLINE_METRICS = [
+  'evidenceReadyLatencyP50Ms', 'evidenceReadyLatencyP95Ms',
+  'timeToFirstTokenP50Ms', 'timeToFirstTokenP95Ms',
+  'fullAnswerLatencyP50Ms', 'fullAnswerLatencyP95Ms',
+  'avgOnlineTokensPerCompletedAnswer',
+] as const
+
+const SPEED_SECTION_METRICS = new Set<string>([
+  ...SPEED_HEADLINE_METRICS,
+  'speedSampleCount', 'onlineTokenSampleCount',
+])
 
 /** 「语义树诊断」表实际渲染的 15 个键（建树时延一项展开成 P50/P95 两列）。 */
 export const TREE_SECTION_METRICS: string[] = [
@@ -203,15 +217,19 @@ export function renderReport(
   }
   lines.push('')
 
+  const speedBlock = renderSpeedSection(results)
+  if (speedBlock.length > 0) lines.push(...speedBlock, '')
+
   const timingBlock = renderTimingSection(results)
   if (timingBlock.length > 0) lines.push(...timingBlock, '')
 
   const treeBlock = renderTreeSection(results)
   if (treeBlock.length > 0) lines.push(...treeBlock, '')
 
-  // 上面两个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
-  // 两个 length 守卫不是性能优化：区块根本没渲染时若仍然排除，这些数值会从整份报表里消失。
+  // 上面三个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
+  // length 守卫不是性能优化：区块根本没渲染时若仍然排除，这些数值会从整份报表里消失。
   const sharedSections = new Set<string>()
+  if (speedBlock.length > 0) for (const n of SPEED_SECTION_METRICS) sharedSections.add(n)
   if (timingBlock.length > 0) for (const n of TIMING_SECTION_METRICS) sharedSections.add(n)
   if (treeBlock.length > 0) for (const n of TREE_SECTION_METRICS) sharedSections.add(n)
 
@@ -452,8 +470,121 @@ function renderErrors(results: BenchResult[]): string[] {
   return lines
 }
 
+function isQueryTimelineResult(result: BenchResult): boolean {
+  return result.meta.speedDefinition === SPEED_DEFINITION
+}
+
+function isRetrievalSpeedResult(result: BenchResult): boolean {
+  return isQueryTimelineResult(result) && result.meta.mode !== 'full-context'
+}
+
+function speedValue(metrics: Record<string, number>, name: typeof SPEED_HEADLINE_METRICS[number]): string {
+  const value = metrics[name]
+  if (value === undefined) return '—'
+  return name === 'avgOnlineTokensPerCompletedAnswer' ? fmt(value) : fmtDuration(value)
+}
+
+function tokenAccountingComplete(result: BenchResult): boolean {
+  const completed = result.meta.completedSpeedQuestionCount
+  return completed !== undefined && result.metrics.onlineTokenSampleCount === completed
+}
+
+function renderSpeedTable(rows: BenchResult[], evidenceReady: boolean): string[] {
+  const lines = [
+    '| 方法 | Evidence Ready P50 | P95 | TTFT P50 | P95 | Full Answer P50 | P95 | Avg Online Tokens |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+  ]
+  for (const result of rows) {
+    const metrics = result.metrics
+    const evidenceP50 = evidenceReady ? speedValue(metrics, 'evidenceReadyLatencyP50Ms') : '—'
+    const evidenceP95 = evidenceReady ? speedValue(metrics, 'evidenceReadyLatencyP95Ms') : '—'
+    const tokens = tokenAccountingComplete(result)
+      ? speedValue(metrics, 'avgOnlineTokensPerCompletedAnswer')
+      : '—'
+    lines.push(
+      `| ${result.config.name} | ${evidenceP50} | ${evidenceP95} | `
+      + `${speedValue(metrics, 'timeToFirstTokenP50Ms')} | ${speedValue(metrics, 'timeToFirstTokenP95Ms')} | `
+      + `${speedValue(metrics, 'fullAnswerLatencyP50Ms')} | ${speedValue(metrics, 'fullAnswerLatencyP95Ms')} | ${tokens} |`,
+    )
+  }
+  return lines
+}
+
+function speedFailureCounts(result: BenchResult): {
+  retrieval: number
+  generation: number
+  stream: number
+  judge: number
+} {
+  const count = (stage: string) => result.errors.filter(error => error.stage === stage).length
+  const judgeFailures = new Set(
+    result.errors.filter(error => error.stage === 'judge').map(error => error.sampleId),
+  )
+  for (const record of result.perSample) {
+    if (record.judgeStatus === 'failed') judgeFailures.add(record.id)
+  }
+  return {
+    retrieval: count('retrieve'),
+    generation: count('generate'),
+    stream: count('stream'),
+    judge: judgeFailures.size,
+  }
+}
+
+/** Fixed query-timeline headline tables plus supporting counts kept outside the seven public values. */
+function renderSpeedSection(results: BenchResult[]): string[] {
+  const current = results.filter(isQueryTimelineResult)
+  if (current.length === 0) return []
+
+  const retrievalRows = current.filter(isRetrievalSpeedResult)
+  const ceilingRows = current.filter(result => result.meta.mode === 'full-context')
+  const lines: string[] = []
+
+  if (retrievalRows.length > 0) {
+    lines.push('### 检索方法速度（query-timeline-v1）')
+    lines.push('')
+    lines.push(...renderSpeedTable(retrievalRows, true))
+    lines.push('')
+  }
+
+  if (ceilingRows.length > 0) {
+    lines.push('### 生成上限速度（query-timeline-v1）')
+    lines.push('')
+    lines.push('> full-context 只表示生成上限，Evidence Ready 不适用；不参与检索方法速度排名或 delta。')
+    lines.push('')
+    lines.push(...renderSpeedTable(ceilingRows, false))
+    lines.push('')
+  }
+
+  lines.push('### Query-timeline 支持计数与失败诊断')
+  lines.push('')
+  lines.push('| 方法 | Speed 样本 | Completed 契约 | Token 完整 | Retrieval 失败 | Generation 失败 | Stream 失败 | Judge 失败 |')
+  lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+  for (const result of current) {
+    const completed = result.meta.completedSpeedQuestionCount
+    const speedSamples = result.metrics.speedSampleCount
+    const tokenSamples = result.metrics.onlineTokenSampleCount
+    const failures = speedFailureCounts(result)
+    lines.push(
+      `| ${result.config.name} | ${speedSamples ?? '—'} | ${completed ?? '—'} | `
+      + `${tokenSamples ?? '—'}/${completed ?? '—'} | ${failures.retrieval} | ${failures.generation} | `
+      + `${failures.stream} | ${failures.judge} |`,
+    )
+  }
+  const incomplete = current.filter(result => (
+    !tokenAccountingComplete(result)
+    || result.metrics.avgOnlineTokensPerCompletedAnswer === undefined
+  ))
+  for (const result of incomplete) {
+    const completed = result.meta.completedSpeedQuestionCount ?? '—'
+    const tokenSamples = result.metrics.onlineTokenSampleCount ?? '—'
+    lines.push(`> - **${result.config.name}**：token accounting 不完整（${tokenSamples}/${completed}），Avg Online Tokens 显示 —。`)
+  }
+  return lines
+}
+
 /**
- * 「耗时与缓存」区块：单结果与矩阵结果都必须输出。
+ * 「详细耗时与缓存诊断（Legacy timing）」区块：单结果与矩阵结果都必须输出。
  * 字段缺失或无完成题时渲染「—」，防止 0 ms 被误读为极速完成。
  */
 function renderTimingSection(results: BenchResult[]): string[] {
@@ -461,7 +592,12 @@ function renderTimingSection(results: BenchResult[]): string[] {
   if (!results.some(r => r.meta.startedAt && r.meta.finishedAt)) return []
 
   const lines: string[] = []
-  lines.push('### 耗时与缓存')
+  lines.push('### 详细耗时与缓存诊断（Legacy timing）')
+  lines.push('')
+  lines.push('> 本区块保留 index / retrieval / generation / end-to-end / network 旧时延与 wall-clock 诊断，不作为 query-timeline 速度主指标。')
+  if (results.some(result => result.meta.speedDefinition !== SPEED_DEFINITION)) {
+    lines.push('> 缺少 `speedDefinition: \'query-timeline-v1\'` 的结果只在 Legacy timing / 诊断区域读取，不进入速度主表或 delta。')
+  }
   lines.push('')
 
   for (const r of results) {
@@ -560,6 +696,71 @@ function comparisonMetricLabel(name: string): string {
   return name === 'contextPageMrr' ? CONTEXT_PAGE_MRR_LABEL : name
 }
 
+const SPEED_COMPARISON_ROWS: Array<{
+  name: typeof SPEED_HEADLINE_METRICS[number]
+  label: string
+  duration: boolean
+}> = [
+  { name: 'evidenceReadyLatencyP50Ms', label: 'Evidence Ready P50', duration: true },
+  { name: 'evidenceReadyLatencyP95Ms', label: 'Evidence Ready P95', duration: true },
+  { name: 'timeToFirstTokenP50Ms', label: 'TTFT P50', duration: true },
+  { name: 'timeToFirstTokenP95Ms', label: 'TTFT P95', duration: true },
+  { name: 'fullAnswerLatencyP50Ms', label: 'Full Answer P50', duration: true },
+  { name: 'fullAnswerLatencyP95Ms', label: 'Full Answer P95', duration: true },
+  { name: 'avgOnlineTokensPerCompletedAnswer', label: 'Avg Online Tokens', duration: false },
+]
+
+function tokenComparisonIssues(result: BenchResult): string[] {
+  const completed = result.meta.completedSpeedQuestionCount
+  const tokenSamples = result.metrics.onlineTokenSampleCount
+  if (completed === undefined) return [`${result.config.name} completedSpeedQuestionCount 缺失`]
+  if (tokenSamples === undefined) return [`${result.config.name} onlineTokenSampleCount 缺失`]
+  if (tokenSamples !== completed) return [`${result.config.name} token accounting 不完整（${tokenSamples}/${completed}）`]
+  if (result.metrics.avgOnlineTokensPerCompletedAnswer === undefined) {
+    return [`${result.config.name} Avg Online Tokens 缺失`]
+  }
+  return []
+}
+
+function comparisonSpeedValue(value: number | undefined, duration: boolean): string {
+  if (value === undefined) return '—'
+  return duration ? fmtDuration(value) : fmt(value)
+}
+
+function comparisonSpeedDelta(delta: number, duration: boolean): string {
+  const value = `${delta >= 0 ? '+' : ''}${fmt(delta)}`
+  return duration ? `${value} ms` : value
+}
+
+function renderSpeedComparison(a: BenchResult, b: BenchResult): string[] {
+  const issues = speedComparisonIssues(a, b)
+  const tokenIssues = [...tokenComparisonIssues(a), ...tokenComparisonIssues(b)]
+  const lines: string[] = ['### Query-timeline 速度对比', '']
+
+  if (issues.length > 0) {
+    lines.push('> **速度不可比较**：以下 query-timeline 身份或 completed cohort 条件不满足，七个速度 delta 均不输出。')
+    for (const issue of issues) lines.push(`> - ${issue}`)
+    lines.push('')
+  }
+  lines.push('| 指标 | A | B | 差值（B - A） |')
+  lines.push('| --- | ---: | ---: | ---: |')
+  for (const row of SPEED_COMPARISON_ROWS) {
+    const va = a.metrics[row.name]
+    const vb = b.metrics[row.name]
+    const tokenSuppressed = row.name === 'avgOnlineTokensPerCompletedAnswer' && tokenIssues.length > 0
+    const delta = issues.length > 0 || tokenSuppressed || va === undefined || vb === undefined
+      ? '—'
+      : comparisonSpeedDelta(vb - va, row.duration)
+    lines.push(`| ${row.label} | ${comparisonSpeedValue(va, row.duration)} | ${comparisonSpeedValue(vb, row.duration)} | ${delta} |`)
+  }
+  if (issues.length === 0 && tokenIssues.length > 0) {
+    lines.push('')
+    lines.push('> token accounting 不完整，仅抑制 Avg Online Tokens delta；六个时间 delta 仍按 query-timeline 门禁独立计算。')
+    for (const issue of tokenIssues) lines.push(`> - ${issue}`)
+  }
+  return lines
+}
+
 /**
  * 横向比较门禁（§8）：数据集指纹、有效题集合哈希、指标版本、MRR 定义、上下文预算、
  * tokenizer 模型与 revision、evidence 映射版本全部一致，且两侧都声明具备检索比较资格、
@@ -602,7 +803,7 @@ export function retrievalComparisonIssues(a: BenchResult, b: BenchResult): strin
 export function renderComparison(a: BenchResult, b: BenchResult): string {
   const issues = retrievalComparisonIssues(a, b)
   const gated = issues.length > 0
-  const names = collectMetricNames([a, b])
+  const names = collectMetricNames([a, b]).filter(name => !SPEED_SECTION_METRICS.has(name))
   const lines: string[] = []
   lines.push(`## 结果对比：${a.config.name} → ${b.config.name}`)
   lines.push('')
@@ -611,6 +812,21 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
   lines.push(`- B：\`${b.meta.gitSha}\` @ ${b.meta.timestamp}（完成 ${b.meta.completed}/${b.meta.total}）`)
   lines.push(`  - mode：\`${b.meta.mode ?? 'rag'}\`；检索：\`${b.meta.retrievalAlgorithm ?? '—'}\``)
   lines.push('')
+
+  if (isRetrievalSpeedResult(a) && isRetrievalSpeedResult(b)) {
+    lines.push(...renderSpeedComparison(a, b))
+    lines.push('')
+  } else if ([a, b].some(result => (
+    result.meta.speedDefinition !== undefined
+    || Object.keys(result.metrics).some(name => SPEED_SECTION_METRICS.has(name))
+  ))) {
+    if (!isQueryTimelineResult(a) || !isQueryTimelineResult(b)) {
+      lines.push('> Legacy timing 不进入 query-timeline 速度 delta；两侧都必须声明 `speedDefinition: \'query-timeline-v1\'`。')
+    } else {
+      lines.push('> full-context 是独立生成上限，不进入检索方法的 query-timeline 速度 delta。')
+    }
+    lines.push('')
+  }
   if (gated) {
     lines.push('> **不可比较**：以下身份或分母条件不满足，受控检索指标不输出差值（§8）。')
     for (const issue of issues) lines.push(`> - ${issue}`)
@@ -629,7 +845,7 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
     lines.push(`| ${comparisonMetricLabel(name)} | ${va !== undefined ? fmt(va) : '—'} | ${vb !== undefined ? fmt(vb) : '—'} | ${delta} |`)
   }
   lines.push('')
-  lines.push('> 时延字段（`*Latency*Ms`）越低越好，其余质量指标越高越好。')
+  lines.push('> Query-timeline 主指标中 Evidence Ready、TTFT、Full Answer 与 Avg Online Tokens 均为越低越好；详细/Legacy 时延字段（`*Latency*Ms`）也越低越好；质量指标越高越好。')
   // 门禁通过时计数行仍然印「—」，不解释的话会被读成渲染 bug
   if (hasCountRow) {
     lines.push('>')

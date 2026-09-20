@@ -5,7 +5,7 @@ import type { RagOptions } from '../../src/utils/ragPipeline'
 export type SampleSource = 'qasper' | 'smoke'
 
 /** 失败阶段，用于区分「网络问题」与「代码问题」 */
-export type SampleStage = 'load' | 'index' | 'retrieve' | 'generate' | 'summarize' | 'judge'
+export type SampleStage = 'load' | 'index' | 'retrieve' | 'generate' | 'stream' | 'summarize' | 'judge'
 
 /** 单个问答样本。evidencePages 为 0-based inclusive 页号。 */
 export interface QaQuestion {
@@ -135,6 +135,28 @@ export interface PipelineTiming {
   queryEndToEndLatencyMs: number
 }
 
+/** Cumulative provider usage at a query timeline boundary. */
+export interface TokenSnapshot {
+  totalTokens: number
+  incompleteRequestCount: number
+}
+
+/** Per-query speed observations. Missing milestones represent an incomplete query. */
+export interface QuerySpeedRecord {
+  evidenceReadyLatencyMs?: number
+  timeToFirstTokenMs?: number
+  fullAnswerLatencyMs?: number
+  onlineTokenCount?: number
+  tokenAccountingComplete: boolean
+}
+
+export interface QueryTimeline {
+  markEvidenceReady(): void
+  onVisibleText(delta: string): void
+  complete(readAfter: () => TokenSnapshot, evidenceRequired?: boolean): QuerySpeedRecord
+  partial(after: TokenSnapshot): QuerySpeedRecord
+}
+
 /** 一篇论文的索引成本记录。索引失败时 error 与已消耗的索引时长/缓存差值仍记录，leafCount 不写。 */
 export interface PaperTimingRecord {
   paperId: string
@@ -177,6 +199,8 @@ export interface PerSampleRecord {
   metrics: Record<string, number>
   /** 本问热路径时延（仅 QA，失败样本不写） */
   timing?: PipelineTiming
+  /** Query-timeline speed diagnostics (opt-in speed benchmark only). */
+  speed?: QuerySpeedRecord
   /** QA 专有 */
   retrievalQuery?: string
   /**
@@ -257,10 +281,25 @@ export interface BenchResult {
     contextTokenizerRevision?: string
     evidenceMappingVersion?: string
     datasetFingerprint?: string
+    executedQuestionIdsHash?: string
     eligibleRetrievalQuestionIdsHash?: string
     eligibleRetrievalQuestionCount?: number
     comparisonEligible?: boolean
     comparisonIneligibleReason?: string
+    /** Query-timeline speed benchmark contract fields. */
+    speedMetricSchemaVersion?: 1
+    speedDefinition?: 'query-timeline-v1'
+    completedSpeedQuestionIdsHash?: string
+    completedSpeedQuestionCount?: number
+    streaming?: true
+    llmCacheEnabled?: false
+    queryConcurrency?: 1
+    retryAttempts?: number
+    answerModelIdentity?: string
+    answerFramingIdentityHash?: string
+    endpointIdentity?: string
+    generationSettingsHash?: string
+    executionEnvironmentFingerprint?: string
   }
   metrics: Record<string, number>
   perSample: PerSampleRecord[]

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { EvalSample } from '../types'
+import type { StreamingLlmClient } from '../llmClient'
+import type { SpeedRunContract } from '../speed/contract'
 import type { IndexNode } from '../../../src/utils/pageIndex'
 import type { PipelineRetrieval, RagGenerationStage, RagRetrievalStage } from '../../../src/utils/ragPipeline'
 import type { QaTaskArgs, QaTaskDeps } from '../runner/qa'
@@ -19,7 +21,8 @@ const {
   CONTEXT_TOKENIZER_REVISION,
 } = await import('../evaluationContract')
 const { materializeContext } = await import('../../../src/utils/contextTrace')
-const { MATH_FORMAT_INSTRUCTION } = await import('../../../src/utils/ragPipeline')
+const ragPipeline = await import('../../../src/utils/ragPipeline')
+const { MATH_FORMAT_INSTRUCTION } = ragPipeline
 // token 估算口径不在此处复写第二份：跟着生产实现走，改了公式测试也跟着改
 const { estimateTokens } = await import('../metrics/retrieval')
 
@@ -50,6 +53,47 @@ const fakeClient = {
   stats: () => ({ hits: 0, misses: 0 }),
   latencies: () => [120, 340],
   requestTimings: () => [],
+}
+
+function speedContract(datasetFingerprint: string): SpeedRunContract {
+  return {
+    speedMetricSchemaVersion: 1,
+    speedDefinition: 'query-timeline-v1',
+    datasetFingerprint,
+    executedQuestionIdsHash: 'executed-question-ids',
+    streaming: true,
+    llmCacheEnabled: false,
+    queryConcurrency: 1,
+    retryAttempts: 0,
+    answerModelIdentity: 'answer-model',
+    answerFramingIdentityHash: 'answer-framing',
+    endpointIdentity: 'endpoint',
+    generationSettingsHash: 'generation-settings',
+    executionEnvironmentFingerprint: 'execution-environment',
+  }
+}
+
+function speedClient(
+  snapshots: Array<{ totalTokens: number, incompleteRequestCount: number }>,
+  events: string[] = [],
+): StreamingLlmClient {
+  let snapshotIndex = 0
+  return {
+    complete: vi.fn(),
+    chat: vi.fn(),
+    chatStream: vi.fn(),
+    stats: () => ({ hits: 0, misses: 0 }),
+    latencies: () => [120, 340],
+    requestTimings: () => [],
+    tokenSnapshot: () => {
+      events.push(snapshotIndex === 0 ? 'token-before' : 'token-after')
+      const snapshot = snapshots[snapshotIndex]
+      snapshotIndex++
+      if (!snapshot) throw new Error('unexpected token snapshot')
+      return snapshot
+    },
+    cacheEnabled: () => false,
+  }
 }
 
 /** 确定性字符级分词器：1 字符 = 1 token，让受控预算与页序在测试里完全可预测。 */
@@ -651,6 +695,233 @@ describe('runQaTask', () => {
   })
 })
 
+describe('runQaTask — speed mode', () => {
+  it('rejects a cache-enabled answer client before indexing', async () => {
+    const evaluationContract = buildEvaluationContract([sample])
+    const cachedClient = { ...speedClient([]), cacheEnabled: () => true }
+
+    await expect(runQaTask(argsWith({
+      client: cachedClient,
+      deps: stagedDeps({
+        buildIndex: async () => { throw new Error('index must not start') },
+      }),
+      evaluationContract,
+      speed: { contract: speedContract(evaluationContract.datasetFingerprint) },
+    }))).rejects.toThrow(/cache/i)
+  })
+
+  it('starts after indexing, marks the final materialized context, streams, and finishes before judge', async () => {
+    const events: string[] = []
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 22, incompleteRequestCount: 0 },
+    ], events)
+    const deps = stagedDeps({
+      buildIndex: vi.fn(async () => {
+        events.push('index')
+        return tree
+      }),
+      retrieveContext: vi.fn(async () => {
+        events.push('retrieve-start')
+        events.push('retrieve-return')
+        return retrievalStage({ pipelineStartedAt: 30 })
+      }),
+      generateAnswer: vi.fn(async () => {
+        throw new Error('non-stream generation must not run in speed mode')
+      }),
+    })
+    const speedNow = scriptedClock([100, 130, 150, 190], events, ['t0', 't1', 'ttft', 't3'])
+    const streamAnswer: StreamingLlmClient['chatStream'] = vi.fn(async (_messages, onVisibleText) => {
+      events.push('stream-start')
+      onVisibleText('8')
+      events.push('stream-return')
+      return { content: '8' }
+    })
+    const judgeClient = {
+      ...fakeClient,
+      complete: vi.fn(async () => {
+        events.push('judge')
+        return '{"factuality":5,"completeness":5,"groundedness":5}'
+      }),
+    }
+    const evaluationContract = buildEvaluationContract([sample])
+
+    const result = await runQaTask(argsWith({
+      client,
+      deps,
+      now: scriptedClock(
+        [0, 0, 10, 50, 80, 100, 120],
+        events,
+        ['clock-1', 'clock-2', 'clock-3', 'clock-4', 'clock-5', 'clock-6', 'clock-7'],
+      ),
+      judgeClient: judgeClient as never,
+      judgeModel: 'judge-model',
+      evaluationContract,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: speedNow,
+        streamAnswer,
+      },
+    }))
+
+    expect(events).toEqual([
+      'clock-1',
+      'clock-2',
+      'index',
+      'clock-3',
+      'token-before',
+      't0',
+      'retrieve-start',
+      'retrieve-return',
+      't1',
+      'clock-4',
+      'stream-start',
+      'ttft',
+      'stream-return',
+      'clock-5',
+      't3',
+      'token-after',
+      'judge',
+      'clock-6',
+    ])
+    expect(deps.generateAnswer).not.toHaveBeenCalled()
+    expect(result.perSample[0]).toMatchObject({
+      retrievalStatus: 'completed',
+      generationStatus: 'completed',
+      judgeStatus: 'completed',
+      answer: '8',
+      timing: {
+        queryRewriteLatencyMs: 0,
+        retrievalLatencyMs: 20,
+        answerGenerationLatencyMs: 30,
+        queryEndToEndLatencyMs: 50,
+      },
+      speed: {
+        evidenceReadyLatencyMs: 30,
+        timeToFirstTokenMs: 50,
+        fullAnswerLatencyMs: 90,
+        onlineTokenCount: 12,
+        tokenAccountingComplete: true,
+      },
+    })
+    expect(result.perSample[0].metrics).toMatchObject({ contextPageMrr: 1, answerF1: 1 })
+    expect(result.metrics).toMatchObject({
+      speedSampleCount: 1,
+      onlineTokenSampleCount: 1,
+      evidenceReadyLatencyP50Ms: 30,
+      timeToFirstTokenP50Ms: 50,
+      fullAnswerLatencyP50Ms: 90,
+    })
+    expect(result.meta).toMatchObject({
+      speedMetricSchemaVersion: 1,
+      speedDefinition: 'query-timeline-v1',
+      completedSpeedQuestionCount: 1,
+    })
+  })
+
+  it('keeps retrieval failure semantics and records only the reached speed boundary', async () => {
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 13, incompleteRequestCount: 0 },
+    ])
+    const evaluationContract = buildEvaluationContract([sample])
+    const result = await runQaTask(argsWith({
+      client,
+      deps: stagedDeps({ retrieveContext: vi.fn().mockRejectedValue(new Error('retrieve boom')) }),
+      evaluationContract,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: scriptedClock([100]),
+      },
+    }))
+
+    expect(result.perSample[0]).toMatchObject({
+      retrievalStatus: 'failed',
+      generationStatus: 'skipped',
+      judgeStatus: 'skipped',
+      metrics: { contextPageMrr: 0, evidenceRecall: 0, evidenceHit: 0, contextPrecision: 0 },
+      speed: { onlineTokenCount: 3, tokenAccountingComplete: true },
+    })
+    expect(result.perSample[0].speed).not.toHaveProperty('evidenceReadyLatencyMs')
+    expect(result.errors).toContainEqual(expect.objectContaining({ stage: 'retrieve', message: 'retrieve boom' }))
+    expect(result.metrics.speedSampleCount).toBe(0)
+  })
+
+  it('records a pre-first-token stream failure without inventing TTFT or full-answer milestones', async () => {
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 14, incompleteRequestCount: 1 },
+    ])
+    const evaluationContract = buildEvaluationContract([sample])
+    const result = await runQaTask(argsWith({
+      client,
+      evaluationContract,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: scriptedClock([100, 120]),
+        streamAnswer: async () => { throw new Error('stream failed before first token') },
+      },
+    }))
+
+    expect(result.perSample[0]).toMatchObject({
+      retrievalStatus: 'completed',
+      generationStatus: 'failed',
+      judgeStatus: 'skipped',
+      speed: { evidenceReadyLatencyMs: 20, tokenAccountingComplete: false },
+    })
+    expect(result.perSample[0].speed).not.toHaveProperty('timeToFirstTokenMs')
+    expect(result.perSample[0].speed).not.toHaveProperty('fullAnswerLatencyMs')
+    expect(result.perSample[0].metrics.contextPageMrr).toBe(1)
+    expect(result.errors).toContainEqual(expect.objectContaining({ stage: 'stream' }))
+  })
+
+  it('records a mid-stream failure through TTFT but not full answer', async () => {
+    const client = speedClient([
+      { totalTokens: 5, incompleteRequestCount: 0 },
+      { totalTokens: 9, incompleteRequestCount: 0 },
+    ])
+    const evaluationContract = buildEvaluationContract([sample])
+    const result = await runQaTask(argsWith({
+      client,
+      evaluationContract,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: scriptedClock([100, 120, 145]),
+        streamAnswer: async (_messages, onVisibleText) => {
+          onVisibleText('partial')
+          throw new Error('stream disconnected')
+        },
+      },
+    }))
+
+    expect(result.perSample[0].speed).toEqual({
+      evidenceReadyLatencyMs: 20,
+      timeToFirstTokenMs: 45,
+      onlineTokenCount: 4,
+      tokenAccountingComplete: true,
+    })
+    expect(result.errors).toContainEqual(expect.objectContaining({ stage: 'stream', message: 'stream disconnected' }))
+  })
+
+  it('invalidates the run when a completed stream violates timeline invariants', async () => {
+    const client = speedClient([
+      { totalTokens: 5, incompleteRequestCount: 0 },
+      { totalTokens: 9, incompleteRequestCount: 0 },
+    ])
+    const evaluationContract = buildEvaluationContract([sample])
+
+    await expect(runQaTask(argsWith({
+      client,
+      evaluationContract,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: scriptedClock([100, 120, 145]),
+        streamAnswer: async () => ({ content: 'answer without a visible callback' }),
+      },
+    }))).rejects.toThrow(/timeToFirstTokenMs/)
+  })
+})
+
 /**
  * 全文直投基线（--mode full-context）：它表示「回答模型能用全文时的效果上限」，
  * 不是检索参赛者——不受 4096 受控预算约束，也不得携带任何检索契约身份。
@@ -703,6 +974,238 @@ describe('runFullContextQaTask — 生成上限基线', () => {
     for (const page of sample.pages) expect(system).toContain(page)
     expect(messages[1]).toEqual({ role: 'user', content: sample.questions[0].question })
   })
+
+  it('经由共享 builder 产生逐字相同的全文 prompt，并保持答案质量', async () => {
+    const buildMessages = vi.spyOn(ragPipeline, 'buildAnswerMessages')
+    fullContextClient.chat.mockReset().mockResolvedValue('8')
+    const baseSystemPrompt = '全文基座提示词'
+    const languageInstruction = '请用英文作答。'
+
+    const result = await runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client: fullContextClient as never,
+      systemPrompt: baseSystemPrompt,
+      answerLanguageInstruction: languageInstruction,
+      gitSha: 'abc1234',
+      model: 'test-model',
+    })
+
+    const paper = sample.pages.join('\n\n')
+    expect(buildMessages).toHaveBeenCalledWith(
+      paper,
+      sample.questions[0].question,
+      [],
+      `${baseSystemPrompt}\n\n${languageInstruction}`,
+    )
+    expect(fullContextClient.chat).toHaveBeenCalledWith([
+      {
+        role: 'system',
+        content: `${baseSystemPrompt}\n\n${languageInstruction}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${paper}`,
+      },
+      { role: 'user', content: sample.questions[0].question },
+    ])
+    expect(result.metrics.answerF1).toBe(1)
+    buildMessages.mockRestore()
+  })
+
+  it('speed 模式在构造全文 prompt 前拒绝 cache-enabled answer client', async () => {
+    const cachedClient = { ...speedClient([]), cacheEnabled: () => true }
+
+    await expect(runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client: cachedClient,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+      speed: { contract: speedContract('full-context-fingerprint') },
+    })).rejects.toThrow(/cache/i)
+  })
+
+  it('speed 模式流式发送同一全文 prompt，仅记录生成时间线且不因不完整 token 遥测平均用量', async () => {
+    const speedSample: EvalSample = {
+      ...sample,
+      questions: [
+        sample.questions[0],
+        { id: 'p1#1', question: 'Q2?', answers: [], evidencePages: [], unanswerable: true },
+      ],
+    }
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 14, incompleteRequestCount: 0 },
+      { totalTokens: 14, incompleteRequestCount: 0 },
+      { totalTokens: 20, incompleteRequestCount: 1 },
+    ])
+    const streamAnswer: StreamingLlmClient['chatStream'] = vi.fn(async (messages, onVisibleText) => {
+      onVisibleText('visible')
+      return { content: messages[1].content === 'Q1?' ? '8' : '无法根据给定内容回答。' }
+    })
+    const judgeClient = {
+      complete: vi.fn(async (prompt: string) => prompt.includes('待评估回答')
+        ? '{"factuality":5,"completeness":4,"groundedness":5}'
+        : 'REFUSAL'),
+      chat: vi.fn(),
+      stats: () => ({ hits: 0, misses: 0 }),
+      latencies: () => [],
+      requestTimings: () => [],
+    }
+
+    const result = await runFullContextQaTask({
+      samples: [speedSample],
+      config: { name: 'default', topK: 2 },
+      client,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+      judgeClient,
+      judgeModel: 'judge-model',
+      now: () => 0,
+      speed: {
+        contract: speedContract('full-context-fingerprint'),
+        now: scriptedClock([100, 125, 160, 200, 215, 270]),
+        streamAnswer,
+      },
+    })
+
+    const expectedSystem = `${DEFAULT_SYSTEM_PROMPT}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${speedSample.pages.join('\n\n')}`
+    expect(streamAnswer).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(streamAnswer).mock.calls[0][0]).toEqual([
+      { role: 'system', content: expectedSystem },
+      { role: 'user', content: 'Q1?' },
+    ])
+    expect(result.perSample.map(record => record.speed)).toEqual([
+      { timeToFirstTokenMs: 25, fullAnswerLatencyMs: 60, onlineTokenCount: 4, tokenAccountingComplete: true },
+      { timeToFirstTokenMs: 15, fullAnswerLatencyMs: 70, tokenAccountingComplete: false },
+    ])
+    expect(result.perSample.every(record => record.speed?.evidenceReadyLatencyMs === undefined)).toBe(true)
+    expect(result.metrics).toMatchObject({
+      answerF1: 1,
+      unanswerableAccuracy: 1,
+      judgeFactuality: 5,
+      judgeCompleteness: 4,
+      judgeGroundedness: 5,
+      timeToFirstTokenP50Ms: 15,
+      timeToFirstTokenP95Ms: 25,
+      fullAnswerLatencyP50Ms: 60,
+      fullAnswerLatencyP95Ms: 70,
+      speedSampleCount: 2,
+      onlineTokenSampleCount: 1,
+    })
+    expect(result.metrics.evidenceReadyLatencyP50Ms).toBeUndefined()
+    expect(result.metrics.avgOnlineTokensPerCompletedAnswer).toBeUndefined()
+    expect(result.meta).toMatchObject({
+      comparisonEligible: false,
+      comparisonIneligibleReason: 'full-context-generation-ceiling',
+      unanswerableMethod: 'judge',
+      completedSpeedQuestionCount: 2,
+    })
+  })
+
+  it('speed 流中断后保留已达到的生成时间线并标记 stream 错误', async () => {
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 14, incompleteRequestCount: 0 },
+    ])
+
+    const result = await runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+      now: () => 0,
+      speed: {
+        contract: speedContract('full-context-fingerprint'),
+        now: scriptedClock([100, 120]),
+        streamAnswer: async (_messages, onVisibleText) => {
+          onVisibleText('partial')
+          throw new Error('stream disconnected')
+        },
+      },
+    })
+
+    expect(result.perSample).toEqual([expect.objectContaining({
+      id: 'p1#0',
+      generationStatus: 'failed',
+      judgeStatus: 'skipped',
+      speed: {
+        timeToFirstTokenMs: 20,
+        onlineTokenCount: 4,
+        tokenAccountingComplete: true,
+      },
+    })])
+    expect(result.perSample[0].speed).not.toHaveProperty('evidenceReadyLatencyMs')
+    expect(result.perSample[0].speed).not.toHaveProperty('fullAnswerLatencyMs')
+    expect(result.errors).toContainEqual(expect.objectContaining({ stage: 'stream', message: 'stream disconnected' }))
+    expect(result.metrics.speedSampleCount).toBe(0)
+  })
+
+  it('speed 完成但未出现可见文本时使整轮失效', async () => {
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 14, incompleteRequestCount: 0 },
+    ])
+
+    await expect(runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+      now: () => 0,
+      speed: {
+        contract: speedContract('full-context-fingerprint'),
+        now: scriptedClock([100, 140]),
+        streamAnswer: async () => ({ content: 'answer without a visible callback' }),
+      },
+    })).rejects.toThrow(/timeToFirstTokenMs/)
+  })
+
+  it('records a full-context judge-null diagnostic without changing answer quality provenance', async () => {
+    const client = speedClient([
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 14, incompleteRequestCount: 0 },
+    ])
+    const judgeClient = {
+      complete: vi.fn(async () => 'not valid judge JSON'),
+      chat: vi.fn(),
+      stats: () => ({ hits: 0, misses: 0 }),
+      latencies: () => [],
+      requestTimings: () => [],
+    }
+
+    const result = await runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+      judgeClient,
+      judgeModel: 'judge-model',
+      now: () => 0,
+      speed: {
+        contract: speedContract('full-context-fingerprint'),
+        now: scriptedClock([100, 120, 140]),
+        streamAnswer: async (_messages, onVisibleText) => {
+          onVisibleText('8')
+          return { content: '8' }
+        },
+      },
+    })
+
+    expect(result.metrics.answerF1).toBe(1)
+    expect(result.metrics.judgeFactuality).toBeUndefined()
+    expect(result.perSample[0]).not.toHaveProperty('judgeStatus')
+    expect(result.errors).toContainEqual({
+      sampleId: sample.questions[0].id,
+      stage: 'judge',
+      message: 'judge returned no valid answer scores',
+    })
+  })
 })
 
 /**
@@ -731,10 +1234,11 @@ describe('生效 prompt 与 CLI 指纹同源', () => {
  * 注入脚本化时钟：返回预设时间序列；读取次数超过预设即抛错，
  * 防止新增的时钟读取被静默吸收（用尽后保持末值会让「恰好调用 N 次」的注释形同虚设）。
  */
-function scriptedClock(ts: number[]): () => number {
+function scriptedClock(ts: number[], events?: string[], labels?: string[]): () => number {
   let i = 0
   return () => {
     if (i >= ts.length) throw new Error(`scriptedClock 超读：预设 ${ts.length} 次，第 ${i + 1} 次`)
+    if (events && labels) events.push(labels[i])
     return ts[i++]
   }
 }

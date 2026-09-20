@@ -58,6 +58,23 @@ npm run bench -- --compare results/a.json results/b.json  # 对比两次结果
 
 结果 JSON 落 `results/`，Markdown 报表打到 stdout。
 
+### 查询时间线速度（`--speed`）
+
+`--speed` 是一个严格的 QA 速度协议，必须**显式**给出 `--task qa`；它不支持 summary 或 `--task all`。常用的检索路径与全文生成上限路径分别是：
+
+```bash
+npm run bench -- --task qa --dataset qasper --config default --speed
+npm run bench -- --task qa --dataset qasper --mode full-context --speed
+```
+
+速度运行强制使用真实的流式最终回答、answer response cache 关闭、单题串行（concurrency 1），且不读取或续跑 query checkpoint。`--no-cache` 不能改变这项 answer-cache 强制关闭；若同时使用 `--judge`，judge 在最终回答时间线之后执行，不计入该时间线。失败、部分流或不完整里程碑的题不会被修补进速度样本。
+
+对检索方法，报表的速度主表严格只有七个 headline 值：`Evidence Ready` P50/P95、`TTFT`（首次可见文本）P50/P95、`Full Answer` P50/P95，以及 `Avg Online Tokens`。六个时间百分位数始终从同一个完整题目 cohort 计算；`meta.completedSpeedQuestionIdsHash` 是该 cohort 的有序题目 ID 哈希，`speedSampleCount` 与 `completedSpeedQuestionCount` 必须一致。Token 均值只采用 LLM provider 在流式请求中返回的实际 usage，绝不按字符或 prompt 估算；只要 cohort 中任一完成题的 usage 不完整，`Avg Online Tokens` 整列即显示 `—`。
+
+每份 speed 结果还写入可比较身份：数据集指纹、已执行题目顺序哈希、已完成 cohort 哈希、answer model（provider + model）身份、最终回答固定 framing 哈希、规范化 endpoint 身份、temperature/maxTokens/stop 设置、retry 次数、streaming/cache/concurrency 协议和执行环境指纹。framing 哈希覆盖 `buildAnswerMessages` 实际使用的 base system prompt、样本语言指令、数学格式指令和固定 message/context framing，只落盘 SHA-256，不保存 prompt 明文。速度 delta 的门禁要求这些身份**每一项都存在且两侧相等**，还要求 `completedSpeedQuestionIdsHash`、`completedSpeedQuestionCount` 与两侧的 `speedSampleCount` 彼此一致；任一缺失或不一致，七个 delta 都不输出。Token accounting 不完整只抑制 token delta，不抑制仍满足这些门禁的时间 delta。endpoint 身份会剥离凭据；执行环境只哈希 platform、arch、Node 版本和 backend，不写主机名、路径或凭据。对 Ollama（以及其他 localhost/本地端点）必须设置稳定的实际设备/backend 标签，例如 `BENCH_EXECUTION_BACKEND=metal` 或 `BENCH_EXECUTION_BACKEND=cpu`；该标签进入环境身份，因此不同设备/backend 的数字不会被当作同一可比较运行。speed 模式的缓存与结果路径日志只打印仓库相对路径或 `<external>/文件名`，内部文件操作仍使用完整路径。
+
+`--mode full-context --speed` 是**生成上限**：它不走检索，也不会伪造 `Evidence Ready`，因此在独立的生成上限速度表中该两格为 `—`，并且始终 `comparisonEligible: false`，不进入检索速度排名或 delta。速度表与「详细耗时与缓存诊断（Legacy timing）」是两套口径：前者才是 query-timeline-v1 的主指标；后者保留 index/retrieval/generation/end-to-end/network 与 wall-clock 的历史诊断，不能拿来替代或混入速度主表和 delta。
+
 **QASPER 英文作答**：CLI 按 source 分组跑 QA，qasper 组会在 systemPrompt 后追加英文作答指令——参考答案是英文，模型若用中文作答，中英 token 完全不相交，answerF1 恒≈0。
 
 **`--limit` 语义**：在 `--dataset all` 下为**每组（每个 source）各取 N 条**，不是全局 N 条。

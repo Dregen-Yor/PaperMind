@@ -16,6 +16,8 @@ import { reciprocalRankFusion } from '../baselines/rrf'
 import { createCrossEncoderProvider, type RerankerProvider } from '../baselines/reranker'
 import { benchPath } from '../paths'
 import { runStrongBaselineQaTask, type StrongBaselineQaArgs, type StrongRetrievalRuntime } from './strongBaselineQa'
+import type { StreamingLlmClient } from '../llmClient'
+import { assertStrongSpeedPolicy } from '../speed/policy'
 
 export interface HybridRerankQaArgs extends Omit<StrongBaselineQaArgs, 'retrieval' | 'meta'> {
   config: HybridRerankConfig
@@ -92,6 +94,11 @@ export async function createHybridRetrieval(config: HybridRerankConfig, deps: Hy
 }
 
 export async function runHybridRerankQaTask(args: HybridRerankQaArgs): Promise<BenchResult> {
+  assertStrongSpeedPolicy({
+    speed: args.speed !== undefined,
+    checkpointPath: args.checkpointPath,
+    client: args.client as StreamingLlmClient,
+  })
   const retrieval = await createHybridRetrieval(args.config, args.deps)
   return runStrongBaselineQaTask({
     ...args,

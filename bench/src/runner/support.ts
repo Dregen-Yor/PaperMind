@@ -12,6 +12,9 @@ import { aggregate, emitMetricSampleCounts, metricSampleCounts, renameQaRates, w
 import { assertContextPageDenominator, contractMeta, isRetrievalEligible } from '../evaluationContract'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { RUBRIC_VERSION, type JudgeSampleState } from '../metrics/judge'
+import type { SpeedRunContract } from '../speed/contract'
+import { speedContractMeta } from '../speed/contract'
+import { aggregateSpeedMetrics } from '../speed/metrics'
 
 /** 统一错误消息抽取：`Error` 取 message，其余转字符串。 */
 export function errorMessage(e: unknown): string {
@@ -134,6 +137,8 @@ export interface FinalizeQaArgs {
   extraTimingValues?: Record<string, number[]>
   /** 追加 meta 字段（如 baselineFamily / candidateGranularity / checkpoint 调整后的计时口径） */
   extraMeta?: Partial<BenchResult['meta']>
+  /** Opt-in query-timeline speed output; quality aggregation remains unchanged when absent. */
+  speed?: { contract: SpeedRunContract }
 }
 
 /**
@@ -151,6 +156,19 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
   raw.contextPageMrrEligibleCount = args.contract.eligibleRetrievalQuestionCount
   // 固定分母不变量在契约模块统一强制，三个 runner 引擎共用同一处，禁止各自放宽
   assertContextPageDenominator(counts, args.contract)
+  let speedMeta: Omit<ReturnType<typeof speedContractMeta>, 'datasetFingerprint'> | undefined
+  if (args.speed) {
+    if (args.speed.contract.datasetFingerprint !== args.contract.datasetFingerprint) {
+      throw new Error('speed contract dataset fingerprint does not match evaluation contract')
+    }
+    // The equality check validates the duplicate field, but quality provenance remains owned by
+    // contractMeta(args.contract), so the speed fragment deliberately does not merge its copy.
+    const { datasetFingerprint: _validatedDatasetFingerprint, ...rest } = speedContractMeta(
+      args.speed.contract,
+      args.records,
+    )
+    speedMeta = rest
+  }
   const values = { ...collectTimingValues(args.records, args.perPaper, args.client), ...args.extraTimingValues }
   // 重命名 0/1 指标的聚合结果为「率」，让报表列名自解释；
   // withLatencyStats 追加既有 latencyP50/P95（deprecated），分位数由 withPercentiles 计算
@@ -158,8 +176,24 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
     { ...withLatencyStats(renameQaRates(raw), args.client.latencies()), ...args.extraMetrics },
     values,
   )
+  // Speed is a separate completed-query cohort. Append it only after the existing quality
+  // aggregate/rate rename/fixed-denominator and legacy timing paths have produced their values.
+  if (args.speed) Object.assign(metrics, aggregateSpeedMetrics(args.records))
   // meta.completed 只数真正走完生成阶段的题；total 仍是本轮尝试执行的全部题（§6.2）
   const completed = args.records.filter(record => record.generationStatus === 'completed').length
+  const ownedContractMeta: Partial<BenchResult['meta']> = {
+    ...contractMeta(args.contract),
+    ...speedMeta,
+  }
+  const extraMeta = { ...args.extraMeta }
+  for (const [key, value] of Object.entries(ownedContractMeta)) {
+    if (!Object.prototype.hasOwnProperty.call(extraMeta, key)) continue
+    const supplied = extraMeta[key as keyof typeof extraMeta]
+    if (supplied !== value) {
+      throw new Error(`extraMeta ${key} cannot override contract-owned metadata`)
+    }
+    delete extraMeta[key as keyof typeof extraMeta]
+  }
   return {
     task: args.task ?? 'qa',
     config: args.config,
@@ -180,8 +214,6 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
       retrievalAlgorithm: args.retrievalAlgorithm,
       completed,
       total: args.total,
-      // 全量契约字段随结果落盘，让每个数字都能追溯到产生它的指标版本与坐标
-      ...contractMeta(args.contract),
       ...(args.judgeState.sawUnanswerable
         ? { unanswerableMethod: (args.hasJudgeClient && !args.judgeState.usedPatternFallback ? 'judge' : 'pattern') as 'judge' | 'pattern' }
         : {}),
@@ -192,7 +224,9 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
             unmappedEvidenceRate: args.unmappedEvidenceQuestions / args.qasperEvidenceQuestions,
           }
         : {}),
-      ...args.extraMeta,
+      ...extraMeta,
+      // 契约字段最后合流且不接受 extraMeta 改写，让每个数字都能追溯到真实坐标。
+      ...ownedContractMeta,
     },
     metrics,
     perSample: args.records,

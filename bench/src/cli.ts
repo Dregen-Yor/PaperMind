@@ -38,6 +38,13 @@ import {
 } from './evaluationContract'
 import { createBgeM3Tokenizer } from './traditionalRag/embedding'
 import { retrievalTokenizerIdentity } from './config'
+import {
+  assertSpeedAnswerClient,
+  buildSpeedExecutionPolicy,
+  isLocalExecutionEndpoint,
+  resolveQaClientCachePolicy,
+} from './speed/policy'
+import { benchmarkPathForLog, writeBenchmarkPathLine } from './logging'
 
 // 必须用 benchPath（fileURLToPath），不能用 new URL(...).pathname——
 // 后者保留百分号转义，路径含空格/中文时得到字面量 %20 目录，写文件静默失败
@@ -107,6 +114,18 @@ function groupBySource(samples: EvalSample[]): Array<[SampleSource, EvalSample[]
   return [...map.entries()]
 }
 
+/** Mirrors EvaluationContract execution order so the speed identity covers exactly the attempted questions. */
+function executedQuestionIds(samples: EvalSample[], limit?: number): string[] {
+  const ids: string[] = []
+  for (const sample of samples) {
+    for (const question of sample.questions) {
+      if (limit !== undefined && ids.length >= limit) return ids
+      ids.push(question.id)
+    }
+  }
+  return ids
+}
+
 const args = parseArgs(process.argv.slice(2))
 
 // --compare 是独立路径：只读两份结果输出差异表，不跑评测
@@ -159,13 +178,18 @@ const cacheDir = benchPath(import.meta.url, '../cache/')
 try {
   accessSync(dirname(cacheDir), constants.W_OK)
 } catch {
-  process.stdout.write(`警告：缓存目录父目录不可写（${dirname(cacheDir)}），缓存将无法写入\n`)
+  process.stdout.write(
+    `警告：缓存目录父目录不可写（${benchmarkPathForLog(dirname(cacheDir), { speed: args.speed })}），缓存将无法写入\n`,
+  )
 }
-process.stdout.write(`缓存目录：${cacheDir}\n`)
+writeBenchmarkPathLine(process.stdout.write.bind(process.stdout), '缓存目录：', cacheDir, { speed: args.speed })
 
 process.stdout.write(
   `配置 ${configs.length} 组，样本 ${samples.length} 篇论文，代码版本 ${sha}\n`,
 )
+if (args.speed) {
+  process.stdout.write('[speed] streaming on；answer cache off；concurrency 1；checkpoint off\n')
+}
 
 const qaResults: BenchResult[] = []
 const summaryResults: BenchResult[] = []
@@ -237,7 +261,7 @@ function writeResult(result: BenchResult, fileTag = '') {
     path = join(RESULTS_DIR(), `${result.task}${tag}-${configLabel(result.config)}-${stamp}.json`)
   }
   writeFileSync(path, JSON.stringify(result, null, 2))
-  process.stdout.write(`  结果已写入 ${path}\n`)
+  writeBenchmarkPathLine(process.stdout.write.bind(process.stdout), '  结果已写入 ', path, { speed: args.speed })
 }
 
 for (const config of configs) {
@@ -246,23 +270,51 @@ for (const config of configs) {
     // 时无法一次传入，故按 source 分组各跑一次、结果分别落盘（文件名带 source 后缀）
     for (const [source, group] of groupBySource(samples)) {
       const env = resolveEnvConfig(process.env)
+      const promptLanguage = source === 'qasper' ? QASPER_LANGUAGE_INSTRUCTION : undefined
+      const answerSystemPrompt = composeBaseSystemPrompt(DEFAULT_SYSTEM_PROMPT, promptLanguage)
+      // Speed needs the same dataset identity even in full-context mode. Ordinary full-context
+      // keeps its prior path and does not build an otherwise-unused retrieval contract.
+      const speedEvaluationContract = args.speed ? buildEvaluationContract(group, args.limit) : undefined
+      const requestMaxTokens = args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.maxTokens : undefined
+      const cachePolicy = resolveQaClientCachePolicy({ speed: args.speed, useCache: args.useCache })
+      const speedPolicy = speedEvaluationContract
+        ? buildSpeedExecutionPolicy({
+            evaluationContract: speedEvaluationContract,
+            executedQuestionIds: executedQuestionIds(group, args.limit),
+            provider: env.provider,
+            model: env.model,
+            baseUrl: env.baseUrl,
+            retryAttempts: QA_RETRY_ATTEMPTS,
+            answerSystemPrompt,
+            maxTokens: requestMaxTokens,
+            stop: undefined,
+            environment: {
+              platform: process.platform,
+              arch: process.arch,
+              nodeVersion: process.version,
+            },
+            localExecution: isLocalExecutionEndpoint(env.provider, env.baseUrl),
+            env: process.env,
+          })
+        : undefined
       // 全文直投模式不截断论文；为避免上游长上下文请求永久卡死，单题请求 120 秒后中止并由 runner 记为失败后继续。
       // 生成最多 4,096 tokens，防止推理模型在极简单的 QA 上无限延长隐藏推理；此限制不影响输入论文全文。
       const client = createLlmClient({
         ...env,
-        useCache: args.useCache,
+        useCache: cachePolicy.answerUseCache,
         timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS,
         retryAttempts: QA_RETRY_ATTEMPTS,
         onRetry: retryLog,
-        ...(args.mode === 'full-context' ? { maxTokens: FULL_CONTEXT_LIMITS.maxTokens } : {}),
+        ...(requestMaxTokens === undefined ? {} : { maxTokens: requestMaxTokens }),
+        ...speedPolicy?.answerClientOverrides,
       })
+      if (speedPolicy) assertSpeedAnswerClient(client)
       // judge 只换模型，凭据与端点沿用主配置；缓存与主 client 共目录但 key 含模型名，互不污染
       const judgeClient = args.judge
-        ? createLlmClient({ ...env, model: judgeModel!, useCache: args.useCache, timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS, retryAttempts: QA_RETRY_ATTEMPTS, onRetry: retryLog, ...(args.mode === 'full-context' ? { maxTokens: FULL_CONTEXT_LIMITS.maxTokens } : {}) })
+        ? createLlmClient({ ...env, model: judgeModel!, useCache: cachePolicy.judgeUseCache, timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS, retryAttempts: QA_RETRY_ATTEMPTS, onRetry: retryLog, ...(requestMaxTokens === undefined ? {} : { maxTokens: requestMaxTokens }) })
         : undefined
 
       process.stdout.write(`\n[QA] ${config.name}（${source}，${group.length} 篇）...\n`)
-      const promptLanguage = source === 'qasper' ? QASPER_LANGUAGE_INSTRUCTION : undefined
       const common: CommonQaArgs = {
         samples: group,
         client,
@@ -279,7 +331,11 @@ for (const config of configs) {
       if (args.mode === 'full-context') {
         // 全文直投不参与受控检索：本分支一次 BGE-M3 加载都不会发生（tokenizer 只在 RAG 分支创建），
         // 结果也不携带任何检索契约身份——它只是回答模型的上限参照，不是参赛者（§5）
-        result = await runFullContextQaTask({ ...common, config })
+        result = await runFullContextQaTask({
+          ...common,
+          config,
+          ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
+        })
       } else {
         // 受控上下文预算（§5）：所有 RAG runner 共用同一份 BGE-M3 tokenizer 与 4096 token 预算，
         // 页序与 token 数才落在同一坐标上。工厂内部按 model/revision 记忆化词表，
@@ -298,10 +354,11 @@ for (const config of configs) {
         const tokenizerDeps = identity.model === CONTEXT_TOKENIZER_MODEL && identity.revision === CONTEXT_TOKENIZER_REVISION
           ? { tokenizer: contractTokenizer }
           : undefined
+        const evaluationContract = speedEvaluationContract ?? buildEvaluationContract(group, args.limit)
         const controlled: ControlledQaArgs = {
           // 契约的 tokenizer/budget 身份取自契约本身，不在这里改写：占位口径那种「身份写着 A、
           // 实际用着 B」的账，正是 Task 10 的比较门禁要挡的东西
-          evaluationContract: buildEvaluationContract(group, args.limit),
+          evaluationContract,
           materialize,
         }
         // 端点身份只由 provider + 规范化 base URL 决定（函数签名里没有 key 的位置）；
@@ -316,34 +373,43 @@ for (const config of configs) {
           result = await runTraditionalRagQaTask({
             ...common, ...controlled, config,
             ...(tokenizerDeps ? { deps: tokenizerDeps } : {}),
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })
         } else if (config.kind === 'hybrid-rerank') {
           result = await runHybridRerankQaTask({
             ...common, ...controlled, ...strongIdentity, config,
             ...(tokenizerDeps ? { deps: tokenizerDeps } : {}),
             generationSettings: RAG_GENERATION_SETTINGS,
-            checkpointPath: join(cacheDir, `checkpoint-${source}-${configLabel(config)}.json`),
+            ...(speedPolicy ? {} : { checkpointPath: join(cacheDir, `checkpoint-${source}-${configLabel(config)}.json`) }),
             onProgress: strongProgress(config),
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })
         } else if (config.kind === 'long-section-rag') {
           result = await runLongSectionQaTask({
             ...common, ...controlled, ...strongIdentity, config,
             ...(tokenizerDeps ? { deps: tokenizerDeps } : {}),
             generationSettings: RAG_GENERATION_SETTINGS,
-            checkpointPath: join(cacheDir, `checkpoint-${source}-${configLabel(config)}.json`),
+            ...(speedPolicy ? {} : { checkpointPath: join(cacheDir, `checkpoint-${source}-${configLabel(config)}.json`) }),
             onProgress: strongProgress(config),
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })
         } else if (config.kind === 'semantic-tree') {
-          result = await runSemanticTreeQaTask({ ...common, ...controlled, config })
+          result = await runSemanticTreeQaTask({
+            ...common, ...controlled, config,
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
+          })
         } else {
-          result = await runQaTask({ ...common, ...controlled, config })
+          result = await runQaTask({
+            ...common, ...controlled, config,
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
+          })
         }
         // 显式资格声明：受控预算下产出的四个检索指标可进入横向比较。
         // full-context 分支由它自己的 runner 写 false + 原因，这里不覆盖也不代填
         result.meta.comparisonEligible = true
       }
-      // --no-cache 当前只跳过读缓存，不覆写已有缓存文件（llmClient 待后续优化），如实记录口径
-      result.meta.cacheMode = args.useCache ? 'normal' : 'bypass'
+      // --no-cache 与 speed answer-cache bypass 都只跳过读缓存，不覆写已有缓存文件，如实记录口径。
+      result.meta.cacheMode = cachePolicy.answerUseCache ? 'normal' : 'bypass'
       result.meta.mode = args.mode
       if (args.mode === 'full-context') {
         result.meta.requestTimeoutMs = FULL_CONTEXT_LIMITS.timeoutMs

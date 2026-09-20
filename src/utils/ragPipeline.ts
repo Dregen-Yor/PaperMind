@@ -8,17 +8,14 @@ import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type MaterializedContext } 
 import type { EvidenceBlock } from './evidenceBlock'
 import type { SemanticTree } from './semanticTree'
 import type { ChatLLMFn, LLMFn } from './llm'
+import { buildAnswerMessages } from './answerMessages'
 
-/** 数学公式格式约束，追加在 system 提示词之后。 */
-export const MATH_FORMAT_INSTRUCTION =
-  '数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。'
+export { buildAnswerMessages, MATH_FORMAT_INSTRUCTION } from './answerMessages'
 
 /** 触发查询改写所需的最少历史轮数。 */
 const REWRITE_MIN_HISTORY = 2
 /** 改写时参考的最近历史轮数。 */
 const REWRITE_HISTORY_WINDOW = 3
-/** 生成回答时携带的最近历史轮数（不含当前提问）。 */
-const GENERATE_HISTORY_WINDOW = 19
 
 /**
  * 已构建好的轻量语义树索引（§4：语义树与原文证据块分离保存）。
@@ -275,16 +272,7 @@ export async function generateRagAnswer(
   deps: Pick<RagPipelineDeps, 'now'> = {},
 ): Promise<RagGenerationStage> {
   const now = deps.now ?? Date.now
-  const messages = [
-    {
-      role: 'system',
-      content:
-        `${systemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` +
-        (retrieval.context ? `\n\n参考内容：\n${retrieval.context}` : ''),
-    },
-    ...history.slice(-GENERATE_HISTORY_WINDOW),
-    { role: 'user', content: query },
-  ]
+  const messages = buildAnswerMessages(retrieval.context, query, history, systemPrompt)
   const generationStartedAt = now()
   const answer = await generate(messages)
   const answerGenerationLatencyMs = Math.max(0, now() - generationStartedAt)

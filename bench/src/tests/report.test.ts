@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { BenchResult, PerSampleRecord } from '../types'
 import {
   renderReport, renderComparison, fmtDuration, partitionResults,
+  retrievalComparisonIssues,
   RETRIEVAL_SECTION_METRICS, RETRIEVAL_EXEMPT_METRICS, TIMING_SECTION_METRICS, TREE_SECTION_METRICS,
 } from '../report'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
@@ -55,6 +56,55 @@ function schemaV2Result(
 
 function comparableResult(name: string, metaPatch: Partial<BenchResult['meta']> = {}): BenchResult {
   return schemaV2Result(name, {}, metaPatch)
+}
+
+const SPEED_META: Partial<BenchResult['meta']> = {
+  speedMetricSchemaVersion: 1,
+  speedDefinition: 'query-timeline-v1',
+  datasetFingerprint: 'speed-dataset-a',
+  executedQuestionIdsHash: 'executed-a',
+  completedSpeedQuestionIdsHash: 'completed-a',
+  completedSpeedQuestionCount: 2,
+  streaming: true,
+  llmCacheEnabled: false,
+  queryConcurrency: 1,
+  retryAttempts: 0,
+  answerModelIdentity: 'answer-model-a',
+  answerFramingIdentityHash: 'answer-framing-a',
+  endpointIdentity: 'endpoint-a',
+  generationSettingsHash: 'generation-a',
+  executionEnvironmentFingerprint: 'environment-a',
+}
+
+const SPEED_METRICS: Record<string, number> = {
+  evidenceReadyLatencyP50Ms: 100,
+  evidenceReadyLatencyP95Ms: 200,
+  timeToFirstTokenP50Ms: 300,
+  timeToFirstTokenP95Ms: 400,
+  fullAnswerLatencyP50Ms: 500,
+  fullAnswerLatencyP95Ms: 600,
+  avgOnlineTokensPerCompletedAnswer: 80,
+  speedSampleCount: 2,
+  onlineTokenSampleCount: 2,
+}
+
+function speedResult(
+  name: string,
+  metrics: Record<string, number> = {},
+  metaPatch: Partial<BenchResult['meta']> = {},
+): BenchResult {
+  return schemaV2Result(name, { ...SPEED_METRICS, ...metrics }, { ...SPEED_META, ...metaPatch })
+}
+
+function fullContextSpeedResult(
+  name: string,
+  metrics: Record<string, number> = {},
+  metaPatch: Partial<BenchResult['meta']> = {},
+): BenchResult {
+  const baseMetrics = { ...SPEED_METRICS, ...metrics }
+  delete baseMetrics.evidenceReadyLatencyP50Ms
+  delete baseMetrics.evidenceReadyLatencyP95Ms
+  return fullContextResult(name, baseMetrics, { ...SPEED_META, ...metaPatch })
 }
 
 /** full-context 生成上限：刻意没有 mrrDefinition、没有八个契约字段，只有不合格声明。 */
@@ -519,10 +569,10 @@ describe('renderReport — 指标单一归属（§9）', () => {
 
   it('耗时与树指标只由各自区块渲染，回答质量表一个都不列', () => {
     const md = renderReport([ownedResult()])
-    const timing = sectionOf(md, '### 耗时与缓存')
+    const timing = sectionOf(md, '### 详细耗时与缓存诊断（Legacy timing）')
     const tree = sectionOf(md, '### 语义树诊断')
     // 归属区块确实渲染了两张表——否则「排除」等于把数字删掉，而不是搬家
-    expect(tableHeaderAfter(md, '### 耗时与缓存')).toContain('LLM 网络 P50/P95')
+    expect(tableHeaderAfter(md, '### 详细耗时与缓存诊断（Legacy timing）')).toContain('LLM 网络 P50/P95')
     expect(tableHeaderAfter(md, '### 语义树诊断')).toContain('树使用率')
 
     // 十个时延键的渲染结果：单元格成对展示 P50/P95，五个单元格即覆盖全部十个键。
@@ -574,7 +624,7 @@ describe('renderReport — 指标单一归属（§9）', () => {
       retrievalLatencyP50Ms: 900, retrievalLatencyP95Ms: 3000,
     })
     const md = renderReport([fc])
-    expect(md).not.toContain('### 耗时与缓存')
+    expect(md).not.toContain('### 详细耗时与缓存诊断（Legacy timing）')
     expect(tableHeaderAfter(md, '### 生成上限')).toContain('retrievalLatencyP50Ms')
   })
 
@@ -597,7 +647,7 @@ describe('renderReport — 指标单一归属（§9）', () => {
       // 每个键一个只属于它的毫秒值：断言失败时期望字符串本身就点名了没被渲染的键
       const value = 1_000 + 137 * index
       const md = renderReport([ownedResult({ [key]: value })])
-      expect(sectionOf(md, '### 耗时与缓存'), `耗时区块没有渲染 ${key}`)
+      expect(sectionOf(md, '### 详细耗时与缓存诊断（Legacy timing）'), `耗时区块没有渲染 ${key}`)
         .toContain(fmtDuration(value))
     }
   })
@@ -710,6 +760,196 @@ describe('partitionResults（§9）', () => {
   })
 })
 
+describe('renderReport — query-timeline speed', () => {
+  it('renders retrieval speed with exactly six time values and one token mean', () => {
+    const md = renderReport([speedResult('papermind', { answerF1: 0.5 })])
+    const header = tableHeaderAfter(md, '### 检索方法速度（query-timeline-v1）')
+
+    expect(header).toEqual([
+      '方法',
+      'Evidence Ready P50', 'P95',
+      'TTFT P50', 'P95',
+      'Full Answer P50', 'P95',
+      'Avg Online Tokens',
+    ])
+    expect(sectionOf(md, '### 检索方法速度（query-timeline-v1）')).toContain(
+      '| papermind | 100 ms | 200 ms | 300 ms | 400 ms | 500 ms | 600 ms | 80 |',
+    )
+
+    const answerHeader = tableHeaderAfter(md, '### 回答质量（检索口径之外）')
+    for (const key of Object.keys(SPEED_METRICS)) expect(answerHeader).not.toContain(key)
+  })
+
+  it('keeps counts and all failure-stage totals outside the seven-value table', () => {
+    const run = speedResult('papermind')
+    run.metrics.onlineTokenSampleCount = 1
+    delete run.metrics.avgOnlineTokensPerCompletedAnswer
+    run.errors = [
+      { sampleId: 'q1', stage: 'retrieve', message: 'retrieve failed' },
+      { sampleId: 'q2', stage: 'generate', message: 'generate failed' },
+      { sampleId: 'q3', stage: 'stream', message: 'stream failed' },
+      { sampleId: 'q4', stage: 'judge', message: 'judge failed' },
+      { sampleId: 'q6', stage: 'judge', message: 'judge failed without a status record' },
+    ]
+    run.perSample = [
+      { id: 'q4', paperId: 'p', source: 'smoke', metrics: {}, judgeStatus: 'failed' },
+      { id: 'q5', paperId: 'p', source: 'smoke', metrics: {}, judgeStatus: 'failed' },
+    ]
+
+    const md = renderReport([run])
+    const speed = sectionOf(md, '### 检索方法速度（query-timeline-v1）')
+    const diagnostics = sectionOf(md, '### Query-timeline 支持计数与失败诊断')
+
+    expect(speed).toContain('| papermind | 100 ms | 200 ms | 300 ms | 400 ms | 500 ms | 600 ms | — |')
+    expect(tableHeaderAfter(md, '### Query-timeline 支持计数与失败诊断')).toEqual([
+      '方法', 'Speed 样本', 'Completed 契约', 'Token 完整',
+      'Retrieval 失败', 'Generation 失败', 'Stream 失败', 'Judge 失败',
+    ])
+    expect(diagnostics).toContain('| papermind | 2 | 2 | 1/2 | 1 | 1 | 1 | 3 |')
+    expect(diagnostics).toContain('token accounting 不完整')
+    expect(speed).not.toContain('Speed 样本')
+    expect(speed).not.toContain('失败')
+  })
+
+  it('keeps full-context only in a separate generation-ceiling speed table with no Evidence Ready value', () => {
+    const md = renderReport([
+      speedResult('papermind'),
+      fullContextSpeedResult('full-context'),
+    ])
+    const retrievalSpeed = sectionOf(md, '### 检索方法速度（query-timeline-v1）')
+    const ceilingSpeed = sectionOf(md, '### 生成上限速度（query-timeline-v1）')
+
+    expect(retrievalSpeed).toContain('| papermind |')
+    expect(retrievalSpeed).not.toContain('| full-context |')
+    expect(ceilingSpeed).toContain('| full-context | — | — | 300 ms | 400 ms | 500 ms | 600 ms | 80 |')
+    expect(ceilingSpeed).toContain('不参与检索方法速度排名或 delta')
+
+    const qualityCeilingHeader = tableHeaderAfter(md, '### 生成上限（不参与检索排名）')
+    for (const key of Object.keys(SPEED_METRICS)) expect(qualityCeilingHeader).not.toContain(key)
+  })
+
+  it('labels old timing as legacy diagnostics and never admits it to query-timeline reporting', () => {
+    const legacy = result('legacy', {
+      evidenceRecall: 0.7,
+      evidenceReadyLatencyP50Ms: 5,
+      timeToFirstTokenP50Ms: 10,
+      fullAnswerLatencyP50Ms: 20,
+      retrievalLatencyP50Ms: 100,
+      retrievalLatencyP95Ms: 200,
+    }, {
+      meta: {
+        ...result('legacy', {}).meta,
+        startedAt: '2026-09-05T09:30:00.000Z',
+        finishedAt: '2026-09-05T10:00:00.000Z',
+      },
+    })
+
+    const report = renderReport([legacy])
+    expect(report).toContain('### 详细耗时与缓存诊断（Legacy timing）')
+    expect(report).toContain('| legacy |')
+    expect(report).not.toContain('### 检索方法速度（query-timeline-v1）')
+    expect(report).toContain('缺少 `speedDefinition: \'query-timeline-v1\'`')
+
+    const comparison = renderComparison(legacy, speedResult('current'))
+    expect(comparison).not.toContain('### Query-timeline 速度对比')
+    expect(comparison).not.toContain('Evidence Ready P50')
+    expect(comparison).toContain('Legacy timing 不进入 query-timeline 速度 delta')
+  })
+})
+
+describe('renderComparison — query-timeline speed gate', () => {
+  it.each([
+    ['dataset fingerprint', { datasetFingerprint: 'other' }],
+    ['executed IDs', { executedQuestionIdsHash: 'other' }],
+    ['completed speed IDs', { completedSpeedQuestionIdsHash: 'other' }],
+    ['speed schema', { speedMetricSchemaVersion: 2 }],
+    ['answer model', { answerModelIdentity: 'other' }],
+    ['answer framing', { answerFramingIdentityHash: 'other' }],
+    ['endpoint', { endpointIdentity: 'other' }],
+    ['generation settings', { generationSettingsHash: 'other' }],
+    ['retry count', { retryAttempts: 1 }],
+    ['streaming', { streaming: false }],
+    ['cache mode', { llmCacheEnabled: true }],
+    ['concurrency', { queryConcurrency: 2 }],
+    ['environment', { executionEnvironmentFingerprint: 'other' }],
+  ])('suppresses every speed delta when %s differs', (_label, rawPatch) => {
+    const patch = rawPatch as Partial<BenchResult['meta']>
+    const md = renderComparison(
+      speedResult('a', { evidenceReadyLatencyP50Ms: 100 }),
+      speedResult('b', { evidenceReadyLatencyP50Ms: 80 }, patch),
+    )
+
+    expect(md).toContain('### Query-timeline 速度对比')
+    expect(md).toContain('速度不可比较')
+    expect(md).toContain('| Evidence Ready P50 | 100 ms | 80 ms | — |')
+  })
+
+  it('does not admit a non-query-timeline speed definition to the speed comparison table', () => {
+    const md = renderComparison(
+      speedResult('a'),
+      speedResult('b', { evidenceReadyLatencyP50Ms: 80 }, {
+        speedDefinition: 'other' as BenchResult['meta']['speedDefinition'],
+      }),
+    )
+    expect(md).not.toContain('### Query-timeline 速度对比')
+    expect(md).not.toContain('Evidence Ready P50')
+    expect(md).toContain('两侧都必须声明 `speedDefinition: \'query-timeline-v1\'`')
+  })
+
+  it('rejects unequal speedSampleCount and same-sized cohorts with different completed IDs', () => {
+    const unequalCount = speedResult('b', { speedSampleCount: 1 })
+    const countReport = renderComparison(speedResult('a'), unequalCount)
+    expect(countReport).toContain('speedSampleCount')
+    expect(countReport).toContain('| TTFT P50 | 300 ms | 300 ms | — |')
+
+    const differentIds = speedResult('b', {}, { completedSpeedQuestionIdsHash: 'same-count-other-ids' })
+    const idReport = renderComparison(speedResult('a'), differentIds)
+    expect(idReport).toContain('completedSpeedQuestionIdsHash 不一致')
+    expect(idReport).toContain('| Full Answer P50 | 500 ms | 500 ms | — |')
+  })
+
+  it('keeps speed and retrieval comparison gates independent in both directions', () => {
+    const retrievalMismatch = speedResult(
+      'b',
+      { evidenceReadyLatencyP50Ms: 80, contextPageMrr: 0.6 },
+      { contextBudgetTokens: 2048 },
+    )
+    const speedAllowed = renderComparison(speedResult('a'), retrievalMismatch)
+    expect(speedAllowed).toContain('| Evidence Ready P50 | 100 ms | 80 ms | -20 ms |')
+    expect(speedAllowed).toContain('| MRR (context-page-v1) | 0.500 | 0.600 | — |')
+
+    const speedMismatch = speedResult(
+      'b',
+      { evidenceReadyLatencyP50Ms: 80, contextPageMrr: 0.6 },
+      { endpointIdentity: 'other' },
+    )
+    expect(retrievalComparisonIssues(speedResult('a'), speedMismatch)).toEqual([])
+    const qualityAllowed = renderComparison(speedResult('a'), speedMismatch)
+    expect(qualityAllowed).toContain('| Evidence Ready P50 | 100 ms | 80 ms | — |')
+    expect(qualityAllowed).toContain('| MRR (context-page-v1) | 0.500 | 0.600 | +0.100 |')
+  })
+
+  it('suppresses only the token delta when token accounting is incomplete', () => {
+    const incomplete = speedResult('b', {
+      evidenceReadyLatencyP50Ms: 80,
+      avgOnlineTokensPerCompletedAnswer: 70,
+      onlineTokenSampleCount: 1,
+    })
+    const md = renderComparison(speedResult('a'), incomplete)
+
+    expect(md).not.toContain('速度不可比较')
+    expect(md).toContain('| Evidence Ready P50 | 100 ms | 80 ms | -20 ms |')
+    expect(md).toContain('| Avg Online Tokens | 80 | 70 | — |')
+    expect(md).toContain('token accounting 不完整，仅抑制 Avg Online Tokens delta')
+  })
+
+  it('states speed-resource and quality directions explicitly', () => {
+    const md = renderComparison(speedResult('a'), speedResult('b'))
+    expect(md).toContain('Evidence Ready、TTFT、Full Answer 与 Avg Online Tokens 均为越低越好')
+    expect(md).toContain('质量指标越高越好')
+  })
+})
+
 describe('fmtDuration', () => {
   it('毫秒级显示 N ms', () => {
     expect(fmtDuration(500)).toBe('500 ms')
@@ -753,9 +993,9 @@ describe('renderReport 耗时与缓存', () => {
     }
   }
 
-  it('单结果输出「耗时与缓存」区块，含 wall-clock、缓存行与时延表', () => {
+  it('单结果输出详细 Legacy timing 诊断区块，含 wall-clock、缓存行与时延表', () => {
     const md = renderReport([timedResult('default')])
-    expect(md).toContain('### 耗时与缓存')
+    expect(md).toContain('### 详细耗时与缓存诊断（Legacy timing）')
     expect(md).toContain('整轮 wall-clock 29m 10s')
     expect(md).toContain('125 hits / 394 requests')
     expect(md).toContain('31.7%')
@@ -799,7 +1039,7 @@ describe('renderReport 耗时与缓存', () => {
     const old = result('legacy', { evidenceRecall: 0.7 })
     const md = renderReport([old])
     expect(md).toContain('legacy')
-    expect(md).not.toContain('### 耗时与缓存')
+    expect(md).not.toContain('### 详细耗时与缓存诊断（Legacy timing）')
   })
 
   it('summary 结果不渲染耗时区块（HF 摘要无时延元数据）', () => {
@@ -811,7 +1051,7 @@ describe('renderReport 耗时与缓存', () => {
       perSample: [],
       errors: [],
     }
-    expect(renderReport([summary])).not.toContain('### 耗时与缓存')
+    expect(renderReport([summary])).not.toContain('### 详细耗时与缓存诊断（Legacy timing）')
   })
 })
 

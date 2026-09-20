@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { EvalSample, SemanticTreeParams } from '../types'
+import type { StreamingLlmClient } from '../llmClient'
+import type { SpeedRunContract } from '../speed/contract'
 import type { IndexNode } from '../../../src/utils/pageIndex'
 import type { PipelineRetrieval, RagGenerationStage, RagRetrievalStage } from '../../../src/utils/ragPipeline'
 import type { QaTaskArgs, QaTaskDeps } from '../runner/qa'
@@ -10,7 +12,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 }))
 
 const { runQaTask } = await import('../runner/qa')
-const { createSemanticTreeHook } = await import('../runner/semanticTreeQa')
+const { createSemanticTreeHook, runSemanticTreeQaTask } = await import('../runner/semanticTreeQa')
 const { buildEvaluationContract, CONTEXT_BUDGET_TOKENS } = await import('../evaluationContract')
 const { materializeContext } = await import('../../../src/utils/contextTrace')
 
@@ -146,6 +148,24 @@ const argsWith = (overrides: Partial<QaTaskArgs> = {}): QaTaskArgs => {
     deps: { ...makeDeps(), ...deps },
     materialize: materialize ?? (groups => materializeContext(groups, tokenizer, CONTEXT_BUDGET_TOKENS)),
     evaluationContract: evaluationContract ?? buildEvaluationContract(samples, rest.limit),
+  }
+}
+
+function speedContract(datasetFingerprint: string): SpeedRunContract {
+  return {
+    speedMetricSchemaVersion: 1,
+    speedDefinition: 'query-timeline-v1',
+    datasetFingerprint,
+    executedQuestionIdsHash: 'executed-question-ids',
+    streaming: true,
+    llmCacheEnabled: false,
+    queryConcurrency: 1,
+    retryAttempts: 0,
+    answerModelIdentity: 'answer-model',
+    answerFramingIdentityHash: 'answer-framing',
+    endpointIdentity: 'endpoint',
+    generationSettingsHash: 'generation-settings',
+    executionEnvironmentFingerprint: 'execution-environment',
   }
 }
 
@@ -418,5 +438,91 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
     expect(result.perPaper![0].treeNodeCount).toBeUndefined()
     expect(result.metrics.treeBuildFailureRate).toBeUndefined()
     expect(result.meta.retrievalAlgorithm).toBe('papermind-llm')
+  })
+
+  it('speed timeline starts after flat and semantic indexes and streams through the wrapper', async () => {
+    const events: string[] = []
+    let snapshotIndex = 0
+    const snapshots = [
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 16, incompleteRequestCount: 0 },
+    ]
+    const client: StreamingLlmClient = {
+      complete: vi.fn(async () => {
+        events.push('semantic-tree')
+        return TREE_JSON
+      }),
+      chat: vi.fn(),
+      chatStream: vi.fn(),
+      stats: () => ({ hits: 0, misses: 0 }),
+      latencies: () => [],
+      requestTimings: () => [],
+      tokenSnapshot: () => {
+        events.push(snapshotIndex === 0 ? 'token-before' : 'token-after')
+        return snapshots[snapshotIndex++]
+      },
+      cacheEnabled: () => false,
+    }
+    const deps = makeDeps({
+      buildIndex: vi.fn(async () => {
+        events.push('flat-index')
+        return tree
+      }),
+      retrieveContext: vi.fn(async () => {
+        events.push('retrieve')
+        return retrievalStage()
+      }),
+      generateAnswer: vi.fn(async () => {
+        throw new Error('non-stream generation must not run in speed mode')
+      }),
+    })
+    const timelineValues = [100, 120, 140, 160]
+    const timelineLabels = ['t0', 't1', 'ttft', 't3']
+    let timelineIndex = 0
+    const evaluationContract = buildEvaluationContract([sample])
+
+    const result = await runSemanticTreeQaTask({
+      ...baseArgs,
+      config: { ...baseArgs.config, semanticTree: params },
+      client,
+      deps,
+      materialize: groups => materializeContext(groups, tokenizer, CONTEXT_BUDGET_TOKENS),
+      evaluationContract,
+      now: () => 0,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: () => {
+          events.push(timelineLabels[timelineIndex])
+          return timelineValues[timelineIndex++]
+        },
+        streamAnswer: async (_messages, onVisibleText) => {
+          events.push('stream')
+          onVisibleText('8')
+          return { content: '8' }
+        },
+      },
+    })
+
+    expect(events).toEqual([
+      'flat-index',
+      'semantic-tree',
+      'token-before',
+      't0',
+      'retrieve',
+      't1',
+      'stream',
+      'ttft',
+      't3',
+      'token-after',
+    ])
+    expect(deps.generateAnswer).not.toHaveBeenCalled()
+    expect(result.perSample[0].answer).toBe('8')
+    expect(result.perSample[0].speed).toMatchObject({
+      evidenceReadyLatencyMs: 20,
+      timeToFirstTokenMs: 40,
+      fullAnswerLatencyMs: 60,
+      onlineTokenCount: 6,
+      tokenAccountingComplete: true,
+    })
   })
 })

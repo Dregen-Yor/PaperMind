@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IndexNode } from '../utils/pageIndex'
+import type { ChatTurn } from '../utils/queryRewrite'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -7,7 +8,13 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   getDocument: vi.fn(),
 }))
 
-const { runRagPipeline, retrieveRagContext, generateRagAnswer, MATH_FORMAT_INSTRUCTION } =
+const {
+  runRagPipeline,
+  retrieveRagContext,
+  generateRagAnswer,
+  buildAnswerMessages,
+  MATH_FORMAT_INSTRUCTION,
+} =
   await import('../utils/ragPipeline')
 const { materializeContext } = await import('../utils/contextTrace')
 
@@ -28,6 +35,76 @@ const multiLeafTree: IndexNode = {
 const singleLeafTree: IndexNode = leaf('only', 0, 1)
 
 const pages = ['p1', 'p2', 'p3', 'p4']
+const EXPECTED_MATH_FORMAT_INSTRUCTION =
+  '数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。'
+
+describe('buildAnswerMessages', () => {
+  it('pins the exact math-format instruction bytes', () => {
+    expect(MATH_FORMAT_INSTRUCTION).toBe(EXPECTED_MATH_FORMAT_INSTRUCTION)
+  })
+
+  it('pins the exact messages for an empty context', () => {
+    expect(buildAnswerMessages('', '问题', [], '你是助手')).toEqual([
+      {
+        role: 'system',
+        content: `你是助手\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}`,
+      },
+      { role: 'user', content: '问题' },
+    ])
+  })
+
+  it('pins the exact messages for non-empty context and a language-augmented prompt', () => {
+    const systemPrompt = '你是助手\n\n请用英文作答。'
+    const context = '第一段\n第二段'
+
+    expect(buildAnswerMessages(context, 'What is it?', [], systemPrompt)).toEqual([
+      {
+        role: 'system',
+        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${context}`,
+      },
+      { role: 'user', content: 'What is it?' },
+    ])
+  })
+
+  it('keeps only the most recent generation history turns', () => {
+    const history: ChatTurn[] = Array.from({ length: 21 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `turn-${index}`,
+    }))
+
+    expect(buildAnswerMessages('', 'current question', history, 'system')).toEqual([
+      {
+        role: 'system',
+        content: `system\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}`,
+      },
+      ...history.slice(-19),
+      { role: 'user', content: 'current question' },
+    ])
+  })
+
+  it('passes the exported builder output unchanged to the generation model', async () => {
+    const retrieval = {
+      retrievals: [],
+      retrievalQuery: 'query',
+      rewritten: false,
+      context: 'retrieved context',
+      contextTruncated: false,
+      sources: [],
+      llmCalls: 0,
+      treeRouted: false,
+      queryRewriteLatencyMs: 0,
+      retrievalLatencyMs: 0,
+      pipelineStartedAt: 100,
+    }
+    const generate = vi.fn().mockResolvedValue('answer')
+
+    await generateRagAnswer(retrieval, 'query', [{ role: 'user', content: 'earlier' }], generate, 'system')
+
+    expect(generate).toHaveBeenCalledWith(
+      buildAnswerMessages(retrieval.context, 'query', [{ role: 'user', content: 'earlier' }], 'system'),
+    )
+  })
+})
 
 describe('runRagPipeline', () => {
   it('caps the generation context at maxContextChars', async () => {

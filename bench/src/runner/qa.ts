@@ -25,13 +25,17 @@ import type {
   PerSampleRecord,
   PipelineTiming,
   QaQuestion,
+  QueryTimeline,
   SampleError,
 } from '../types'
-import type { LlmClient } from '../llmClient'
+import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { applyRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
 import { isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
+import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
+import { startQueryTimeline } from '../speed/queryTimeline'
+import { assertSpeedAnswerClient } from '../speed/policy'
 import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
 
 /** 与 src/stores/chat.ts 的 DEFAULT_PROFILE.systemPrompt 保持一致的字面值。 */
@@ -81,6 +85,8 @@ export interface QaTaskArgs {
    * 全量写入结果 meta，并据此校验「有效题数 == contextPageMrr 观测数」的固定分母不变量。
    */
   evaluationContract: EvaluationContract
+  /** 提供时启用查询时间线与流式最终回答；缺省路径保持原生产生成调用。 */
+  speed?: SpeedRunnerOptions
 }
 
 /** 只透传 config 中显式给出的分块字段，未设置的字段让生产代码用默认值。 */
@@ -108,6 +114,7 @@ function ragOptions(config: PaperMindConfig): RagOptions {
 }
 
 export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
+  if (args.speed) assertSpeedAnswerClient(args.client as StreamingLlmClient)
   const { samples, config, client, limit, gitSha, model } = args
   const now = args.now ?? Date.now
   const startedAt = new Date().toISOString()
@@ -212,6 +219,12 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       perSample.push(record)
 
       // ---------- 检索阶段 ----------
+      const speedClient = args.speed ? client as StreamingLlmClient : undefined
+      let timeline: QueryTimeline | undefined
+      if (args.speed && speedClient) {
+        const before = speedClient.tokenSnapshot()
+        timeline = startQueryTimeline(args.speed.now ?? now, before)
+      }
       let retrieval: RagRetrievalStage
       try {
         retrieval = await retrieveContext(
@@ -226,10 +239,12 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
           ragOptions(config),
           { now, materialize: args.materialize },
         )
+        timeline?.markEvidenceReady()
         assertRetrievalTiming(retrieval)
       } catch (e) {
         // 时延不变量破坏是评测口径漂移而非样本失败，向上抛出让整轮失效
         if (e instanceof TimingInvariantViolation) throw e
+        if (timeline && speedClient) record.speed = timeline.partial(speedClient.tokenSnapshot())
         skipSampleRecord(record, eligible, eligible ? 'failed' : 'ineligible')
         errors.push({ sampleId: question.id, stage: 'retrieve', message: errorMessage(e) })
         continue
@@ -289,22 +304,58 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
 
       // ---------- 生成阶段 ----------
       let generation: RagGenerationStage
-      try {
-        generation = await generateAnswer(
-          retrieval,
-          question.question,
-          [],
-          client.chat,
-          systemPrompt,
-          { now },
-        )
+      if (args.speed && timeline && speedClient) {
+        let generationStartedAt: number | undefined
+        let generationFinishedAt: number | undefined
+        let answer: string
+        try {
+          answer = await generateSpeedAnswer({
+            context: retrieval.context,
+            question: question.question,
+            history: [],
+            systemPrompt,
+            timeline,
+            client: speedClient,
+            record,
+            streamAnswer: args.speed.streamAnswer,
+            onStreamStarted: () => { generationStartedAt = now() },
+            onStreamCompleted: () => { generationFinishedAt = now() },
+          })
+        } catch (e) {
+          // 流异常由 adapter 附 partial；没有 partial 说明 complete() 的时间线不变量失败，整轮失效。
+          if (record.speed === undefined) throw e
+          record.generationStatus = 'failed'
+          record.judgeStatus = 'skipped'
+          errors.push({ sampleId: question.id, stage: 'stream', message: errorMessage(e) })
+          continue
+        }
+        if (generationStartedAt === undefined || generationFinishedAt === undefined) {
+          throw new TimingInvariantViolation()
+        }
+        generation = {
+          answer,
+          answerGenerationLatencyMs: Math.max(0, generationFinishedAt - generationStartedAt),
+          queryEndToEndLatencyMs: Math.max(0, generationFinishedAt - retrieval.pipelineStartedAt),
+        }
         assertGenerationTiming(generation)
-      } catch (e) {
-        if (e instanceof TimingInvariantViolation) throw e
-        record.generationStatus = 'failed'
-        record.judgeStatus = 'skipped'
-        errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
-        continue
+      } else {
+        try {
+          generation = await generateAnswer(
+            retrieval,
+            question.question,
+            [],
+            client.chat,
+            systemPrompt,
+            { now },
+          )
+          assertGenerationTiming(generation)
+        } catch (e) {
+          if (e instanceof TimingInvariantViolation) throw e
+          record.generationStatus = 'failed'
+          record.judgeStatus = 'skipped'
+          errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
+          continue
+        }
       }
 
       record.generationStatus = 'completed'
@@ -382,6 +433,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     unmappedEvidenceQuestions,
     extraMetrics: treeAgg.metrics,
     extraTimingValues: { treeBuildLatency: treeAgg.latencies },
+    ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }
 

@@ -9,10 +9,59 @@ import { buildEvaluationContract, composeBaseSystemPrompt } from '../evaluationC
 import { materializeContext, type ContextGroup } from '../../../src/utils/contextTrace'
 import { MATH_FORMAT_INSTRUCTION } from '../../../src/utils/ragPipeline'
 import type { EvalSample } from '../types'
-import type { LlmClient } from '../llmClient'
+import type { LlmClient, StreamingLlmClient } from '../llmClient'
+import type { SpeedRunContract } from '../speed/contract'
 
 const client: LlmClient = {
   complete: async () => '', chat: async () => '', stats: () => ({ hits: 0, misses: 0 }), latencies: () => [], requestTimings: () => [],
+}
+
+function speedContract(datasetFingerprint: string): SpeedRunContract {
+  return {
+    speedMetricSchemaVersion: 1,
+    speedDefinition: 'query-timeline-v1',
+    datasetFingerprint,
+    executedQuestionIdsHash: 'executed-question-ids',
+    streaming: true,
+    llmCacheEnabled: false,
+    queryConcurrency: 1,
+    retryAttempts: 0,
+    answerModelIdentity: 'answer-model',
+    answerFramingIdentityHash: 'answer-framing',
+    endpointIdentity: 'endpoint',
+    generationSettingsHash: 'generation-settings',
+    executionEnvironmentFingerprint: 'execution-environment',
+  }
+}
+
+function speedClient(events: string[]): StreamingLlmClient {
+  const snapshots = [
+    { totalTokens: 10, incompleteRequestCount: 0 },
+    { totalTokens: 18, incompleteRequestCount: 0 },
+  ]
+  let snapshotIndex = 0
+  return {
+    complete: async () => '',
+    chat: async () => '',
+    chatStream: async () => ({ content: '' }),
+    stats: () => ({ hits: 0, misses: 0 }),
+    latencies: () => [],
+    requestTimings: () => [],
+    tokenSnapshot: () => {
+      events.push(snapshotIndex === 0 ? 'token-before' : 'token-after')
+      return snapshots[snapshotIndex++]
+    },
+    cacheEnabled: () => false,
+  }
+}
+
+function scriptedClock(values: number[], events: string[], labels: string[]): () => number {
+  let index = 0
+  return () => {
+    if (index >= values.length) throw new Error(`scripted clock read ${index + 1} exceeds ${values.length}`)
+    events.push(labels[index])
+    return values[index++]
+  }
 }
 
 // 物化器在测试里按「每个分片一个 token」分词：预算 N 恰好放行前 N 个产出文本的页，
@@ -137,6 +186,85 @@ describe('hybrid-rerank runner', () => {
       // 部分进入的页照常参与检索指标：gold 页 0 在页序首位
       expect(record.metrics.contextPageMrr).toBe(1)
     }
+  })
+
+  it('finishes local/index initialization before t0 and streams after final materialization', async () => {
+    const events: string[] = []
+    const speedSample = { ...sample, questions: [sample.questions[0]] }
+    const evaluationContract = buildEvaluationContract([speedSample])
+    let denseCall = 0
+    const tokenizer = {
+      tokenize: (text: string) => {
+        events.push('tokenize')
+        return text.split(/\s+/).filter(Boolean).map(word => `▁${word}`)
+      },
+    }
+    const denseProvider = {
+      embed: async (texts: string[]) => {
+        events.push(denseCall++ === 0 ? 'dense-index' : 'dense-query')
+        return texts.map((_, index) => [1, index, 0])
+      },
+    }
+    const reranker = {
+      score: async (pairs: Array<{ query: string; document: string }>) => {
+        events.push('rerank')
+        return pairs.map(pair => -pair.document.length)
+      },
+    }
+    const streamAnswer: StreamingLlmClient['chatStream'] = vi.fn(async (_messages, onVisibleText) => {
+      events.push('stream')
+      onVisibleText('x')
+      return { content: 'x' }
+    })
+    const result = await runHybridRerankQaTask(hybridArgs([speedSample], {
+      client: speedClient(events),
+      evaluationContract,
+      now: () => 0,
+      materialize: groups => {
+        events.push('materialize')
+        return materializeWith(4096)(groups)
+      },
+      deps: {
+        get tokenizer() { events.push('tokenizer-runtime'); return tokenizer },
+        get denseProvider() { events.push('embedding-runtime'); return denseProvider },
+        get reranker() { events.push('reranker-runtime'); return reranker },
+      },
+      generateAnswer: async () => {
+        throw new Error('legacy generation must not run in speed mode')
+      },
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: scriptedClock([100, 120, 140, 160], events, ['t0', 't1', 'ttft', 't3']),
+        streamAnswer,
+      },
+    }))
+
+    for (const sentinel of [
+      'tokenizer-runtime', 'embedding-runtime', 'reranker-runtime', 'tokenize', 'dense-index',
+      'token-before', 't0', 'dense-query', 'rerank', 'materialize', 't1', 'stream',
+    ]) expect(events).toContain(sentinel)
+    expect(events.indexOf('tokenizer-runtime')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('embedding-runtime')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('reranker-runtime')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('tokenize')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('dense-index')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('token-before')).toBeLessThan(events.indexOf('t0'))
+    expect(events.indexOf('t0')).toBeLessThan(events.indexOf('dense-query'))
+    expect(events.indexOf('rerank')).toBeLessThan(events.indexOf('materialize'))
+    expect(events.indexOf('materialize')).toBeLessThan(events.indexOf('t1'))
+    expect(events.indexOf('t1')).toBeLessThan(events.indexOf('stream'))
+    expect(result.perSample[0]).toMatchObject({
+      answer: 'x',
+      speed: {
+        evidenceReadyLatencyMs: 20,
+        timeToFirstTokenMs: 40,
+        fullAnswerLatencyMs: 60,
+        onlineTokenCount: 8,
+        tokenAccountingComplete: true,
+      },
+      metrics: { contextPageMrr: 1, evidenceRecall: 1, evidenceHit: 1, contextPrecision: 0.5, answerF1: 1 },
+    })
+    expect(result.metrics.speedSampleCount).toBe(1)
   })
 })
 
@@ -280,6 +408,154 @@ describe('long-section-rag runner', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('builds the local section index before t0 and streams only after final materialization', async () => {
+    const events: string[] = []
+    const speedSample = { ...sample, questions: [sample.questions[0]] }
+    const evaluationContract = buildEvaluationContract([speedSample])
+    const tokenizer = {
+      tokenize: (text: string) => {
+        events.push('tokenize')
+        return text.split(/\s+/).filter(Boolean).map(word => `▁${word}`)
+      },
+    }
+    const streamAnswer: StreamingLlmClient['chatStream'] = vi.fn(async (_messages, onVisibleText) => {
+      events.push('stream')
+      onVisibleText('x')
+      return { content: 'x' }
+    })
+    const result = await runLongSectionQaTask(longArgs([speedSample], {
+      client: speedClient(events),
+      evaluationContract,
+      now: () => 0,
+      materialize: groups => {
+        events.push('materialize')
+        return materializeWith(4096)(groups)
+      },
+      deps: {
+        get tokenizer() { events.push('tokenizer-runtime'); return tokenizer },
+        detectSections: (_pages, _tokenizer) => {
+          events.push('sections')
+          return [
+            { title: 'A', startToken: 0, endToken: 8, startPage: 0, endPage: 0 },
+            { title: 'B', startToken: 8, endToken: 16, startPage: 1, endPage: 1 },
+          ]
+        },
+      },
+      generateAnswer: async () => {
+        throw new Error('legacy generation must not run in speed mode')
+      },
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: scriptedClock([100, 120, 140, 160], events, ['t0', 't1', 'ttft', 't3']),
+        streamAnswer,
+      },
+    }))
+
+    for (const sentinel of [
+      'tokenizer-runtime', 'tokenize', 'sections', 'token-before', 't0', 'materialize', 't1', 'stream',
+    ]) expect(events).toContain(sentinel)
+    expect(events.indexOf('tokenizer-runtime')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('tokenize')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('sections')).toBeLessThan(events.indexOf('token-before'))
+    expect(events.indexOf('token-before')).toBeLessThan(events.indexOf('t0'))
+    expect(events.indexOf('t0')).toBeLessThan(events.indexOf('materialize'))
+    expect(events.indexOf('materialize')).toBeLessThan(events.indexOf('t1'))
+    expect(events.indexOf('t1')).toBeLessThan(events.indexOf('stream'))
+    expect(result.perSample[0]).toMatchObject({
+      answer: 'x',
+      speed: {
+        evidenceReadyLatencyMs: 20,
+        timeToFirstTokenMs: 40,
+        fullAnswerLatencyMs: 60,
+        onlineTokenCount: 8,
+        tokenAccountingComplete: true,
+      },
+      metrics: { contextPageMrr: 1, evidenceRecall: 1, evidenceHit: 1, contextPrecision: 1, answerF1: 1 },
+    })
+    expect(result.metrics.speedSampleCount).toBe(1)
+  })
+})
+
+describe('direct strong-runner speed policy ordering', () => {
+  it.each([
+    ['hybrid-rerank', async (initialized: () => void, cachedClient: StreamingLlmClient) => {
+      const args = hybridArgs([sample], {
+        client: cachedClient,
+        deps: {
+          get tokenizer(): never {
+            initialized()
+            throw new Error('expensive hybrid runtime initialized')
+          },
+        },
+      })
+      return runHybridRerankQaTask({
+        ...args,
+        speed: { contract: speedContract(args.evaluationContract.datasetFingerprint) },
+      })
+    }],
+    ['long-section-rag', async (initialized: () => void, cachedClient: StreamingLlmClient) => {
+      const args = longArgs([sample], {
+        client: cachedClient,
+        deps: {
+          get tokenizer(): never {
+            initialized()
+            throw new Error('expensive long-section runtime initialized')
+          },
+        },
+      })
+      return runLongSectionQaTask({
+        ...args,
+        speed: { contract: speedContract(args.evaluationContract.datasetFingerprint) },
+      })
+    }],
+  ])('rejects a cache-enabled %s speed call before local runtime initialization', async (_name, run) => {
+    const initialized = vi.fn()
+    const cachedClient = { ...speedClient([]), cacheEnabled: () => true }
+
+    await expect(run(initialized, cachedClient)).rejects.toThrow(/cache/i)
+    expect(initialized).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['hybrid-rerank', async (initialized: () => void, speedAnswerClient: StreamingLlmClient) => {
+      const args = hybridArgs([sample], {
+        client: speedAnswerClient,
+        checkpointPath: '/private/tmp/forbidden-hybrid-checkpoint.json',
+        deps: {
+          get tokenizer(): never {
+            initialized()
+            throw new Error('expensive hybrid runtime initialized')
+          },
+        },
+      })
+      return runHybridRerankQaTask({
+        ...args,
+        speed: { contract: speedContract(args.evaluationContract.datasetFingerprint) },
+      })
+    }],
+    ['long-section-rag', async (initialized: () => void, speedAnswerClient: StreamingLlmClient) => {
+      const args = longArgs([sample], {
+        client: speedAnswerClient,
+        checkpointPath: '/private/tmp/forbidden-long-checkpoint.json',
+        deps: {
+          get tokenizer(): never {
+            initialized()
+            throw new Error('expensive long-section runtime initialized')
+          },
+        },
+      })
+      return runLongSectionQaTask({
+        ...args,
+        speed: { contract: speedContract(args.evaluationContract.datasetFingerprint) },
+      })
+    }],
+  ])('rejects a checkpointed %s speed call before local runtime initialization', async (_name, run) => {
+    const initialized = vi.fn()
+
+    await expect(run(initialized, speedClient([]))).rejects.toThrow(/speed.*checkpoint/i)
+    expect(initialized).not.toHaveBeenCalled()
+  })
 })
 
 describe('strong baseline stage-aware checkpoints', () => {
@@ -312,6 +588,22 @@ describe('strong baseline stage-aware checkpoints', () => {
     checkpointPath,
   })
 
+  it('rejects a cache-enabled speed answer client before runtime setup', async () => {
+    const args = strongArgs('')
+    const cachedClient = { ...speedClient([]), cacheEnabled: () => true }
+
+    await expect(runStrongBaselineQaTask({
+      ...args,
+      checkpointPath: undefined,
+      client: cachedClient,
+      retrieval: {
+        granularity: 'test passage',
+        build: async () => { throw new Error('runtime must not start') },
+      },
+      speed: { contract: speedContract(args.evaluationContract.datasetFingerprint) },
+    })).rejects.toThrow(/cache/i)
+  })
+
   it('resumes generation from a saved retrieval-only checkpoint', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'strong-stage-'))
     const checkpointPath = join(dir, 'checkpoint.json')
@@ -329,6 +621,53 @@ describe('strong baseline stage-aware checkpoints', () => {
       expect(retrieve).toHaveBeenCalledTimes(1)
       expect(resumed.meta.completed).toBe(1)
       expect(resumed.perSample[0].metrics.contextPageMrr).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects speed mode with a checkpoint path before processing samples', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strong-speed-policy-'))
+    const events: string[] = []
+    const build = vi.fn(async () => ({ leafCount: 1, retrieve }))
+    const args = strongArgs(join(dir, 'checkpoint.json'))
+    const evaluationContract = args.evaluationContract
+    try {
+      await expect(runStrongBaselineQaTask({
+        ...args,
+        client: speedClient(events),
+        retrieval: { granularity: 'test passage', build },
+        speed: { contract: speedContract(evaluationContract.datasetFingerprint) },
+      })).rejects.toThrow(/speed.*checkpoint/i)
+
+      expect(build).not.toHaveBeenCalled()
+      expect(events).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects speed mode instead of resuming a saved pending context', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strong-speed-resume-'))
+    const checkpointPath = join(dir, 'checkpoint.json')
+    retrieve.mockClear()
+    try {
+      await runStrongBaselineQaTask({
+        ...strongArgs(checkpointPath),
+        generateAnswer: async () => { throw new Error('generation failed') },
+      })
+      expect(retrieve).toHaveBeenCalledTimes(1)
+
+      const events: string[] = []
+      const args = strongArgs(checkpointPath)
+      await expect(runStrongBaselineQaTask({
+        ...args,
+        client: speedClient(events),
+        speed: { contract: speedContract(args.evaluationContract.datasetFingerprint) },
+      })).rejects.toThrow(/speed.*checkpoint/i)
+
+      expect(retrieve).toHaveBeenCalledTimes(1)
+      expect(events).toEqual([])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
