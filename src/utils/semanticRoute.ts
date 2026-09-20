@@ -17,7 +17,8 @@ import {
   collectWithNeighbours,
   type EvidenceBlock,
 } from './evidenceBlock'
-import { parseAndValidateScores, type IndexNode, type NodeScore, type RetrievalResult } from './pageIndex'
+import { parseAndValidateScores, nodeToContextGroup, type IndexNode, type NodeScore, type RetrievalResult } from './pageIndex'
+import { CONTEXT_GROUP_SEPARATOR, type ContextGroup } from './contextTrace'
 import { flattenSemanticTree, type SemanticNode, type SemanticTree } from './semanticTree'
 import type { LLMFn } from './llm'
 
@@ -292,7 +293,11 @@ export async function routeWithSemanticTree(
   let usedFlatFallback = false
   if (insufficientEvidence && flatLeaves.length > 0) {
     usedFlatFallback = true
-    pickedLeaves = degraded ? [flatLeaves[0]] : pickByScore(flatLeaves, flatScores, topK, minScore)
+    // 单候选短路没有跑打分，flatScores 必为空：此时 pickByScore 只会返回 []，
+    // 会把唯一可用的平面叶节点丢掉、让回落形同虚设。与降级路径一致，直接用首个叶节点。
+    pickedLeaves = degraded || flatScores.length === 0
+      ? [flatLeaves[0]]
+      : pickByScore(flatLeaves, flatScores, topK, minScore)
     // 树域打分会被下游按平面叶节点下标解释，绝不能写进 scores；
     // 没有回落时宁可不报 MRR，也不能报一个映射错位的
     evidenceBlockIds = []
@@ -300,27 +305,34 @@ export async function routeWithSemanticTree(
   }
 
   let context: string
+  let contextGroups: ContextGroup[]
   let sources: string[]
   let selected: IndexNode[]
   if (pickedLeaves.length > 0) {
     // 平面回落的上下文完全按平面路径的方式拼：两种路径的指标才可比
     context = pickedLeaves
       .map(leaf => pages.slice(leaf.startPage, leaf.endPage + 1).join('\n\n'))
-      .join('\n\n---\n\n')
+      .join(CONTEXT_GROUP_SEPARATOR)
+    // 逐页来源沿用平面路径的展开方式，回落样本与被比较的平面样本同口径
+    contextGroups = pickedLeaves.map(leaf => nodeToContextGroup(leaf, pages))
     selected = pickedLeaves
     sources = selected.map(formatSource)
   } else if (contextBlocks.length > 0) {
-    context = contextBlocks.map(block => block.rawText).join('\n\n---\n\n')
+    context = contextBlocks.map(block => block.rawText).join(CONTEXT_GROUP_SEPARATOR)
+    // 一个证据块一组，组内直接复用块的逐页分区；只报真正进入上下文的块
+    contextGroups = contextBlocks.map(block => ({ pieces: block.pieces }))
     selected = toPageSpans(contextBlocks, pickedNodes)
     sources = selected.map(formatSource)
   } else {
     context = ''
+    contextGroups = []
     selected = []
     sources = []
   }
 
   return {
     context,
+    contextGroups,
     sources,
     selected,
     // 只有平面域的打分能进 scores：树域 id 与下游的叶节点下标不是同一个坐标系

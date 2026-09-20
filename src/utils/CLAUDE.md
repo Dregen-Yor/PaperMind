@@ -56,11 +56,14 @@ interface EvidenceBlock {
   id: string            // B001 / B002…（按 order 稳定编号）
   rawText: string       // 原文，逐字保留，任何阶段都不得改写
   normalizedText: string// 供模型阅读的归一化文本（去页眉页脚、拼连字符）
-  startPage: number; endPage: number   // 0-based inclusive
+  pieces: ContextPiece[]// rawText 的逐页精确分区（按序拼接即 rawText），供评测从进上下文的块反推页序
+  startPage: number; endPage: number   // 0-based inclusive，由 pieces 首末推出
   order: number; previousId: string | null; nextId: string | null
   sourceType: 'body' | 'figure-caption' | 'table-caption' | 'formula' | 'footnote' | 'other'
 }
 ```
+
+`pieces` 由构造保证无损（`rawText === join(pieces)`、首末页等于块页区间），因此评测可以安全地从它反推「这块贡献了哪些页」，而 `rawText` 本身不因此改变；`hasExactPagePartition` 校验持久化的块在 schema v2 起必须满足这一分区不变量，不满足即整树作废重建。
 
 | 导出 | 作用 |
 |------|------|
@@ -113,8 +116,42 @@ interface SemanticTree { schemaVersion; promptVersion; root: SemanticNode }
 
 - **统一上下文预算**：`maxContextChars`（默认 24000，与 bench 各配置同值）按「节点直接引用的块优先、相邻块其次」消耗，**块要么整块进入要么整块丢弃，绝不从中间截断原文**；被丢弃的块数记在 `semantic.droppedBlockCount`
 - **非连续证据必须拆成多个页区间**：`toPageSpans` 只合并真正相邻的块（`block.startPage <= 上一块.endPage + 1`）。用 min/max 合成一个跨度会把中间没进上下文的页也报成已选中，`evidenceRecall` / `contextPrecision` / `selected` / `sources` 会一起失真
-- **`scores` 只有一个坐标系**：下游 `computeMrr` 按平面叶节点下标解释 `scores[i].id`，所以树域打分一律不写出（树路由下 `scores` 为 `[]`，MRR 自动从分母缺席），只有平面回落才写回平移后的平面域打分
+- **检索指标只认最终页序**：`contextPageMrr` 等四个指标消费的是物化器从最终上下文**同源**产出的 `pageOrder`，**不**按 `scores` 的平面叶节点下标反推；树路由与平面回落因此共享同一份页序口径。旧的 `computeMrr`（按 `scores` 排序）与「样本自动从 MRR 分母缺席」已删除
 - **相邻扩展算不算「选中」**：统一按「**真的进了上下文才算**」——`selected` / `sources` 由预算裁剪后的上下文块反推，因此相邻块计入而超预算被丢弃的块不计入；诊断里的 `expandedBlockIds` 与实际进上下文的块严格一致，指标与展示不会各说各话
+
+---
+
+## contextTrace.ts — 上下文物化（最终页序的唯一来源）
+
+把候选片段在固定 token 预算内物化为最终提示词文本，并从**同一次计算**里产出真正贡献了非空文本的原文页码。
+
+```ts
+interface ContextPiece { page: number; text: string }
+interface ContextGroup { pieces: ContextPiece[] }
+interface MaterializedContext { text; pageOrder; tokenCount; truncated }
+const CONTEXT_GROUP_SEPARATOR = '\n\n---\n\n'
+```
+
+- `materializeContext(groups, tokenizer, maxTokens)`：逐组、逐片注入。**只有贡献了非空文本（`text.trim()` 非空）的页才计入 `pageOrder`**，按首次出现顺序去重——同一页在后续组重复出现不再计一次，被预算整片截掉、一个 token 都没产出的页也不出现。`text` 与 `pageOrder` 同源产出，故不存在「文本里有、页序里没有」的矛盾
+- **分组分隔符守卫**：组间用 `CONTEXT_GROUP_SEPARATOR` 连接；当「分隔符 + 至少一个内容 token」都放不下时**整组不进入**（用 `>=` 是刻意：恰好占满也拒绝），避免留下吃掉全部剩余预算的尾部分隔符。分隔符只出现在组首，第一组不带前缀
+- **恰好占满只在「末组」等于未截断**：当恰好占满预算的那一组是**最后一组**时，token 数等于预算不置 `truncated`——`truncated` 是「有内容因预算被丢」的标记，不是「预算用满」。若恰好占满发生在**非末组**，后面还有组没能进入上下文，`truncated` 照置：例如两组、预算 2 token，而第 0 组自身就占满 2 token，得到 `{ tokenCount: 2, truncated: true }`（`contextTrace.ts` 的 `truncated ||= groupIndex < groups.length - 1`）
+- bench 的 `contextPageMrr` 等四个检索指标（`metricSchemaVersion: 2` / `mrrDefinition: 'context-page-v1'`）正建立在这份 `pageOrder` 上，候选排序 MRR（旧 `computeMrr`）已删除
+
+---
+
+## ragPipeline.ts — 分阶段 RAG 主流程
+
+产品与评测共用的 RAG 管线，拆成**检索**与**生成**两个纯函数阶段，外加一个向后兼容的组合封装：
+
+| 导出 | 作用 |
+|------|------|
+| `retrieveRagContext(papers, query, history, llm, opts, deps)` | 查询改写 → 逐篇评分多选（平面或树路由）→ 合并上下文。注入 `deps.materialize` 时改走 `materializeContext` 的受控 token 预算，并产出 `contextPageOrder` / `contextTokenCount`；不注入时沿用产品的 `maxContextChars` 字符预算。返回 `RagRetrievalStage` |
+| `generateRagAnswer(retrieval, query, history, generate, systemPrompt, deps)` | 用检索阶段已算好的上下文组装提示词并调用回答模型。**不改写传入的 `retrieval`**——`generate` 抛错直接向上抛，调用方据此在生成之前落盘检索指标 |
+| `runRagPipeline(...)` | 上面的组合封装（检索 → 生成），产品调用方沿用；未注入 `materialize` 时行为与拆分前逐字一致 |
+
+**关键不变量**：检索指标必须在**生成之前**持久化——生成失败（抛错）不得删除或改写已完成的检索观测。`qa.ts` 依此在 `generateRagAnswer` 之前写入四个检索指标，因此同一行可以「检索成功、生成失败」。
+
+`externalContext` 优先级最高：跳过改写与检索，直接把该文本当上下文，`materialize` 随之失效、页序/token 不产出。`MATH_FORMAT_INSTRUCTION` 为追加在 system 提示词后的数学格式约束。
 
 ---
 

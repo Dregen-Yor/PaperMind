@@ -10,6 +10,7 @@ const block = (order: number, overrides: Partial<EvidenceBlock> = {}): EvidenceB
     id,
     rawText: `RAWTEXT-${id}`,
     normalizedText: `normalized ${id}`,
+    pieces: [{ page: order, text: `RAWTEXT-${id}` }],
     startPage: order,
     endPage: order,
     order,
@@ -247,6 +248,56 @@ describe('routeWithSemanticTree — 最终上下文必须来自原文（§4 / §
     const result = await routeWithSemanticTree(TREE, BLOCKS, '全部？', llm, { includeNeighbours: false })
     expect(result.semantic.expandedBlockIds).toEqual(['B002', 'B003', 'B007'])
   })
+
+  it('单个证据块跨两页时，contextGroups 保留两页的分片而非压成一页', async () => {
+    // B005 换成跨第 3–4 页（0-based 2–3）的块：分片拼接逐字等于 rawText
+    const multipage = BLOCKS.map((b, i) => i === 4
+      ? {
+          ...b,
+          rawText: 'SECOND-PAGE\n\nTHIRD-PAGE',
+          pieces: [{ page: 2, text: 'SECOND-PAGE' }, { page: 3, text: '\n\nTHIRD-PAGE' }],
+          startPage: 2,
+          endPage: 3,
+        }
+      : b)
+    const llm = async () => scoreAll({ 3: 9 })   // a1b2 → B005，关闭相邻扩张以隔离该块
+    const result = await routeWithSemanticTree(TREE, multipage, '证据？', llm, { includeNeighbours: false })
+
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 2, text: 'SECOND-PAGE' }, { page: 3, text: '\n\nTHIRD-PAGE' }] },
+    ])
+    const group = result.contextGroups[0]
+    expect(group.pieces.map(piece => piece.page)).toEqual([2, 3])
+    const rebuilt = result.contextGroups
+      .map(g => g.pieces.map(piece => piece.text).join(''))
+      .join('\n\n---\n\n')
+    expect(rebuilt).toBe(result.context)
+  })
+
+  it('为实际进入上下文的每个证据块产出逐页分组，拼接后逐字还原 context', async () => {
+    const llm = async () => scoreAll({ 4: 9 })   // a2 → B007 + 相邻 B006 / B008
+    const result = await routeWithSemanticTree(TREE, BLOCKS, '边界？', llm)
+
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 5, text: 'RAWTEXT-B006' }] },
+      { pieces: [{ page: 6, text: 'RAWTEXT-B007' }] },
+      { pieces: [{ page: 7, text: 'RAWTEXT-B008' }] },
+    ])
+    const rebuilt = result.contextGroups
+      .map(group => group.pieces.map(piece => piece.text).join(''))
+      .join('\n\n---\n\n')
+    expect(rebuilt).toBe(result.context)
+  })
+
+  it('预算丢弃的块不出现在 contextGroups 中', async () => {
+    const llm = async () => scoreAll({ 4: 9 })
+    const result = await routeWithSemanticTree(TREE, BLOCKS, '边界？', llm, { maxContextChars: 31 })
+    expect(result.semantic.expandedBlockIds).toEqual(['B006', 'B007'])
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 5, text: 'RAWTEXT-B006' }] },
+      { pieces: [{ page: 6, text: 'RAWTEXT-B007' }] },
+    ])
+  })
 })
 
 describe('routeWithSemanticTree — 上下文预算（§9 统一预算）', () => {
@@ -284,6 +335,10 @@ describe('routeWithSemanticTree — 平面回落（§9 必须能退回现有检�
     expect(result.semantic.insufficientEvidence).toBe(true)
     expect(result.sources).toEqual(['Pages 3–4: 平面章节乙'])
     expect(result.context).toBe('PAGE-3\n\nPAGE-4')
+    // 平面回落沿用平面路径的逐页展开：拼接 pieces 即得该节点的 context
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 2, text: 'PAGE-3' }, { page: 3, text: '\n\nPAGE-4' }] },
+    ])
   })
 
   it('打分不可用时取第一个平面候选，与 scoreAndSelect 的降级动作一致', async () => {
@@ -293,6 +348,9 @@ describe('routeWithSemanticTree — 平面回落（§9 必须能退回现有检�
     expect(result.degraded).toBe(true)
     expect(result.semantic.usedFlatFallback).toBe(true)
     expect(result.context).toBe('PAGE-1\n\nPAGE-2')
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 0, text: 'PAGE-1' }, { page: 1, text: '\n\nPAGE-2' }] },
+    ])
   })
 
   it('回落时的打分改用平面叶节点下标，MRR 才能与平面路径同域比较', async () => {
@@ -324,6 +382,33 @@ describe('routeWithSemanticTree — 平面回落（§9 必须能退回现有检�
     expect(result.semantic.usedFlatFallback).toBe(true)
     expect(result.sources).toEqual(['Pages 3–4: 平面章节乙'])
     expect(result.scores).toEqual([{ id: 0, score: 0 }, { id: 1, score: 9 }])
+  })
+
+  it('单候选短路时仍保留平面回落，不丢失唯一叶节点的上下文', async () => {
+    // 根节点无证据 + 单叶平面索引：候选总数为 1，短路不发打分请求。
+    // 此时没有平面打分可用，回落必须直接用这个唯一的平面叶节点，
+    // 否则会同时出现 usedFlatFallback=true 却 context='' 的自相矛盾（§9）。
+    const rootOnly = validateSemanticTree({
+      root: {
+        id: 'r', label: '唯一主张', description: 'd', relationToParent: null,
+        evidenceRefs: [], children: [],
+      },
+    }, BLOCKS).tree!
+    const llm = vi.fn(async () => 'unused')
+    const result = await routeWithSemanticTree(rootOnly, BLOCKS, '问题', llm, {
+      flat: { leaves: [LEAF_A], pages: PAGES },
+    })
+
+    expect(llm).not.toHaveBeenCalled()
+    expect(result.llmCalled).toBe(false)
+    expect(result.semantic.usedFlatFallback).toBe(true)
+    // 树/回落路径绝不写平面坐标系的打分：下游 legacy MRR 会把它按叶节点下标误读
+    expect(result.scores).toEqual([])
+    expect(result.sources).toEqual(['Pages 1–2: 平面章节甲'])
+    expect(result.context).toBe('PAGE-1\n\nPAGE-2')
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 0, text: 'PAGE-1' }, { page: 1, text: '\n\nPAGE-2' }] },
+    ])
   })
 })
 
@@ -369,6 +454,7 @@ describe('routeWithSemanticTree — 降级（§8.2 / §9）', () => {
     expect(result.degraded).toBe(true)
     expect(result.semantic.insufficientEvidence).toBe(true)
     expect(result.context).toBe('')
+    expect(result.contextGroups).toEqual([])
     expect(result.selected).toEqual([])
   })
 

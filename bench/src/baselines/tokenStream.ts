@@ -1,4 +1,5 @@
 import type { TextTokenizer } from '../traditionalRag/types'
+import type { ContextPiece } from '../../../src/utils/contextTrace'
 
 /**
  * 强基线共用的「带页号 token 流」原语。
@@ -31,7 +32,12 @@ export function buildTokenStream(pages: string[], tokenizer: TextTokenizer): { t
   return { tokens, lines }
 }
 
-/** [start, end) 区间的 token 还原为可读文本；与 chunkPages 的还原规则一致。 */
+/**
+ * [start, end) 区间的 token 还原为可读文本（整段 `trim()`）。
+ * 换行与 `▁`→空格 的规则与 chunkPages 相同，但对「仅含空白 token 的页边界」的处理
+ * 与 tokenRangeToPieces 不同（后者只裁首尾分片并按分片丢弃空白），二者**不再逐字等价**。
+ * 当前 bench 已无生产调用方，仅测试在用；去留留待 Task 11 决定。
+ */
 export function sliceText(tokens: PageToken[], start: number, end: number): string {
   let out = ''
   for (let i = start; i < end; i++) {
@@ -39,6 +45,32 @@ export function sliceText(tokens: PageToken[], start: number, end: number): stri
     out += tokens[i].text.replaceAll('▁', ' ')
   }
   return out.trim()
+}
+
+/**
+ * [start, end) 区间的 token 还原为「逐页分片」：连续同页 token 合并为一个 piece；
+ * 页间换行固定为 '\n'，归属于新页的首个分片。裁切范围仅为：首分片 `trimStart`、
+ * 末分片 `trimEnd`——二者都会剥掉**所有** JS 空白（含换行），不止空格——随后丢弃
+ * 裁完变空的分片。由此：
+ * - 首分片（乃至全部分片）可能为纯空白被丢弃，故 `pieces` **可以为空**；
+ * - `pieces[0].page` 可能**大于**该区间的起始页号；
+ * - 与 `sliceText` 的整段 trim **不再等价**：`join(pieces)` 可能多出一个前导 '\n'。
+ * 这是 BenchChunk / StreamPassage / ContiguousRegion 共用的唯一分组实现。
+ */
+export function tokenRangeToPieces(tokens: PageToken[], start: number, end: number): ContextPiece[] {
+  const pieces: ContextPiece[] = []
+  for (let i = start; i < end; i++) {
+    const pageBreak = i > start && tokens[i].page !== tokens[i - 1].page ? '\n' : ''
+    const fragment = pageBreak + tokens[i].text.replaceAll('▁', ' ')
+    const last = pieces.at(-1)
+    if (last?.page === tokens[i].page) last.text += fragment
+    else pieces.push({ page: tokens[i].page, text: fragment })
+  }
+  if (pieces.length > 0) {
+    pieces[0].text = pieces[0].text.trimStart()
+    pieces[pieces.length - 1].text = pieces[pieces.length - 1].text.trimEnd()
+  }
+  return pieces.filter(piece => piece.text.length > 0)
 }
 
 export function spanPages(tokens: PageToken[], start: number, end: number): { startPage: number; endPage: number } {
@@ -70,6 +102,8 @@ export interface StreamPassage {
   /** 全局 token 下标，[startToken, endToken) */
   startToken: number
   endToken: number
+  /** text 的逐页精确分片：拼接后与 text 逐字相等 */
+  pieces: ContextPiece[]
 }
 
 export function chunkTokenStream(tokens: PageToken[], options: { chunkSize: number; overlap: number }): StreamPassage[] {
@@ -78,13 +112,19 @@ export function chunkTokenStream(tokens: PageToken[], options: { chunkSize: numb
   const step = options.chunkSize - options.overlap
   for (let start = 0, id = 0; start < tokens.length; start += step, id++) {
     const end = Math.min(start + options.chunkSize, tokens.length)
+    const pieces = tokenRangeToPieces(tokens, start, end)
     out.push({
       id,
-      text: sliceText(tokens, start, end),
+      text: pieces.map(piece => piece.text).join(''),
       tokenCount: end - start,
+      // span 是 token 区间包络，可能点名未产出任何文本的页（见 tokenRangeToPieces 的空白分片丢弃）。
+      // 页序以 pieces 为准；四个 Context Page 指标将消费 materializer 的 pageOrder，而非这里的 span。
+      // 且 pieces 可能为空：生产 atomsToPieces 从不过滤，bench tokenRangeToPieces 会，
+      // 不得把 evidenceBlock.ts:245 的「由 pieces 反推 span」照搬进 bench（缺长度守卫）。
       ...spanPages(tokens, start, end),
       startToken: start,
       endToken: end,
+      pieces,
     })
     if (end >= tokens.length) break
   }

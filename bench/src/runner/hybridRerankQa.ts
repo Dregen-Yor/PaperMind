@@ -16,6 +16,8 @@ import { reciprocalRankFusion } from '../baselines/rrf'
 import { createCrossEncoderProvider, type RerankerProvider } from '../baselines/reranker'
 import { benchPath } from '../paths'
 import { runStrongBaselineQaTask, type StrongBaselineQaArgs, type StrongRetrievalRuntime } from './strongBaselineQa'
+import type { StreamingLlmClient } from '../llmClient'
+import { assertStrongSpeedPolicy } from '../speed/policy'
 
 export interface HybridRerankQaArgs extends Omit<StrongBaselineQaArgs, 'retrieval' | 'meta'> {
   config: HybridRerankConfig
@@ -76,12 +78,15 @@ export async function createHybridRetrieval(config: HybridRerankConfig, deps: Hy
           const ctx = selectContext(chunks, rankScores(finalOrdering), {
             retrievalTopK: config.retrieval.reranker.topK,
             topK: config.generationContext.topK,
-            maxTokens: config.generationContext.maxTokens,
           })
-          // 计划 §1.1：断言任何被选上下文都不超预算（selectContext 不截断单个候选，只整段停）
-          const selectedTokens = ctx.selected.reduce((sum, c) => sum + byId.get(c.id)!.tokenCount, 0)
-          if (selectedTokens > config.generationContext.maxTokens) throw new Error(`选中上下文 ${selectedTokens} token 超出预算 ${config.generationContext.maxTokens}`)
-          return { context: ctx.context, selected: ctx.selected, leaves: chunks, scores: ctx.ranked }
+          // 最终 4096 预算由公共 materializer 统一施加：单个候选允许在预算边界被截断，
+          // 部分进入的页仍计入页序（设计 §5）。runner 只负责给出候选与逐页分片。
+          // selectContext 返回 BenchChunk，此处显式映射成只含页区间的 PageSpan 诊断包络，
+          // 让上下文组之外只透出真正被消费的字段（startPage/endPage）。
+          return {
+            contextGroups: ctx.contextGroups,
+            selected: ctx.selected.map(chunk => ({ startPage: chunk.startPage, endPage: chunk.endPage })),
+          }
         },
       }
     },
@@ -89,6 +94,11 @@ export async function createHybridRetrieval(config: HybridRerankConfig, deps: Hy
 }
 
 export async function runHybridRerankQaTask(args: HybridRerankQaArgs): Promise<BenchResult> {
+  assertStrongSpeedPolicy({
+    speed: args.speed !== undefined,
+    checkpointPath: args.checkpointPath,
+    client: args.client as StreamingLlmClient,
+  })
   const retrieval = await createHybridRetrieval(args.config, args.deps)
   return runStrongBaselineQaTask({
     ...args,

@@ -3,6 +3,9 @@ import { existsSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, SemanticTreeParams, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
 import { benchPath } from './paths'
+// 受控上下文预算只有一处定义：契约模块（evaluationContract.ts）的 CONTEXT_BUDGET_TOKENS。
+// 这里刻意不再另立 4096 常量——两个数字各写一遍，就有一天会各自漂移而没人发现。
+import { CONTEXT_BUDGET_TOKENS, CONTEXT_TOKENIZER_MODEL, CONTEXT_TOKENIZER_REVISION } from './evaluationContract'
 
 const DEFAULT_CONFIG_DIR = () => benchPath(import.meta.url, '../configs/')
 const fail = (path: string, field: string, reason = '无效'): never => { throw new Error(`配置文件 ${path} 的 ${field} ${reason}`) }
@@ -36,6 +39,10 @@ function validateTraditional(raw: Record<string, unknown>, path: string): Tradit
   if (!positiveInt(r.topK)) fail(path, 'retrieval.topK', '必须为正整数')
   if (!positiveInt(g.topK) || (g.topK as number) > (r.topK as number)) fail(path, 'generationContext.topK', '必须为正整数且不大于 retrieval.topK')
   if (!positiveInt(g.maxTokens) || (g.maxTokens as number) < (c.chunkSize as number)) fail(path, 'generationContext.maxTokens', '必须为不小于 chunkSize 的正整数')
+  // 与强基线同一处冻结（§5）：最终 4096 预算由 CLI 注入的受控物化器统一施加，
+  // 配置里的 maxTokens 不再是可变实验参数——允许它偏离就等于允许某条基线偷换预算，
+  // 而跨方法差值会照常算出来。topK 仍是本方法自己的候选选择控制，不在冻结之列。
+  if ((g.maxTokens as number) !== CONTEXT_BUDGET_TOKENS) fail(path, 'generationContext.maxTokens', `必须为冻结口径 ${CONTEXT_BUDGET_TOKENS}`)
   const base = { name, kind: 'traditional-rag' as const, chunking: { tokenizer: 'bge-m3' as const, chunkSize: c.chunkSize as number, overlap: c.overlap as number }, generationContext: { topK: g.topK as number, maxTokens: g.maxTokens as number } }
   if (r.algorithm === 'bm25') {
     if (!nonNegative(r.k1) || !nonNegative(r.b) || (r.b as number) > 1) fail(path, 'retrieval.k1/b', 'k1 必须非负且 b 必须在 [0,1]')
@@ -51,9 +58,10 @@ function validateTraditional(raw: Record<string, unknown>, path: string): Tradit
   return fail(path, 'retrieval.algorithm', '非法')
 }
 
-/** 三种新基线（2026-09-08 计划 §1.1）冻结的上下文预算；偏离即口径漂移，直接拒绝。 */
-const FROZEN_CONTEXT_TOKENS = 4096
-
+/**
+ * 三种新基线（2026-09-08 计划 §1.1）与受控上下文预算（2026-09-19 计划 §5）共用同一个
+ * 数字，来源统一为契约模块的 `CONTEXT_BUDGET_TOKENS`；偏离即口径漂移，直接拒绝。
+ */
 function validateEmbedding(value: unknown, path: string, field: string): TraditionalEmbeddingConfig {
   if (!obj(value)) fail(path, field, '缺失或不是对象')
   const e = value as Record<string, unknown>
@@ -74,7 +82,7 @@ function validateContext(raw: Record<string, unknown>, path: string, floorChunkS
   const g = raw.generationContext as Record<string, unknown>
   if (!positiveInt(g.topK)) fail(path, 'generationContext.topK', '必须为正整数')
   if (!positiveInt(g.maxTokens) || (g.maxTokens as number) < floorChunkSize) fail(path, 'generationContext.maxTokens', `必须为不小于 ${floorChunkSize} 的正整数`)
-  if ((g.maxTokens as number) !== FROZEN_CONTEXT_TOKENS) fail(path, 'generationContext.maxTokens', `必须为冻结口径 ${FROZEN_CONTEXT_TOKENS}`)
+  if ((g.maxTokens as number) !== CONTEXT_BUDGET_TOKENS) fail(path, 'generationContext.maxTokens', `必须为冻结口径 ${CONTEXT_BUDGET_TOKENS}`)
   return { topK: g.topK as number, maxTokens: g.maxTokens as number }
 }
 
@@ -197,3 +205,25 @@ export async function loadConfigs(nameOrPath: string, configDir: string = DEFAUL
 }
 
 export function configLabel(config: BenchConfig): string { return config.name.replace(/[^\w.=,[\]-]/g, '_').replace(/[[\],=]/g, '.').replace(/\.+$/, '') }
+
+/**
+ * 该配置的**检索路径实际会加载**的 BGE-M3 tokenizer 身份。
+ *
+ * 受控物化器要复用检索侧那份词表（否则同一次跑批会把同一份词表加载两遍），前提是
+ * 复用对象与契约身份同源；这里把每条路径的真实来源写清楚，让 CLI 只需比对而不必猜：
+ *
+ * - `chunking` / `anchors` 只有 `tokenizer: 'bge-m3'`，没有 model/revision 字段，
+ *   各 runner 内部固定按 `BAAI/bge-m3@main` 加载——即契约身份。
+ * - `hybrid-rerank` 的 dense embedding 另有一份 pin，但它只喂 embedding pipeline，
+ *   分块走的是独立的 bge-m3@main 实例，故仍与契约同源。
+ * - 传统 RAG 的 `bm25` / `jaccard` 同理；只有 `cosine` 会拿 embedding pin 的 tokenizer
+ *   去分块，pin 不同即身份不同，必须如实报出——照着契约身份复用会让结果 meta 断言
+ *   一份本次运行并未真正使用的 tokenizer（数字照样算出来，只是不可信）。
+ */
+export function retrievalTokenizerIdentity(config: BenchConfig): { model: string; revision: string } {
+  const embedding = config.kind === 'traditional-rag' && config.retrieval.algorithm === 'cosine'
+    ? config.retrieval.embedding
+    : undefined
+  if (embedding) return { model: embedding.model, revision: embedding.revision }
+  return { model: CONTEXT_TOKENIZER_MODEL, revision: CONTEXT_TOKENIZER_REVISION }
+}

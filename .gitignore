@@ -31,11 +31,14 @@ Thumbs.db
 # Tooling caches
 .codegraph/
 .cursor/
+.worktrees/
+.superpowers/
 
 # Benchmark 产物
 bench/cache/
 bench/results/
 bench/minibatch/
+papermind-speed-demo*.json
 bench/datasets/qasper/qasper.jsonl
 bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/

@@ -44,6 +44,19 @@ export function metricSampleCounts(records: PerSampleRecord[]): Record<string, n
   return counts
 }
 
+/** 进入固定分母口径的四个检索指标——是哪些指标有唯一定义，禁止各 runner 各自罗列。 */
+const SAMPLE_COUNT_METRICS = ['evidenceRecall', 'evidenceHit', 'contextPrecision', 'contextPageMrr'] as const
+
+/**
+ * 把逐样本观测数落盘为 `<metric>SampleCount`，让失败样本从分母缺席这件事可自证。
+ * 三个 runner 引擎共用，保证「哪些指标进固定分母」只有一处定义。
+ */
+export function emitMetricSampleCounts(raw: Record<string, number>, counts: Record<string, number>): void {
+  for (const metric of SAMPLE_COUNT_METRICS) {
+    if (counts[metric] !== undefined) raw[`${metric}SampleCount`] = counts[metric]
+  }
+}
+
 /** QA runner 共用的展示/结果契约键名。 */
 export function renameQaRates(metrics: Record<string, number>): Record<string, number> {
   const names: Record<string, string> = {

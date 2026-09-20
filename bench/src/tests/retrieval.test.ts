@@ -1,12 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import type { IndexNode } from '../../../src/utils/pageIndex'
-import { expandPages, computeRetrievalMetrics } from '../metrics/retrieval'
+import { expandPages, computeContextPageMetrics, computeRetrievalMetrics } from '../metrics/retrieval'
 
 function node(id: string, start: number, end: number): IndexNode {
   return { title: `S${id}`, nodeId: id, startPage: start, endPage: end, summary: '', nodes: [] }
 }
-
-const leaves = [node('0', 0, 1), node('1', 2, 3), node('2', 4, 5)]
 
 describe('expandPages', () => {
   it('把页码区间展开为去重升序页号', () => {
@@ -18,161 +16,83 @@ describe('expandPages', () => {
   })
 })
 
-describe('computeRetrievalMetrics', () => {
-  it('全部 evidence 被覆盖时 recall=1、hit=1', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      scores: [{ id: 0, score: 9 }, { id: 1, score: 2 }, { id: 2, score: 1 }],
-      evidencePages: [0, 1],
-      context: 'x'.repeat(400),
-      degraded: false,
+describe('computeContextPageMetrics', () => {
+  it('uses the first gold page position in deduplicated prompt order', () => {
+    expect(computeContextPageMetrics([4, 1, 7, 1], [7, 8])).toEqual({
+      contextPageMrr: 1 / 3,
+      evidenceRecall: 0.5,
+      evidenceHit: 1,
+      contextPrecision: 1 / 3,
     })
-    expect(m.evidenceRecall).toBe(1)
-    expect(m.evidenceHit).toBe(1)
-    expect(m.contextPrecision).toBe(1)   // 选中 2 页，2 页都是 evidence
-    expect(m.mrr).toBe(1)                // evidence 所在节点排在第 1 位
-    expect(m.contextTokens).toBe(100)    // 400 字符 / 4
   })
 
-  it('evidencePages 含重复页号时按去重页数计 recall', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      scores: [{ id: 0, score: 9 }],
-      // QASPER 伪页映射下，多个 evidence 段落落进同一伪页是常态
-      evidencePages: [0, 0, 1],
-      context: '',
-      degraded: false,
+  it('writes four zeros for an eligible miss', () => {
+    expect(computeContextPageMetrics([], [2])).toEqual({
+      contextPageMrr: 0,
+      evidenceRecall: 0,
+      evidenceHit: 0,
+      contextPrecision: 0,
     })
-    expect(m.evidenceRecall).toBe(1)  // 选中的页 0-1 已全覆盖去重后的 {0,1}
-    expect(m.evidenceHit).toBe(1)
-    expect(m.contextPrecision).toBe(1)
   })
 
-  it('部分覆盖时 recall 为覆盖比例', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      scores: [{ id: 0, score: 9 }],
-      evidencePages: [0, 4],
-      context: '',
-      degraded: false,
+  it('多个 gold 页全部覆盖时 recall=1、precision=1', () => {
+    expect(computeContextPageMetrics([0, 1, 2], [0, 1, 2])).toEqual({
+      contextPageMrr: 1,
+      evidenceRecall: 1,
+      evidenceHit: 1,
+      contextPrecision: 1,
     })
-    expect(m.evidenceRecall).toBe(0.5)
-    expect(m.evidenceHit).toBe(1)
-    expect(m.contextPrecision).toBe(0.5)  // 选中 2 页，其中 1 页是 evidence
   })
 
-  it('完全捞空时 recall=0、hit=0、precision=0', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      scores: [{ id: 0, score: 9 }, { id: 2, score: 8 }],
-      evidencePages: [4, 5],
-      context: '',
-      degraded: false,
-    })
-    expect(m.evidenceRecall).toBe(0)
-    expect(m.evidenceHit).toBe(0)
+  it('重复页不改变名次（页序先做首次出现去重）', () => {
+    // 去重后 [5, 9]；gold 9 在第 2 位
+    expect(computeContextPageMetrics([5, 5, 9, 5], [9]).contextPageMrr).toBe(0.5)
+    expect(computeContextPageMetrics([5, 5, 9, 5], [9]).contextPrecision).toBe(0.5)
+  })
+
+  it('空上下文记 0，不产生除零', () => {
+    const m = computeContextPageMetrics([], [3])
     expect(m.contextPrecision).toBe(0)
-    // mrr 衡量排序、recall 衡量选中，二者解耦：
-    // evidence 所在节点 2 在排序里排第 2 位，只是没被 selected 捞进来
-    expect(m.mrr).toBe(0.5)
-  })
-
-  it('selected 区间重叠时按去重页数计 recall/precision', () => {
-    const m = computeRetrievalMetrics({
-      selected: [node('a', 0, 2), node('b', 1, 3)],  // topK>=2 时相邻节点区间相接是常见形态
-      leaves,
-      scores: [],
-      evidencePages: [1, 2],
-      context: '',
-      degraded: false,
-    })
-    expect(m.evidenceRecall).toBe(1)          // 去重后选中页 0-3，覆盖 {1,2}
-    expect(m.contextPrecision).toBe(0.5)      // 选中 4 页，其中 2 页是 evidence
-  })
-
-  it('mrr 取 evidence 节点在打分排序中的首个名次倒数', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      // 排序后为 [1(9分), 2(7分), 0(1分)]；evidence 在页 4-5 即节点 2，排第 2 位
-      scores: [{ id: 0, score: 1 }, { id: 1, score: 9 }, { id: 2, score: 7 }],
-      evidencePages: [4],
-      context: '',
-      degraded: false,
-    })
-    expect(m.mrr).toBeCloseTo(0.5)
-  })
-
-  it('mrr 计入 LLM 返回的越界 id（野值占用名次）', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      // 排序后为 [99(9分), -1(8分), 2(7分)]；99 与 -1 映射不到叶节点但仍占名次
-      scores: [{ id: 99, score: 9 }, { id: -1, score: 8 }, { id: 2, score: 7 }],
-      evidencePages: [4],
-      context: '',
-      degraded: false,
-    })
-    // 口径钉死：野值不做预过滤，evidence 所在节点 2 排第 3 位
-    expect(m.mrr).toBeCloseTo(1 / 3)
-  })
-
-  it('分数并列时按 scores 原序定名次（依赖 sort 稳定性）', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      // 与生产 pageIndex.ts 的比较器逐字相同，并列时保留原序 [0, 2]
-      scores: [{ id: 0, score: 5 }, { id: 2, score: 5 }],
-      evidencePages: [4],
-      context: '',
-      degraded: false,
-    })
-    // evidence 所在节点 2 排第 2 位；若日后加 tie-break 使其提前，此处会变为 1
-    expect(m.mrr).toBe(0.5)
-  })
-
-  it('降级时不写 mrr（打分不可用，排序无意义）', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      scores: [],
-      evidencePages: [0],
-      context: '',
-      degraded: true,
-    })
-    expect(m.mrr).toBeUndefined()
-    expect(m.evidenceRecall).toBe(1)  // 降级但恰好命中，recall 照算
-  })
-
-  it('evidence 标注为空时不产生 retrieval quality 指标', () => {
-    const m = computeRetrievalMetrics({
-      selected: [leaves[0]],
-      leaves,
-      scores: [{ id: 0, score: 9 }],
-      evidencePages: [],
-      context: '',
-      degraded: false,
-    })
-    expect(m.evidenceRecall).toBeUndefined()
-    expect(m.contextPrecision).toBeUndefined()
-    expect(m.mrr).toBeUndefined()
-  })
-
-  it('未选中任何节点时不产生除零', () => {
-    const m = computeRetrievalMetrics({
-      selected: [],
-      leaves,
-      scores: [],
-      evidencePages: [0],
-      context: '',
-      degraded: false,
-    })
-    expect(m.contextPrecision).toBe(0)
-    expect(m.evidenceRecall).toBe(0)
     expect(Number.isNaN(m.contextPrecision)).toBe(false)
+  })
+})
+
+describe('指标层只认最终页序，而非被选中候选的页区间包络（回归）', () => {
+  it('pageOrder 排除 span 包络点名但未产出文本的空白页', () => {
+    // selected 的区间包络 cover 页 0-1；页 0 仅含空白，materializer 不为它产出文本，
+    // 故最终页序是 [1]。包络会多算一页，把 MRR 从 1 稀释成 0.5。
+    const envelope = expandPages([{ startPage: 0, endPage: 1 }])
+    expect(envelope).toEqual([0, 1])
+    expect(computeContextPageMetrics(envelope, [1]).contextPageMrr).toBe(0.5)
+    // 真实页序 [1] 排除包络里的页 0：指标层消费的参数与包络解耦
+    expect(computeContextPageMetrics([1], [1]).contextPageMrr).toBe(1)
+    expect(computeContextPageMetrics([1], [1]).contextPrecision).toBe(1)
+  })
+})
+
+describe('computeRetrievalMetrics', () => {
+  it('只从 pageOrder 计算四个检索指标并附加 token 估算', () => {
+    const m = computeRetrievalMetrics({
+      pageOrder: [4, 1, 7, 1],
+      evidencePages: [7, 8],
+      context: 'x'.repeat(400),
+    })
+    expect(m).toEqual({
+      contextPageMrr: 1 / 3,
+      evidenceRecall: 0.5,
+      evidenceHit: 1,
+      contextPrecision: 1 / 3,
+      contextTokens: 100,
+    })
+  })
+
+  it('空上下文同样写出四个 0，不退化为缺失指标', () => {
+    expect(computeRetrievalMetrics({ pageOrder: [], evidencePages: [2], context: '' })).toEqual({
+      contextPageMrr: 0,
+      evidenceRecall: 0,
+      evidenceHit: 0,
+      contextPrecision: 0,
+      contextTokens: 0,
+    })
   })
 })

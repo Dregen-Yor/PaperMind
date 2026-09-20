@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { extractPages, buildPageIndex } from '../utils/pageIndex'
 import { runRagPipeline, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
-import { buildEvidenceBlocks, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
+import { buildEvidenceBlocks, hasExactPagePartition, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
 import {
   buildSemanticTree,
   validateSemanticTree,
@@ -435,6 +435,8 @@ export const useChatStore = defineStore('chat', () => {
       if (record.buildConfigHash !== expectedConfigHash) return undefined
       const blocks = JSON.parse(record.blocksJson)
       if (!Array.isArray(blocks) || blocks.length === 0) return undefined
+      // schema v2 的块必须带精确逐页分区：缺件或拼不回原文一律整树作废（§13）
+      if (!blocks.every(hasExactPagePartition)) return undefined
       // 坏树整体作废而非局部修补
       const validation = validateSemanticTree(JSON.parse(record.treeJson), blocks)
       if (!validation.ok || !validation.tree) return undefined

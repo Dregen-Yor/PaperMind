@@ -28,15 +28,15 @@ Node CLI 评测套件。以 ESM 运行（`bench/package.json` 声明 `type: modu
 | `src/args.ts` | CLI 参数解析（纯函数，单独测试） |
 | `src/paths.ts` | 从 `import.meta.url` 解析 bench 内相对路径（规避 `.pathname` 的百分号转义坑） |
 | `src/cli.ts` | 入口，薄编排层 |
-| `src/metrics/retrieval.ts` | `evidenceRecall` / `evidenceHit` / `contextPrecision` / `mrr` / `contextTokens` |
+| `src/metrics/retrieval.ts` | `contextPageMrr` / `evidenceRecall` / `evidenceHit` / `contextPrecision` / `contextTokens`（四个检索口径只能有一处定义）。两个分母计数**不在本文件**：`contextPageMrrSampleCount` 由 `metrics/aggregate.ts` 的 `emitMetricSampleCounts` 产出，`contextPageMrrEligibleCount` 由 `runner/support.ts` 的 `finalizeQaResult` 写入 |
 | `src/metrics/answerF1.ts` | QASPER token 级 F1 + 拒答模式表（`REFUSAL_PATTERN_VERSION`） |
 | `src/metrics/rouge.ts` | ROUGE-1/2/L F-measure + 摘要指标 |
 | `src/metrics/judge.ts` | LLM-as-judge，rubric 版本化（`RUBRIC_VERSION`） |
-| `src/metrics/aggregate.ts` | 逐样本 → 聚合均值、分位数；缺指标的样本自动从分母剔除；`treeUsedRate` / `treeDegradationRate` 由 `treeUsed` / `treeDegraded` 改名而来 |
+| `src/metrics/aggregate.ts` | 逐样本 → 聚合均值、分位数；`emitMetricSampleCounts` 产出四个受控检索指标的分母计数。**缺指标的样本只对「可缺席」指标从分母剔除**（`answerF1`、judge 等可选指标失败即无观测）；四个受控检索指标相反——有效题失败由 `skipSampleRecord` 补 0 观测，必须留在固定分母里，缺席才是违约。`treeUsedRate` / `treeDegradationRate` 由 `treeUsed` / `treeDegraded` 改名而来 |
 | `src/metrics/treeDiagnostics.ts` | 语义树 hook 结果 → `PaperTimingRecord` 字段；建树失败率与结构/成本均值（见下方「语义树指标口径」） |
 | `src/datasets/qasper.ts` | QASPER 归一化（段落 → 约 3000 字符伪页）与加载 |
 | `src/datasets/smoke.ts` | 真实 PDF 冒烟集加载（1-based 标注 → 0-based） |
-| `src/runner/qa.ts` | QA 编排：建索引 → `runRagPipeline` → 打分 |
+| `src/runner/qa.ts` | QA 编排：建索引 → `retrieveRagContext` → `generateRagAnswer` → 打分（分阶段 API；`runRagPipeline` 仅是二者的向后兼容组合封装） |
 | `src/runner/traditionalRagQa.ts` | 传统 RAG QA：固定分块 → 词法/向量检索 → 生成与打分 |
 | `src/runner/strongBaselineQa.ts` | 强基线共享 QA 引擎：索引→逐问检索→生成→打分→聚合（hybrid/long-section 复用） |
 | `src/runner/hybridRerankQa.ts` | 强基线：BM25+BGE-M3 双路召回 → RRF 融合 → 交叉编码器重排 |
@@ -75,16 +75,30 @@ npm run bench:trees -- --config semantic-tree --dataset qasper --limit 5 --out b
 - **建树失败也要记成本**：模型已返回、只是输出不可用（非法 JSON、结构校验不过）时，那次调用与 token 是真实成本，照记 `treeBuild*`；只有调用前就被拒（无证据块、`input-too-large`）才是零成本
 - bench 的建树 hook 与产品内建树走同一份 `buildEvidenceBlocks` / `buildSemanticTree`，但**不写 SQLite**：评测进程不引入 better-sqlite3，因此评测侧不涉及产品的建树缓存键
 - **不新增串行调用**：树路由与平面 `scoreAndSelect` 的查询阶段调用次数相同（都是 1 次）——树节点与平面叶节点在**同一次**打分判断里一并评分，树给不出证据时就地改用平面候选（§9 的回落要求因此不花额外调用）；建树的那一次调用发生在索引阶段，计入 `treeBuild*` 列而非回答时延
-- **MRR 的坐标系**：下游 `computeMrr(leaves, scores, ...)` 用 `leaves[scores[i].id]` 定位页区间，而 `leaves` 取自**平面** PageIndex。树路由因此不写出树域打分（`scores` 为 `[]`，该样本自动从 MRR 分母缺席），只有真正走了平面回落时才写回平移后的平面域打分——这样 MRR 与平面对照组仍是同一分母口径
+- **MRR 的固定分母与页序来源**：`contextPageMrr` 的分母恒等于有效题数（`contextPageMrrSampleCount === eligibleRetrievalQuestionCount`，由 `assertContextPageDenominator` 抛错强制），有效题集合见 `isRetrievalEligible`；未命中、索引失败或检索失败一律记 0 观测而**不从分母缺席**。四个检索指标消费的 `pageOrder` 与上下文文本由物化器在**同一次计算**里产出，**绝不**从 `selected` / `sources` / `scores` 反推——旧的 `computeMrr` 与「样本自动从分母缺席」的行为随该口径一并删除
+
+## 报表分区（§9）
+
+`report.ts` 把结果切成三个互斥分区（`partitionResults`）：
+
+- **检索排名**：schema-v2 且 `comparisonEligible !== false` 的结果，按 `contextPageMrr` 排名并加粗最优行；
+- **生成上限**：`comparisonEligible === false` 的结果（`full-context` 全文直投），不受 4096 预算约束，不参与检索排名；
+- **历史结果**：缺 `mrrDefinition: 'context-page-v1'` 的旧结果。
+
+资格判定必须先于 schema 判定，否则 `full-context`（不带 `mrrDefinition`）会被误归 legacy；单个 if/else if/else 保证每个结果恰好落一个分区。
+
+- **计数行的 `—`**：对比表（`renderComparison`）里的 `contextPageMrrSampleCount` / `contextPageMrrEligibleCount` 是分母计数行，差值**恒渲染 `—`**（`shouldSuppressDelta`）——样本数差异不是质量信号，读成改进就错了；两个数值分别列在 A / B 列，读者自行看。注意**检索主表（`renderRetrievalTable`）根本没有差值列**，它的「有效题数」只渲染数值（缺失时才显示 `—`），计数抑制规则只作用于对比表
+- **`mrr` 改名**：legacy 结果的 `mrr` 列在历史表里标为 `Legacy candidate MRR`，与检索主表的 `MRR (context-page-v1)` 明确区分，不会被混读
+- **单一归属策略的边界**：「一个指标只由一张表渲染、另一张表排除」只对**检索主表与生成上限表**成立。**历史结果表是刻意的全量倾倒**：legacy 行只要携带耗时/语义树列就照常重复渲染，不再去重——它是旧结果的完整存档，而非当期口径的排名表
 
 ## 设计约束
 
-- **必须复用生产代码**：PaperMind 与摘要评测调 `runRagPipeline` / `buildPageIndex` / `summarizeAcademicText`。传统 RAG 与强基线是明确的 bench 专用对照组，可在 `src/traditionalRag/`、`src/baselines/` 独立实现，但不得替换产品管线
-- **强基线冻结契约**（2026-09-08 计划 §1）：强基线与既有基线共用数据集/原文/原始问题/最终作答模型/指标口径；`generationContext.maxTokens` 恒为 4096（校验器强制），单个候选不截断、预算不足整段停止；配置 pin 的模型/revision 不得静默更换；Hugging Face 下载走 `HF_ENDPOINT=https://hf-mirror.com`
+- **必须复用生产代码**：PaperMind 与摘要评测调 `retrieveRagContext` / `generateRagAnswer` / `buildPageIndex` / `summarizeAcademicText`（`runRagPipeline` 仅是前两者的向后兼容组合，供产品调用方使用）。传统 RAG 与强基线是明确的 bench 专用对照组，可在 `src/traditionalRag/`、`src/baselines/` 独立实现，但不得替换产品管线
+- **强基线冻结契约**（2026-09-08 计划 §1）：强基线与既有基线共用数据集/原文/原始问题/最终作答模型/指标口径；`generationContext.maxTokens` 恒为 4096（校验器强制）。最终预算由共用物化器施加——允许在预算边界**截断最后一段**（部分进入的页仍计入页序）并以 `truncated` 标记；多段之间用 `\n\n---\n\n` 分隔，「分隔符 + 至少一个内容 token」都放不下时整组不进入。配置 pin 的模型/revision 不得静默更换；Hugging Face 下载走 `HF_ENDPOINT=https://hf-mirror.com`
 - **QA 横向比较切片强制冻结**（2026-09-14）：主结果表的唯一 QASPER 切片为**前 60 篇论文、179 道题**。新增或重跑的任何 baseline（包括 `hybrid-rerank`、`long-section-rag`）必须先用该切片运行，且与对照组统一原文归一化/evidence 映射、生成模型与端点、temperature、生成上限、上下文预算和缓存口径。结果 JSON 必须记录数据集文件 SHA-256、论文数、题数及 question-id 集合哈希；缺任一项的结果不得进入横向主表
 - **扩容实验不得冒充横向基线**：179 篇 / 632 题或其他 `QASPER_LIMIT` 扩容结果只能在单独的“规模泛化”表中与**同一扩容切片、同一端点、同一代码版本**下的其他方法比较；不得与 60 篇 / 179 题主表混排、加粗跨组最优值或宣称全局排名。若要复用已有大切片结果，必须先按 question id 回切到主表 179 题并重算指标
-- **MRR 的共同样本约束**：MRR 只能在相同 question-id 集合、相同 evidence 映射状态且均实际存在候选排序的样本上横向比较。单候选/单叶而无排序的样本应从所有比较方法的 MRR 分母同时排除，并在结果表报告共同分母；不得比较不同分母得到的 MRR 均值
-- **失败不中断**：单样本失败记入 `errors[]` 并从指标分母剔除，报表打印 `completed/total`。否则超时会被误读为质量下降
+- **MRR 的固定分母不变量**：`contextPageMrr` 的分母恒等于有效题数——`assertContextPageDenominator` 强制 `contextPageMrrSampleCount === eligibleRetrievalQuestionCount`，不相等直接抛错让整轮失效。横向比较额外要求数据集指纹、指标版本、MRR 定义、上下文预算、tokenizer 模型+revision、evidence 映射版本全部一致（`retrievalComparisonIssues`），任一不符即拒绝输出差值。旧的「单候选样本自动从分母排除、比较共同分母」规则已被固定分母取代
+- **失败不中断**：单样本失败记入 `errors[]`，报表打印 `completed/total`，流程继续。分母口径分两类：四个受控检索指标的**有效题**失败一律补 0 观测、**留在固定分母**（缺席即违约）；`answerF1`、judge 等**可选指标**没有观测就从各自分母缺席，否则超时会被误读为质量下降——这条对受控检索指标不适用，它们宁可记 0 也不缺席
 - **口径必须自证**：`unanswerableMethod`、`cacheMode`、`REFUSAL_PATTERN_VERSION`、`RUBRIC_VERSION`、`gitSha` 都写进结果 JSON，让任何一个数字都能追溯到产生它的口径与代码版本
 - **不改生产 prompt**：拒答指令等改进属设计文档第 11 节「待验证改进项」，须先有基线数据
 
@@ -94,7 +108,7 @@ npm run bench:trees -- --config semantic-tree --dataset qasper --limit 5 --out b
 根 `package.json` 不能声明 `type: module`（Electron 主进程需要 CJS），但 bench 需要 ESM 才能 import pdfjs 的 `.mjs` 构建并使用顶层 await。
 
 **Q: 为什么 `evidenceRecall` 是主指标而不是 `answerF1`？**
-漏检直接导致幻觉，是链路上游的根因。`answerF1` 受生成模型能力影响大，对检索策略改动的敏感度低。
+先划清在哪张表：`evidenceRecall` 是 **legacy 历史结果表**的加粗主指标（`PRIMARY_METRIC.qa`）；新的**检索主表**按 `contextPageMrr` 排名并加粗，两张表口径不同，见 [README 的 MRR 说明](./README.md)。就 legacy 表而言，选 `evidenceRecall` 的理由是：漏检直接导致幻觉，是链路上游的根因；`answerF1` 受生成模型能力影响大，对检索策略改动的敏感度低。
 
 **Q: 单测在 `npm test` 里跑吗？**
 是。`vite.config.ts` 的 `test.exclude` 未排除 `bench/`，`bench/src/tests/*.test.ts` 会被一并收集。涉及 `pageIndex` 的测试需 `vi.mock('pdfjs-dist/legacy/build/pdf.mjs')`。

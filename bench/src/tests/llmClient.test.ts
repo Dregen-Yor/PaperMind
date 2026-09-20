@@ -28,6 +28,93 @@ function ollamaResponse(content: string): Response {
   } as unknown as Response
 }
 
+const encoder = new TextEncoder()
+
+function streamFromText(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(text))
+      controller.close()
+    },
+  })
+}
+
+function terminalThenNeverCloses(text: string): {
+  body: ReadableStream<Uint8Array>
+  cancelled: () => boolean
+  cleanup: () => void
+} {
+  let wasCancelled = false
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(text))
+      timeout = setTimeout(() => controller.error(new Error('test transport remained open')), 50)
+    },
+    cancel() {
+      wasCancelled = true
+      if (timeout !== undefined) clearTimeout(timeout)
+    },
+  })
+  return {
+    body,
+    cancelled: () => wasCancelled,
+    cleanup: () => {
+      if (timeout !== undefined) clearTimeout(timeout)
+    },
+  }
+}
+
+function failingStreamAfter(text: string, error: Error): ReadableStream<Uint8Array> {
+  let readCount = 0
+  return {
+    getReader: () => ({
+      read: async () => {
+        readCount++
+        if (readCount === 1) return { done: false, value: encoder.encode(text) }
+        throw error
+      },
+    }),
+  } as unknown as ReadableStream<Uint8Array>
+}
+
+function streamThenAbort(text: string, signal: AbortSignal): ReadableStream<Uint8Array> {
+  let readCount = 0
+  return {
+    getReader: () => ({
+      read: async () => {
+        readCount++
+        if (readCount === 1) return { done: false, value: encoder.encode(text) }
+        return await new Promise<never>((_, reject) => {
+          const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+          if (signal.aborted) abort()
+          else signal.addEventListener('abort', abort, { once: true })
+        })
+      },
+    }),
+  } as unknown as ReadableStream<Uint8Array>
+}
+
+function streamingResponse(body: ReadableStream<Uint8Array>): Response {
+  return { ok: true, body } as unknown as Response
+}
+
+function openAiStream(content: string, inputTokens: number, outputTokens: number): Response {
+  return streamingResponse(streamFromText([
+    `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } })}\n\n`,
+    'data: [DONE]\n\n',
+  ].join('')))
+}
+
+function ollamaStream(content: string, inputTokens: number, outputTokens: number): Response {
+  return streamingResponse(streamFromText([
+    JSON.stringify({ message: { content }, done: false }),
+    JSON.stringify({ done: true, prompt_eval_count: inputTokens, eval_count: outputTokens }),
+    '',
+  ].join('\n')))
+}
+
 describe('resolveEnvConfig', () => {
   it('从 BENCH_* 环境变量读取配置', () => {
     const cfg = resolveEnvConfig({
@@ -56,6 +143,15 @@ describe('generation-limit cache isolation', () => {
     const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
     expect(await createLlmClient({ ...common, maxTokens: 100, fetchImpl: firstFetch as unknown as typeof fetch }).complete('q')).toBe('long')
     expect(await createLlmClient({ ...common, maxTokens: 10, fetchImpl: secondFetch as unknown as typeof fetch }).complete('q')).toBe('short')
+    expect(secondFetch).toHaveBeenCalledOnce()
+  })
+
+  it('does not reuse a response cached under a different temperature', async () => {
+    const firstFetch = vi.fn().mockResolvedValue(okResponse('cold'))
+    const secondFetch = vi.fn().mockResolvedValue(okResponse('warm'))
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    expect(await createLlmClient({ ...common, temperature: 0, fetchImpl: firstFetch as unknown as typeof fetch }).complete('q')).toBe('cold')
+    expect(await createLlmClient({ ...common, temperature: 0.7, fetchImpl: secondFetch as unknown as typeof fetch }).complete('q')).toBe('warm')
     expect(secondFetch).toHaveBeenCalledOnce()
   })
 })
@@ -113,6 +209,285 @@ describe('recoverable request retries', () => {
     const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, retryAttempts: Number.POSITIVE_INFINITY, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(client.complete('q')).resolves.toBe('eventually recovered')
     expect(fetchImpl).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe('provider usage telemetry', () => {
+  it('accumulates OpenAI-compatible prompt and completion tokens without changing chat results', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'answer' } }],
+        usage: { prompt_tokens: 13, completion_tokens: 5 },
+      }),
+    } as unknown as Response)
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.chat([{ role: 'user', content: 'hello' }])).resolves.toBe('answer')
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 18, incompleteRequestCount: 0 })
+  })
+
+  it('accumulates Ollama prompt and generation tokens', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: { content: 'answer' },
+        prompt_eval_count: 8,
+        eval_count: 3,
+      }),
+    } as unknown as Response)
+    const client = createLlmClient({
+      provider: 'ollama', model: 'llama3', apiKey: '', baseUrl: 'http://localhost:11434',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.complete('hello')).resolves.toBe('answer')
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 11, incompleteRequestCount: 0 })
+  })
+
+  it('marks a real response without usable usage as incomplete while cache hits remain neutral', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await client.complete('hello')
+    await client.complete('hello')
+
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 0, incompleteRequestCount: 1 })
+  })
+
+  it('keeps complete non-stream usage when response content validation fails', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: {} }],
+        usage: { prompt_tokens: 6, completion_tokens: 2 },
+      }),
+    } as unknown as Response)
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.complete('hello')).rejects.toThrow(/缺少 content/)
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 8, incompleteRequestCount: 0 })
+  })
+})
+
+describe('streaming requests', () => {
+  it('streams OpenAI-compatible visible text with usage and never writes the response cache', async () => {
+    const visible: string[] = []
+    const fetchImpl = vi.fn().mockResolvedValue(openAiStream('answer', 12, 4))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'sk-openai', baseUrl: 'http://x/v1',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], delta => visible.push(delta))).resolves.toEqual({
+      content: 'answer',
+      usage: { inputTokens: 12, outputTokens: 4 },
+    })
+
+    const init = fetchImpl.mock.calls[0][1]
+    expect(JSON.parse(init.body)).toMatchObject({
+      stream: true,
+      temperature: 0,
+      stream_options: { include_usage: true },
+    })
+    expect(init.headers['Authorization']).toBe('Bearer sk-openai')
+    expect(visible).toEqual(['answer'])
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 16, incompleteRequestCount: 0 })
+    expect(client.cacheEnabled()).toBe(true)
+    expect(readdirSync(cacheDir)).toHaveLength(0)
+  })
+
+  it('uses Anthropic-compatible auth while requesting usage-enabled SSE', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(openAiStream('answer', 9, 2))
+    const client = createLlmClient({
+      provider: 'anthropic', model: 'claude', apiKey: 'sk-ant', baseUrl: 'http://x/v1',
+      cacheDir, useCache: false, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await client.chatStream([{ role: 'user', content: 'hello' }], () => {})
+
+    const init = fetchImpl.mock.calls[0][1]
+    expect(JSON.parse(init.body)).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+    })
+    expect(init.headers).toMatchObject({
+      'x-api-key': 'sk-ant',
+      'anthropic-version': '2023-06-01',
+    })
+    expect(init.headers['Authorization']).toBeUndefined()
+    expect(client.cacheEnabled()).toBe(false)
+  })
+
+  it('streams Ollama NDJSON without authorization and reports its usage', async () => {
+    const visible: string[] = []
+    const fetchImpl = vi.fn().mockResolvedValue(ollamaStream('ollama answer', 7, 3))
+    const client = createLlmClient({
+      provider: 'ollama', model: 'llama3', apiKey: 'ignored', baseUrl: 'http://localhost:11434',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], delta => visible.push(delta))).resolves.toEqual({
+      content: 'ollama answer',
+      usage: { inputTokens: 7, outputTokens: 3 },
+    })
+
+    const init = fetchImpl.mock.calls[0][1]
+    expect(fetchImpl.mock.calls[0][0]).toBe('http://localhost:11434/api/chat')
+    expect(JSON.parse(init.body)).toMatchObject({ stream: true })
+    expect(JSON.parse(init.body).options).toBeUndefined()
+    expect(init.headers['Authorization']).toBeUndefined()
+    expect(visible).toEqual(['ollama answer'])
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 10, incompleteRequestCount: 0 })
+  })
+
+  it.each([
+    ['OpenAI-compatible SSE', 'openai', 'data: {"choices":[{"delta":{"content":"truncated"}}]}\n\n'],
+    ['Ollama NDJSON', 'ollama', '{"message":{"content":"truncated"},"done":false}\n'],
+  ])('rejects cleanly truncated %s responses', async (_label, provider, bodyText) => {
+    const client = createLlmClient({
+      provider,
+      model: 'm',
+      apiKey: 'k',
+      baseUrl: provider === 'ollama' ? 'http://localhost:11434' : 'http://x/v1',
+      cacheDir,
+      useCache: false,
+      fetchImpl: vi.fn().mockResolvedValue(streamingResponse(streamFromText(bodyText))) as unknown as typeof fetch,
+    })
+
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], () => {}))
+      .rejects.toThrow(/terminal marker/i)
+  })
+
+  it.each([
+    ['OpenAI-compatible SSE', 'openai', [
+      'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')],
+    ['Ollama NDJSON', 'ollama', [
+      '{"message":{"content":"answer"},"done":false}',
+      '{"done":true}',
+      '',
+    ].join('\n')],
+  ])('completes %s promptly at its terminal marker even when the body stays open', async (_label, provider, bodyText) => {
+    const transport = terminalThenNeverCloses(bodyText)
+    const client = createLlmClient({
+      provider,
+      model: 'm',
+      apiKey: 'k',
+      baseUrl: provider === 'ollama' ? 'http://localhost:11434' : 'http://x/v1',
+      cacheDir,
+      useCache: false,
+      fetchImpl: vi.fn().mockResolvedValue(streamingResponse(transport.body)) as unknown as typeof fetch,
+    })
+
+    try {
+      await expect(client.chatStream([{ role: 'user', content: 'hello' }], () => {})).resolves.toEqual({
+        content: 'answer',
+      })
+      expect(transport.cancelled()).toBe(true)
+    } finally {
+      transport.cleanup()
+    }
+  })
+
+  it('applies the existing timeout policy to streaming attempts', async () => {
+    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+    }))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      cacheDir, timeoutMs: 1, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], () => {})).rejects.toThrow(/请求超时/)
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 0, incompleteRequestCount: 1 })
+  })
+
+  it('retries a usage-bearing stream timeout with normalized diagnostics and retained accounting', async () => {
+    const body = [
+      'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\n',
+    ].join('')
+    const onRetry = vi.fn()
+    const fetchImpl = vi.fn()
+      .mockImplementationOnce(async (_url: string, init?: RequestInit) => (
+        streamingResponse(streamThenAbort(body, init!.signal as AbortSignal))
+      ))
+      .mockImplementationOnce((_url: string, init?: RequestInit) => new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+      }))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir,
+      timeoutMs: 1, retryAttempts: 1, retryBaseDelayMs: 0, onRetry,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], () => {})).rejects.toThrow('LLM 请求超时（1ms）')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: 1,
+      retryAttempts: 1,
+      error: 'LLM 请求超时（1ms）',
+    }))
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 10, incompleteRequestCount: 1 })
+  })
+
+  it('keeps failed partial content out of the retry result while preserving immediate callbacks', async () => {
+    const partial = 'data: {"choices":[{"delta":{"content":"stale"}}]}\n\n'
+    const onRetry = vi.fn()
+    const visible: string[] = []
+    let ttftMarks = 0
+    let marked = false
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(streamingResponse(failingStreamAfter(partial, new Error('terminated'))))
+      .mockResolvedValueOnce(openAiStream('fresh', 10, 2))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir,
+      retryAttempts: 1, retryBaseDelayMs: 0, onRetry,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    const result = await client.chatStream([{ role: 'user', content: 'hello' }], delta => {
+      visible.push(delta)
+      if (!marked) {
+        marked = true
+        ttftMarks++
+      }
+    })
+
+    expect(result).toEqual({ content: 'fresh', usage: { inputTokens: 10, outputTokens: 2 } })
+    expect(visible).toEqual(['stale', 'fresh'])
+    expect(ttftMarks).toBe(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({ attempt: 1, retryAttempts: 1, delayMs: 0 }))
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 12, incompleteRequestCount: 1 })
+  })
+
+  it('keeps complete stream usage when a later SSE event is malformed', async () => {
+    const body = [
+      'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\n',
+      'data: not-json\n\n',
+    ].join('')
+    const fetchImpl = vi.fn().mockResolvedValue(streamingResponse(streamFromText(body)))
+    const client = createLlmClient({
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], () => {})).rejects.toThrow(/malformed OpenAI SSE payload/)
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 10, incompleteRequestCount: 0 })
   })
 })
 

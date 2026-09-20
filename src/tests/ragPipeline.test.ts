@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IndexNode } from '../utils/pageIndex'
+import type { ChatTurn } from '../utils/queryRewrite'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -7,7 +8,20 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   getDocument: vi.fn(),
 }))
 
-const { runRagPipeline, MATH_FORMAT_INSTRUCTION } = await import('../utils/ragPipeline')
+const {
+  runRagPipeline,
+  retrieveRagContext,
+  generateRagAnswer,
+  buildAnswerMessages,
+  MATH_FORMAT_INSTRUCTION,
+} =
+  await import('../utils/ragPipeline')
+const { materializeContext } = await import('../utils/contextTrace')
+
+/** 与 contextTrace.test.ts 同款分词器：按空白切词并渲染为 ▁word。 */
+const tokenizer = {
+  tokenize: (text: string) => text.split(/\s+/).filter(Boolean).map(word => `▁${word}`),
+}
 
 function leaf(id: string, start: number, end: number): IndexNode {
   return { title: `S${id}`, nodeId: id, startPage: start, endPage: end, summary: `sum ${id}`, nodes: [] }
@@ -21,6 +35,76 @@ const multiLeafTree: IndexNode = {
 const singleLeafTree: IndexNode = leaf('only', 0, 1)
 
 const pages = ['p1', 'p2', 'p3', 'p4']
+const EXPECTED_MATH_FORMAT_INSTRUCTION =
+  '数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。'
+
+describe('buildAnswerMessages', () => {
+  it('pins the exact math-format instruction bytes', () => {
+    expect(MATH_FORMAT_INSTRUCTION).toBe(EXPECTED_MATH_FORMAT_INSTRUCTION)
+  })
+
+  it('pins the exact messages for an empty context', () => {
+    expect(buildAnswerMessages('', '问题', [], '你是助手')).toEqual([
+      {
+        role: 'system',
+        content: `你是助手\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}`,
+      },
+      { role: 'user', content: '问题' },
+    ])
+  })
+
+  it('pins the exact messages for non-empty context and a language-augmented prompt', () => {
+    const systemPrompt = '你是助手\n\n请用英文作答。'
+    const context = '第一段\n第二段'
+
+    expect(buildAnswerMessages(context, 'What is it?', [], systemPrompt)).toEqual([
+      {
+        role: 'system',
+        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${context}`,
+      },
+      { role: 'user', content: 'What is it?' },
+    ])
+  })
+
+  it('keeps only the most recent generation history turns', () => {
+    const history: ChatTurn[] = Array.from({ length: 21 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `turn-${index}`,
+    }))
+
+    expect(buildAnswerMessages('', 'current question', history, 'system')).toEqual([
+      {
+        role: 'system',
+        content: `system\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}`,
+      },
+      ...history.slice(-19),
+      { role: 'user', content: 'current question' },
+    ])
+  })
+
+  it('passes the exported builder output unchanged to the generation model', async () => {
+    const retrieval = {
+      retrievals: [],
+      retrievalQuery: 'query',
+      rewritten: false,
+      context: 'retrieved context',
+      contextTruncated: false,
+      sources: [],
+      llmCalls: 0,
+      treeRouted: false,
+      queryRewriteLatencyMs: 0,
+      retrievalLatencyMs: 0,
+      pipelineStartedAt: 100,
+    }
+    const generate = vi.fn().mockResolvedValue('answer')
+
+    await generateRagAnswer(retrieval, 'query', [{ role: 'user', content: 'earlier' }], generate, 'system')
+
+    expect(generate).toHaveBeenCalledWith(
+      buildAnswerMessages(retrieval.context, 'query', [{ role: 'user', content: 'earlier' }], 'system'),
+    )
+  })
+})
 
 describe('runRagPipeline', () => {
   it('caps the generation context at maxContextChars', async () => {
@@ -148,6 +232,16 @@ describe('runRagPipeline', () => {
     expect(result.sources).toHaveLength(3)
     expect(result.context).toContain('---')
   })
+
+  it('未注入 materializer 时结果里不存在页序 / token 字段（保持旧结果形状）', async () => {
+    const result = await runRagPipeline(
+      [{ tree: singleLeafTree, pages }], 'q', [], vi.fn(), vi.fn().mockResolvedValue('answer'), 'sys',
+    )
+
+    // 不是“值为 undefined”，而是键根本不出现：下游按字段缺席区分旧/新结果形状
+    expect('contextPageOrder' in result).toBe(false)
+    expect('contextTokenCount' in result).toBe(false)
+  })
 })
 
 describe('runRagPipeline timing', () => {
@@ -229,5 +323,101 @@ describe('runRagPipeline timing', () => {
         { now: scriptedClock([100, 100, 140]) },
       ),
     ).rejects.toThrow('upstream down')
+  })
+})
+
+describe('RAG 阶段拆分', () => {
+  // 受控 token 预算的 materializer：与 benchmark 注入的是同一依赖（§4.1 / §5）
+  const materialize = (maxTokens: number) =>
+    (groups: Parameters<typeof materializeContext>[0]) => materializeContext(groups, tokenizer, maxTokens)
+
+  it('生成失败时已完成的检索结果保持不变', async () => {
+    // 两叶均高分：两个候选组都进入 materializer，页序覆盖第 1–2 页
+    const complete = vi.fn().mockResolvedValue('[{"id":0,"score":9},{"id":1,"score":8}]')
+    const retrieval = await retrieveRagContext(
+      [{ tree: multiLeafTree, pages }], 'question', [], complete, {}, { materialize: materialize(2) },
+    )
+    expect(retrieval.contextPageOrder).toEqual([0, 1])
+    expect(retrieval.contextTokenCount).toBe(2)
+    expect(retrieval.context).toBe('p1 p2')
+
+    await expect(
+      generateRagAnswer(retrieval, 'question', [], async () => { throw new Error('generation failed') }, 'system'),
+    ).rejects.toThrow('generation failed')
+
+    // 生成抛错不得清空或改写已经算好的检索结果（§6.3）
+    expect(retrieval.contextPageOrder).toEqual([0, 1])
+    expect(retrieval.contextTokenCount).toBe(2)
+    expect(retrieval.context).toBe('p1 p2')
+  })
+
+  it('生成提示词逐字使用 materializer 产出的上下文', async () => {
+    const llm = vi.fn().mockResolvedValue('[{"id":0,"score":9},{"id":1,"score":8}]')
+    const generate = vi.fn().mockResolvedValue('answer')
+
+    const result = await runRagPipeline(
+      [{ tree: multiLeafTree, pages }], 'question', [], llm, generate, 'system', {},
+      { materialize: materialize(1) },
+    )
+
+    expect(generate.mock.calls[0][0][0].content).toContain(`参考内容：\n${result.context}`)
+    expect(result.contextPageOrder).toEqual([0])
+    expect(result.contextTokenCount).toBe(1)
+  })
+
+  it('externalContext 优先于 materializer：直接用外部文本且不产出页序 / token', async () => {
+    const llm = vi.fn()
+    const materializeSpy = vi.fn(materialize(1))
+
+    const retrieval = await retrieveRagContext(
+      [{ tree: multiLeafTree, pages }], '解释这段', [], llm,
+      { externalContext: '用户划选的原文' }, { materialize: materializeSpy },
+    )
+
+    expect(llm).not.toHaveBeenCalled()
+    // 外部上下文跳过检索，没有候选组可物化：materializer 根本不会被调用
+    expect(materializeSpy).not.toHaveBeenCalled()
+    expect(retrieval.context).toBe('用户划选的原文')
+    expect(retrieval.contextPageOrder).toBeUndefined()
+    expect(retrieval.contextTokenCount).toBeUndefined()
+    // 未物化即回落字符语义：文本未超 maxContextChars，故为 false
+    expect(retrieval.contextTruncated).toBe(false)
+  })
+
+  it('生成阶段不修改传入的检索结果（深冻结后成功与失败路径都安全）', async () => {
+    /** 深冻结：一旦生成阶段试图写入任何嵌套字段，会立刻抛 TypeError 而非静默改坏检索结果。 */
+    function deepFreeze<T>(value: T): T {
+      if (value !== null && typeof value === 'object') {
+        for (const key of Object.keys(value)) {
+          deepFreeze((value as Record<string, unknown>)[key])
+        }
+        Object.freeze(value)
+      }
+      return value
+    }
+
+    // 用本测试私有的树，避免冻结共享 fixture 的叶节点
+    const tree: IndexNode = {
+      title: 'Paper', nodeId: 'root', startPage: 0, endPage: 3, summary: '',
+      nodes: [leaf('l0', 0, 1), leaf('l1', 2, 3)],
+    }
+    const complete = vi.fn().mockResolvedValue('[{"id":0,"score":9},{"id":1,"score":8}]')
+    const retrieval = await retrieveRagContext(
+      [{ tree, pages }], 'question', [], complete, {}, { materialize: materialize(2) },
+    )
+    const before = JSON.stringify(retrieval)
+    deepFreeze(retrieval)
+
+    // 成功路径：冻结输入不得触发写入异常
+    await expect(
+      generateRagAnswer(retrieval, 'question', [], async () => 'answer', 'system'),
+    ).resolves.toMatchObject({ answer: 'answer' })
+
+    // 失败路径：抛出的必须是 generate 自身的错误，而不是冻结对象的写入错误
+    await expect(
+      generateRagAnswer(retrieval, 'question', [], async () => { throw new Error('generation failed') }, 'system'),
+    ).rejects.toThrow('generation failed')
+
+    expect(JSON.stringify(retrieval)).toBe(before)
   })
 })

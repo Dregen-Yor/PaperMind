@@ -7,6 +7,7 @@ import { summarizeAcademicText } from '../../../src/utils/abstractSummarizer'
 import type { PaperMindConfig, BenchResult, EvalSample, PerSampleRecord, SampleError } from '../types'
 import { computeSummaryMetrics } from '../metrics/rouge'
 import { aggregate } from '../metrics/aggregate'
+import { errorMessage } from './support'
 
 export interface SummaryTaskArgs {
   samples: EvalSample[]
@@ -18,10 +19,6 @@ export interface SummaryTaskArgs {
   model: string
   /** 注入替换生产实现，单测无需真实 HF 端点 */
   deps?: { summarize?: typeof summarizeAcademicText }
-}
-
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }
 
 export async function runSummaryTask(args: SummaryTaskArgs): Promise<BenchResult> {

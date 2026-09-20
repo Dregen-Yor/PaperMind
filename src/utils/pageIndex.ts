@@ -1,4 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type ContextPiece } from './contextTrace'
 import type { LLMFn } from './llm'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
@@ -229,6 +230,11 @@ export interface ScoreOptions {
 
 export interface RetrievalResult {
   context: string
+  /**
+   * 上下文的逐页来源：每个被选节点一组，组内按页顺序、组间按上下文顺序。
+   * 拼接所有 group 的 piece 文本再以 `\n\n---\n\n` 连接即逐字还原 `context`。
+   */
+  contextGroups: ContextGroup[]
   sources: string[]
   /** 结构化选中节点（含页码区间），供评测直接取用，无需解析 sources 字符串 */
   selected: IndexNode[]
@@ -244,6 +250,18 @@ export interface RetrievalResult {
 
 function formatSource(n: IndexNode): string {
   return `Pages ${n.startPage + 1}–${n.endPage + 1}: ${n.title}`
+}
+
+/**
+ * 把一个平面节点的页区间展开成带页码的上下文分组。首片是节点首页原文，
+ * 后续每页各带 `\n\n` 前缀——与 `pages.slice(start, end + 1).join('\n\n')`
+ * 逐字一致，评测据此从真实上下文反推页序，产品拼接方式不变。
+ */
+export function nodeToContextGroup(node: IndexNode, pages: string[]): ContextGroup {
+  const pieces: ContextPiece[] = pages
+    .slice(node.startPage, node.endPage + 1)
+    .map((text, offset) => ({ page: node.startPage + offset, text: offset === 0 ? text : `\n\n${text}` }))
+  return { pieces }
 }
 
 /**
@@ -298,6 +316,7 @@ export async function scoreAndSelect(
     const leaf = leaves[0]
     return {
       context: pages.slice(leaf.startPage, leaf.endPage + 1).join('\n\n'),
+      contextGroups: [nodeToContextGroup(leaf, pages)],
       sources: [formatSource(leaf)],
       selected: [leaf],
       scores: [],
@@ -341,7 +360,7 @@ export async function scoreAndSelect(
 
   const context = selected
     .map(n => pages.slice(n.startPage, n.endPage + 1).join('\n\n'))
-    .join('\n\n---\n\n')
+    .join(CONTEXT_GROUP_SEPARATOR)
 
-  return { context, sources: selected.map(formatSource), selected, scores, degraded, llmCalled: true, ...(degradedReason ? { degradedReason } : {}) }
+  return { context, contextGroups: selected.map(n => nodeToContextGroup(n, pages)), sources: selected.map(formatSource), selected, scores, degraded, llmCalled: true, ...(degradedReason ? { degradedReason } : {}) }
 }

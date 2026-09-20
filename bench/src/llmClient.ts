@@ -3,6 +3,9 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChatLLMFn, ChatMessage, LLMFn } from '../../src/utils/llm'
+import type { TokenSnapshot } from './types'
+import { parseOllamaNdjson } from './streaming/ollamaNdjson'
+import { parseOpenAiSse } from './streaming/openaiSse'
 
 export interface LlmClientOptions {
   provider?: string
@@ -15,6 +18,8 @@ export interface LlmClientOptions {
   timeoutMs?: number
   /** OpenAI 兼容接口的生成 token 上限；未设时沿用服务端默认。 */
   maxTokens?: number
+  /** 可选生成温度；OpenAI 兼容接口缺省仍为 0，Ollama 缺省沿用服务端默认。 */
+  temperature?: number
   /** 可恢复的网络/限流/服务端错误额外重试次数；默认 0，由 benchmark CLI 显式配置。 */
   retryAttempts?: number
   /** 第一次重试的退避毫秒数；后续指数增长并加抖动。 */
@@ -41,6 +46,29 @@ export interface LlmClient {
   latencies(): number[]
   /** 请求级 telemetry，仅内存中供测试与未来诊断；结果 JSON 只写聚合计数与网络分位数 */
   requestTimings(): LlmRequestTiming[]
+}
+
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+}
+
+export interface StreamCompletion {
+  content: string
+  usage?: TokenUsage
+}
+
+export interface StreamingLlmClient extends LlmClient {
+  chatStream(messages: ChatMessage[], onVisibleText: (delta: string) => void): Promise<StreamCompletion>
+  tokenSnapshot(): TokenSnapshot
+  cacheEnabled(): boolean
+}
+
+class UsageBearingAttemptError {
+  constructor(
+    readonly originalError: unknown,
+    readonly usage: TokenUsage,
+  ) {}
 }
 
 /**
@@ -84,7 +112,7 @@ export function resolveEnvConfig(env: Record<string, string | undefined>) {
 
 // key 必须包含 provider 与 baseUrl：同名模型（如 llama3）在不同端点上是不同的被测对象，
 // 否则配置矩阵对比会因跨端点命中缓存而得到错误结论。分隔符用 \0，避免字段内容拼接歧义。
-function cacheKey(provider: string, baseUrl: string, model: string, messages: ChatMessage[], generation: { maxTokens?: number }): string {
+function cacheKey(provider: string, baseUrl: string, model: string, messages: ChatMessage[], generation: { maxTokens?: number; temperature?: number }): string {
   const raw = [provider, baseUrl, model, JSON.stringify(messages), JSON.stringify(generation)].join('\0')
   return createHash('sha256').update(raw).digest('hex')
 }
@@ -117,7 +145,7 @@ function requireContent(content: unknown, data: unknown): string {
   return content
 }
 
-export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
+export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient {
   const env = mergeConfig(opts, readEnvPartial(process.env))
   const cacheDir = opts.cacheDir ?? defaultCacheDir()
   const useCache = opts.useCache !== false
@@ -125,13 +153,26 @@ export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
 
   let hits = 0
   let misses = 0
+  let totalTokens = 0
+  let incompleteRequestCount = 0
   const latencyList: number[] = []
   const requestTimingList: LlmRequestTiming[] = []
 
   if (useCache) mkdirSync(cacheDir, { recursive: true })
 
+  const ollamaOptions = () => {
+    const options = {
+      ...(opts.maxTokens === undefined ? {} : { num_predict: opts.maxTokens }),
+      ...(opts.temperature === undefined ? {} : { temperature: opts.temperature }),
+    }
+    return Object.keys(options).length === 0 ? {} : { options }
+  }
+
   async function chat(messages: ChatMessage[]): Promise<string> {
-    const key = cacheKey(env.provider, env.baseUrl, env.model, messages, { maxTokens: opts.maxTokens })
+    const key = cacheKey(env.provider, env.baseUrl, env.model, messages, {
+      maxTokens: opts.maxTokens,
+      temperature: opts.temperature,
+    })
     const cachePath = join(cacheDir, `${key}.json`)
     const callStartedMs = Date.now()
 
@@ -151,7 +192,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
     misses++
 
     const started = Date.now()
-    const content = await request(messages)
+    const { content } = await request(messages)
     const networkLatencyMs = Date.now() - started
     latencyList.push(networkLatencyMs)
     // 请求失败不追加成功 latency（misses 已增加），但 request 内抛错走不到这里
@@ -171,14 +212,30 @@ export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
     return content
   }
 
-  async function request(messages: ChatMessage[]): Promise<string> {
+  async function chatStream(messages: ChatMessage[], onVisibleText: (delta: string) => void): Promise<StreamCompletion> {
+    const callStartedMs = Date.now()
+    misses++
+
+    const started = Date.now()
+    const completion = await requestStream(messages, onVisibleText)
+    const networkLatencyMs = Date.now() - started
+    latencyList.push(networkLatencyMs)
+    requestTimingList.push({ cacheHit: false, elapsedMs: Date.now() - callStartedMs, networkLatencyMs })
+    return completion
+  }
+
+  async function withRetries(attemptRequest: () => Promise<StreamCompletion>): Promise<StreamCompletion> {
     const retries = opts.retryAttempts ?? 0
     const baseDelay = opts.retryBaseDelayMs ?? 1_000
     let lastError: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        return await requestOnce(messages)
-      } catch (error) {
+        const completion = await attemptRequest()
+        recordAttempt(completion.usage)
+        return completion
+      } catch (caught) {
+        const { error, usage } = unwrapAttemptError(caught)
+        recordAttempt(usage)
         lastError = error
         if (attempt === retries || !isRetryable(error)) throw error
         // capped exponential backoff + deterministic bounded jitter prevents reconnect storms.
@@ -195,30 +252,48 @@ export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
     throw lastError
   }
 
-  async function requestOnce(messages: ChatMessage[]): Promise<string> {
+  function request(messages: ChatMessage[]): Promise<StreamCompletion> {
+    return withRetries(() => requestOnce(signal => requestWithSignal(messages, signal)))
+  }
+
+  function requestStream(messages: ChatMessage[], onVisibleText: (delta: string) => void): Promise<StreamCompletion> {
+    return withRetries(() => requestOnce(signal => requestStreamWithSignal(messages, onVisibleText, signal)))
+  }
+
+  async function requestOnce(run: (signal?: AbortSignal) => Promise<StreamCompletion>): Promise<StreamCompletion> {
     const controller = opts.timeoutMs === undefined ? undefined : new AbortController()
     const timeout = controller === undefined ? undefined : setTimeout(() => controller.abort(), opts.timeoutMs)
     try {
-      return await requestWithSignal(messages, controller?.signal)
-    } catch (error) {
-      if (controller?.signal.aborted && (error as { name?: unknown })?.name === 'AbortError') throw new Error(`LLM 请求超时（${opts.timeoutMs}ms）`)
-      throw error
+      return await run(controller?.signal)
+    } catch (caught) {
+      const { error, usage } = unwrapAttemptError(caught)
+      if (controller?.signal.aborted && (error as { name?: unknown })?.name === 'AbortError') {
+        throwWithUsage(new Error(`LLM 请求超时（${opts.timeoutMs}ms）`), usage)
+      }
+      throw caught
     } finally {
       if (timeout !== undefined) clearTimeout(timeout)
     }
   }
 
-  async function requestWithSignal(messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
+  async function requestWithSignal(messages: ChatMessage[], signal?: AbortSignal): Promise<StreamCompletion> {
     if (env.provider === 'ollama') {
       const res = await doFetch(`${env.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: env.model, messages, stream: false, ...(opts.maxTokens === undefined ? {} : { options: { num_predict: opts.maxTokens } }) }),
+        body: JSON.stringify({ model: env.model, messages, stream: false, ...ollamaOptions() }),
         signal,
       })
       if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
       const data = await res.json()
-      return requireContent(data?.message?.content, data)
+      const usage = tokenUsage(data?.prompt_eval_count, data?.eval_count)
+      let content: string
+      try {
+        content = requireContent(data?.message?.content, data)
+      } catch (error) {
+        throwWithUsage(error, usage)
+      }
+      return usage ? { content, usage } : { content }
     }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -235,23 +310,124 @@ export function createLlmClient(opts: LlmClientOptions = {}): LlmClient {
       body: JSON.stringify({
         model: env.model,
         messages,
-        temperature: 0,
+        temperature: opts.temperature ?? 0,
         ...(opts.maxTokens === undefined ? {} : { max_tokens: opts.maxTokens }),
       }),
       signal,
     })
     if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
     const data = await res.json()
-    return requireContent(data?.choices?.[0]?.message?.content, data)
+    const usage = tokenUsage(data?.usage?.prompt_tokens, data?.usage?.completion_tokens)
+    let content: string
+    try {
+      content = requireContent(data?.choices?.[0]?.message?.content, data)
+    } catch (error) {
+      throwWithUsage(error, usage)
+    }
+    return usage ? { content, usage } : { content }
+  }
+
+  async function requestStreamWithSignal(
+    messages: ChatMessage[],
+    onVisibleText: (delta: string) => void,
+    signal?: AbortSignal,
+  ): Promise<StreamCompletion> {
+    if (env.provider === 'ollama') {
+      const res = await doFetch(`${env.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: env.model, messages, stream: true, ...ollamaOptions() }),
+        signal,
+      })
+      if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
+      if (!res.body) throw new Error('LLM 流式响应缺少 body（HTTP 200）')
+      let completeUsage: TokenUsage | undefined
+      try {
+        return normalizeCompletion(await parseOllamaNdjson(res.body, onVisibleText, usage => {
+          completeUsage = tokenUsage(usage.inputTokens, usage.outputTokens)
+        }))
+      } catch (error) {
+        throwWithUsage(error, completeUsage)
+      }
+    }
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (env.provider === 'anthropic') {
+      headers['x-api-key'] = env.apiKey
+      headers['anthropic-version'] = '2023-06-01'
+    } else {
+      headers['Authorization'] = `Bearer ${env.apiKey}`
+    }
+
+    const res = await doFetch(`${chatCompletionsBaseUrl(env.baseUrl)}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: env.model,
+        messages,
+        temperature: opts.temperature ?? 0,
+        stream: true,
+        stream_options: { include_usage: true },
+        ...(opts.maxTokens === undefined ? {} : { max_tokens: opts.maxTokens }),
+      }),
+      signal,
+    })
+    if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
+    if (!res.body) throw new Error('LLM 流式响应缺少 body（HTTP 200）')
+    let completeUsage: TokenUsage | undefined
+    try {
+      return normalizeCompletion(await parseOpenAiSse(res.body, onVisibleText, usage => {
+        completeUsage = tokenUsage(usage.inputTokens, usage.outputTokens)
+      }))
+    } catch (error) {
+      throwWithUsage(error, completeUsage)
+    }
+  }
+
+  function recordAttempt(usage?: TokenUsage): void {
+    if (!usage) {
+      incompleteRequestCount++
+      return
+    }
+    totalTokens += usage.inputTokens + usage.outputTokens
   }
 
   return {
     complete: (prompt: string) => chat([{ role: 'user', content: prompt }]),
     chat,
+    chatStream,
     stats: () => ({ hits, misses }),
     latencies: () => [...latencyList],
     requestTimings: () => [...requestTimingList],
+    tokenSnapshot: () => ({ totalTokens, incompleteRequestCount }),
+    cacheEnabled: () => useCache,
   }
+}
+
+function tokenUsage(inputTokens: unknown, outputTokens: unknown): TokenUsage | undefined {
+  if (!isTokenCount(inputTokens) || !isTokenCount(outputTokens)) return undefined
+  return { inputTokens, outputTokens }
+}
+
+function normalizeCompletion(completion: StreamCompletion): StreamCompletion {
+  const usage = completion.usage && tokenUsage(completion.usage.inputTokens, completion.usage.outputTokens)
+  return usage ? { content: completion.content, usage } : { content: completion.content }
+}
+
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function throwWithUsage(error: unknown, usage?: TokenUsage): never {
+  if (usage) throw new UsageBearingAttemptError(error, usage)
+  throw error
+}
+
+function unwrapAttemptError(error: unknown): { error: unknown; usage?: TokenUsage } {
+  if (error instanceof UsageBearingAttemptError) {
+    return { error: error.originalError, usage: error.usage }
+  }
+  return { error }
 }
 
 function isRetryable(error: unknown): boolean {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTokenStream, chunkTokenStream, sliceText, spanPages } from '../baselines/tokenStream'
+import { buildTokenStream, chunkTokenStream, sliceText, spanPages, tokenRangeToPieces } from '../baselines/tokenStream'
 import { detectSections, isHeadingLine } from '../baselines/sections'
 import { expandWithinSection } from '../baselines/contiguous'
 
@@ -27,6 +27,59 @@ describe('tokenStream', () => {
     expect(passages.map(p => [p.startToken, p.endToken])).toEqual([[0, 3], [2, 5]])
     expect(passages[0].text).toBe('a b c')
     expect(passages[1].tokenCount).toBe(3)
+  })
+
+  it('records exact page pieces whose text concatenates back to every passage', () => {
+    const { tokens } = buildTokenStream(['alpha beta', 'gamma delta epsilon'], tokenizer)
+    const passages = chunkTokenStream(tokens, { chunkSize: 4, overlap: 1 })
+    for (const passage of passages) {
+      expect(passage.pieces.map(piece => piece.text).join('')).toBe(passage.text)
+    }
+    // 首个跨页 passage 的页间换行归属于新页分片
+    const crossPage = passages.find(p => p.pieces.length > 1)!
+    expect(crossPage.pieces.map(piece => piece.page)).toEqual([0, 1])
+    expect(crossPage.pieces[1].text.startsWith('\n')).toBe(true)
+  })
+})
+
+describe('tokenRangeToPieces', () => {
+  it('partitions a cross-page range exactly and attaches the page break to the new page', () => {
+    const { tokens } = buildTokenStream(['alpha beta', 'gamma delta'], tokenizer)
+    const pieces = tokenRangeToPieces(tokens, 0, tokens.length)
+    expect(pieces.map(piece => piece.page)).toEqual([0, 1])
+    expect(pieces.map(piece => piece.text).join('')).toBe('alpha beta\n gamma delta')
+    expect(pieces[0].text).toBe('alpha beta')
+    expect(pieces[1].text).toBe('\n gamma delta')
+  })
+
+  it('trims only the outer edges of a mid-page range, keeping page attribution', () => {
+    const { tokens } = buildTokenStream(['a b c d', 'e f'], tokenizer)
+    const pieces = tokenRangeToPieces(tokens, 1, 5)
+    expect(pieces.map(piece => piece.page)).toEqual([0, 1])
+    expect(pieces.map(piece => piece.text).join('')).toBe('b c d\n e')
+  })
+
+  it('pins the leading-whitespace-page divergence from sliceText', () => {
+    // 首 token 是独占一页的纯空白：该页被丢弃，于是页间换行成为新页首分片的前导 '\n'
+    const leading = [{ text: '▁', page: 0 }, { text: '▁foo', page: 1 }]
+    const pieces = tokenRangeToPieces(leading, 0, 2)
+    expect(pieces).toEqual([{ page: 1, text: '\n foo' }])
+    expect(pieces[0].page).toBe(1)
+    expect(pieces.map(piece => piece.text).join('')).toBe('\n foo')
+    // 对照：sliceText 的整段 trim 会吃掉这个前导换行 → 二者在此不再等价
+    expect(sliceText(leading, 0, 2)).toBe('foo')
+
+    // 尾随的纯空白页则被干净丢弃，与 sliceText 的整段 trim 一致
+    const trailing = [{ text: '▁foo', page: 0 }, { text: '▁', page: 1 }]
+    expect(tokenRangeToPieces(trailing, 0, 2)).toEqual([{ page: 0, text: 'foo' }])
+    expect(sliceText(trailing, 0, 2)).toBe('foo')
+  })
+
+  it.each([
+    { label: 'an empty range', tokens: [{ text: '▁a', page: 0 }], start: 1, end: 1 },
+    { label: 'an all-whitespace range', tokens: [{ text: '▁', page: 0 }, { text: ' ', page: 1 }], start: 0, end: 2 },
+  ])('returns no pieces for $label (defensive contract)', ({ tokens, start, end }) => {
+    expect(tokenRangeToPieces(tokens, start, end)).toEqual([])
   })
 })
 
@@ -100,6 +153,17 @@ describe('expandWithinSection', () => {
     expect(region!.startToken).toBeGreaterThanOrEqual(sA.startToken)
     expect(region!.endToken).toBeLessThanOrEqual(sA.endToken)
     expect(region!.text).toBe('c d e f g h')
+    expect(region!.pieces.map(piece => piece.text).join('')).toBe(region!.text)
+  })
+
+  it('exposes exact page pieces that concatenate back to a cross-page region text', () => {
+    const twoPage = buildTokenStream(['p0 a b c', 'p1 d e f'], tokenizer)
+    const whole = { title: 'All', startToken: 0, endToken: twoPage.tokens.length, startPage: 0, endPage: 1 }
+    const region = expandWithinSection(twoPage.tokens, [whole], { startToken: 2, endToken: 4 }, 4096)!
+    expect(region.pieces.map(piece => piece.page)).toEqual([0, 1])
+    expect(region.pieces.map(piece => piece.text).join('')).toBe(region.text)
+    // 页间换行归属于新页分片，与 tokenStream 的还原规则一致
+    expect(region.pieces[1].text.startsWith('\n')).toBe(true)
   })
 
   it('reads the whole section when it fits the budget', () => {

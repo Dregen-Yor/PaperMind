@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { EvalSample, SemanticTreeParams } from '../types'
+import type { StreamingLlmClient } from '../llmClient'
+import type { SpeedRunContract } from '../speed/contract'
 import type { IndexNode } from '../../../src/utils/pageIndex'
+import type { PipelineRetrieval, RagGenerationStage, RagRetrievalStage } from '../../../src/utils/ragPipeline'
+import type { QaTaskArgs, QaTaskDeps } from '../runner/qa'
 
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   GlobalWorkerOptions: {},
@@ -8,7 +12,9 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 }))
 
 const { runQaTask } = await import('../runner/qa')
-const { createSemanticTreeHook } = await import('../runner/semanticTreeQa')
+const { createSemanticTreeHook, runSemanticTreeQaTask } = await import('../runner/semanticTreeQa')
+const { buildEvaluationContract, CONTEXT_BUDGET_TOKENS } = await import('../evaluationContract')
+const { materializeContext } = await import('../../../src/utils/contextTrace')
 
 function leaf(id: string, start: number, end: number): IndexNode {
   return { title: `S${id}`, nodeId: id, startPage: start, endPage: end, summary: '', nodes: [] }
@@ -46,13 +52,6 @@ const TREE_JSON = JSON.stringify({
   },
 })
 
-const baseTiming = {
-  queryRewriteLatencyMs: 0,
-  retrievalLatencyMs: 20,
-  answerGenerationLatencyMs: 30,
-  queryEndToEndLatencyMs: 50,
-}
-
 /** 统计型 fake client：complete 成功时计一次 miss，供 hook 算缓存差值。 */
 function fakeClient(completion: () => Promise<string>) {
   let hits = 0
@@ -70,47 +69,104 @@ function fakeClient(completion: () => Promise<string>) {
   }
 }
 
-function makeDeps(overrides: Record<string, unknown> = {}) {
+/** 单篇论文检索结果；走树路由时带 semantic 诊断。`selected` 只是候选页包络，指标不读它。 */
+function pipelineRetrieval(overrides: Partial<PipelineRetrieval> = {}): PipelineRetrieval {
+  return {
+    context: 'CONTEXT_MARKER_9c2e',
+    contextGroups: [{ pieces: [{ page: 0, text: 'CONTEXT_MARKER_9c2e' }] }],
+    sources: ['Pages 1–1: S0'],
+    selected: [leaf('0', 0, 0)],
+    scores: [{ id: 0, score: 9 }],
+    degraded: false,
+    llmCalled: true,
+    semantic: {
+      selectedNodeCount: 1,
+      selectedNodeIds: ['a1'],
+      evidenceBlockIds: ['B001'],
+      expandedBlockIds: ['B001'],
+      insufficientEvidence: false,
+      routableNodeCount: 2,
+      usedFlatFallback: false,
+      droppedBlockCount: 0,
+    },
+    ...overrides,
+  }
+}
+
+const generationStage = (overrides: Partial<RagGenerationStage> = {}): RagGenerationStage => ({
+  answer: '8',
+  answerGenerationLatencyMs: 30,
+  queryEndToEndLatencyMs: 50,
+  ...overrides,
+})
+
+/** 检索阶段产物；默认树域打分但物化页序 [0] 命中 evidence 页 0 → MRR 1。 */
+const retrievalStage = (overrides: Partial<RagRetrievalStage> = {}): RagRetrievalStage => ({
+  retrievals: [pipelineRetrieval()],
+  retrievalQuery: 'Q1?',
+  rewritten: false,
+  context: 'CONTEXT_MARKER_9c2e',
+  contextPageOrder: [0],
+  contextTokenCount: 1,
+  contextTruncated: false,
+  sources: ['Pages 1–1: S0'],
+  llmCalls: 1,
+  treeRouted: true,
+  queryRewriteLatencyMs: 0,
+  retrievalLatencyMs: 20,
+  pipelineStartedAt: 0,
+  ...overrides,
+})
+
+function makeDeps(overrides: Partial<QaTaskDeps> = {}): QaTaskDeps {
   return {
     buildIndex: vi.fn().mockResolvedValue(tree),
-    runPipeline: vi.fn().mockResolvedValue({
-      answer: '8',
-      retrievals: [{
-        context: 'CONTEXT_MARKER_9c2e',
-        sources: ['Pages 1–1: S0'],
-        selected: [leaf('0', 0, 0)],
-        scores: [{ id: 0, score: 9 }],
-        degraded: false,
-        llmCalled: true,
-        timing: baseTiming,
-        semantic: {
-          selectedNodeCount: 1,
-          selectedNodeIds: ['a1'],
-          evidenceBlockIds: ['B001'],
-          expandedBlockIds: ['B001'],
-          insufficientEvidence: false,
-          routableNodeCount: 2,
-        },
-      }],
-      retrievalQuery: 'Q1?',
-      rewritten: false,
-      context: 'CONTEXT_MARKER_9c2e',
-      sources: ['Pages 1–1: S0'],
-      llmCalls: 2,
-      treeRouted: true,
-      contextTruncated: false,
-      timing: baseTiming,
-    }),
+    retrieveContext: vi.fn().mockResolvedValue(retrievalStage()),
+    generateAnswer: vi.fn().mockResolvedValue(generationStage()),
     ...overrides,
   }
 }
 
 const baseArgs = {
-  samples: [sample],
+  samples: [sample] as EvalSample[],
   config: { name: 'semantic-tree', kind: 'semantic-tree' as const },
   systemPrompt: 'sys',
   gitSha: 'sha',
   model: 'm',
+}
+
+/** 确定性字符级分词器 + 按实际 samples 现算的契约，满足固定分母不变量。 */
+const tokenizer = { tokenize: (text: string) => text.split('') }
+
+const argsWith = (overrides: Partial<QaTaskArgs> = {}): QaTaskArgs => {
+  const { deps, materialize, evaluationContract, ...rest } = overrides
+  const samples = rest.samples ?? baseArgs.samples
+  return {
+    ...baseArgs,
+    client: fakeClient(async () => TREE_JSON) as never,
+    ...rest,
+    deps: { ...makeDeps(), ...deps },
+    materialize: materialize ?? (groups => materializeContext(groups, tokenizer, CONTEXT_BUDGET_TOKENS)),
+    evaluationContract: evaluationContract ?? buildEvaluationContract(samples, rest.limit),
+  }
+}
+
+function speedContract(datasetFingerprint: string): SpeedRunContract {
+  return {
+    speedMetricSchemaVersion: 1,
+    speedDefinition: 'query-timeline-v1',
+    datasetFingerprint,
+    executedQuestionIdsHash: 'executed-question-ids',
+    streaming: true,
+    llmCacheEnabled: false,
+    queryConcurrency: 1,
+    retryAttempts: 0,
+    answerModelIdentity: 'answer-model',
+    answerFramingIdentityHash: 'answer-framing',
+    endpointIdentity: 'endpoint',
+    generationSettingsHash: 'generation-settings',
+    executionEnvironmentFingerprint: 'execution-environment',
+  }
 }
 
 describe('createSemanticTreeHook — 建树（§8.1 / §11.4）', () => {
@@ -194,21 +250,16 @@ describe('createSemanticTreeHook — 建树（§8.1 / §11.4）', () => {
 })
 
 describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
-  const hookArgs = (deps: ReturnType<typeof makeDeps>, semanticTree: unknown) => ({
-    ...baseArgs,
-    client: fakeClient(async () => TREE_JSON) as never,
-    deps: deps as never,
-    semanticTree: semanticTree as never,
-  })
+  const hookArgs = (deps: QaTaskDeps, semanticTree: unknown) => argsWith({ deps, semanticTree: semanticTree as QaTaskArgs['semanticTree'] })
 
   it('把语义树挂到论文上交给生产 RAG 管线', async () => {
     const deps = makeDeps()
     const hook = createSemanticTreeHook({ params, client: fakeClient(async () => TREE_JSON) })
     await runQaTask(hookArgs(deps, hook))
 
-    const papers = deps.runPipeline.mock.calls[0][0]
-    expect(papers[0].semantic.tree.root.label).toBe('核心主张')
-    expect(papers[0].semantic.blocks[0].id).toBe('B001')
+    const papers = vi.mocked(deps.retrieveContext!).mock.calls[0][0]
+    expect(papers[0].semantic?.tree.root.label).toBe('核心主张')
+    expect(papers[0].semantic?.blocks[0].id).toBe('B001')
   })
 
   it('perPaper 写入树结构、覆盖率与建树成本诊断', async () => {
@@ -262,26 +313,16 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
 
   it('建树失败时仍完成评测：该篇回落平面路径且失败率如实记录', async () => {
     const deps = makeDeps({
-      runPipeline: vi.fn().mockResolvedValue({
-        answer: '8',
-        retrievals: [{
-          context: 'FLAT_CONTEXT',
-          sources: ['Pages 1–1: S0'],
-          selected: [leaf('0', 0, 0)],
-          scores: [{ id: 0, score: 9 }],
-          degraded: false,
-          llmCalled: true,
-          timing: baseTiming,
-        }],
-        retrievalQuery: 'Q1?', rewritten: false, context: 'FLAT_CONTEXT',
-        sources: ['Pages 1–1: S0'], llmCalls: 2, treeRouted: false,
-        contextTruncated: false, timing: baseTiming,
-      }),
+      retrieveContext: vi.fn().mockResolvedValue(retrievalStage({
+        retrievals: [pipelineRetrieval({ context: 'FLAT_CONTEXT', sources: ['Pages 1–1: S0'], semantic: undefined })],
+        context: 'FLAT_CONTEXT',
+        treeRouted: false,
+      })),
     })
     const hook = createSemanticTreeHook({ params, client: fakeClient(async () => '不是 JSON') })
     const result = await runQaTask(hookArgs(deps, hook))
 
-    expect(deps.runPipeline.mock.calls[0][0][0].semantic).toBeUndefined()
+    expect(vi.mocked(deps.retrieveContext!).mock.calls[0][0][0].semantic).toBeUndefined()
     expect(result.errors).toHaveLength(0)
     expect(result.perPaper![0].treeBuildFailed).toBe(1)
     expect(result.metrics.treeBuildFailureRate).toBe(1)
@@ -291,18 +332,14 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
 
   it('路由本身失败时 treeDegraded 必须记 1，不能因为根节点有证据就算成功', async () => {
     const deps = makeDeps({
-      runPipeline: vi.fn().mockResolvedValue({
-        answer: '8',
-        retrievals: [{
+      retrieveContext: vi.fn().mockResolvedValue(retrievalStage({
+        retrievals: [pipelineRetrieval({
           context: 'ROOT_CONTEXT',
           sources: ['Pages 1–1: 核心主张'],
-          selected: [leaf('0', 0, 0)],
           // 打分 JSON 解析失败：pipeline 已降级，但 semantic.insufficientEvidence 仍是 false
           scores: [],
           degraded: true,
           degradedReason: 'invalid-json',
-          llmCalled: true,
-          timing: baseTiming,
           semantic: {
             selectedNodeCount: 1,
             selectedNodeIds: ['r'],
@@ -313,11 +350,11 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
             usedFlatFallback: false,
             droppedBlockCount: 0,
           },
-        }],
-        retrievalQuery: 'Q1?', rewritten: false, context: 'ROOT_CONTEXT',
-        sources: ['Pages 1–1: 核心主张'], llmCalls: 2, treeRouted: true,
-        contextTruncated: false, timing: baseTiming,
-      }),
+        })],
+        context: 'ROOT_CONTEXT',
+        sources: ['Pages 1–1: 核心主张'],
+        treeRouted: true,
+      })),
     })
     const hook = createSemanticTreeHook({ params, client: fakeClient(async () => TREE_JSON) })
     const result = await runQaTask(hookArgs(deps, hook))
@@ -329,16 +366,10 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
 
   it('树取证失败但已在同一次调用里回落平面时，同样计入降级', async () => {
     const deps = makeDeps({
-      runPipeline: vi.fn().mockResolvedValue({
-        answer: '8',
-        retrievals: [{
+      retrieveContext: vi.fn().mockResolvedValue(retrievalStage({
+        retrievals: [pipelineRetrieval({
           context: 'FLAT_CONTEXT',
           sources: ['Pages 1–1: S0'],
-          selected: [leaf('0', 0, 0)],
-          scores: [{ id: 0, score: 9 }],
-          degraded: false,
-          llmCalled: true,
-          timing: baseTiming,
           semantic: {
             selectedNodeCount: 0,
             selectedNodeIds: [],
@@ -349,26 +380,149 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
             usedFlatFallback: true,
             droppedBlockCount: 0,
           },
-        }],
-        retrievalQuery: 'Q1?', rewritten: false, context: 'FLAT_CONTEXT',
-        sources: ['Pages 1–1: S0'], llmCalls: 2, treeRouted: true,
-        contextTruncated: false, timing: baseTiming,
-      }),
+        })],
+        context: 'FLAT_CONTEXT',
+        treeRouted: true,
+      })),
     })
     const hook = createSemanticTreeHook({ params, client: fakeClient(async () => TREE_JSON) })
     const result = await runQaTask(hookArgs(deps, hook))
 
     expect(result.perSample[0].metrics.treeDegraded).toBe(1)
-    // 回落用的平面打分与平面路径同域，MRR 仍然成立
-    expect(result.perSample[0].metrics.mrr).toBe(1)
+    // MRR 只由最终物化页序（contextPageOrder）决定，与回落用的平面打分坐标系无关
+    expect(result.perSample[0].metrics.contextPageMrr).toBe(1)
+  })
+
+  it('树路由降级为平面上下文时，MRR 用实际物化页序计算，降级率仍为 1', async () => {
+    // 回落用的是平面打分域，但 context-page MRR 只认最终物化页序：
+    // 页序 [2]（而非候选包络 [0]）才是计算依据，故 evidence 页 2 命中、降级率仍为 1
+    const fallbackSample: EvalSample = {
+      ...sample,
+      pages: ['P0', 'P1', 'P2'],
+      questions: [{ id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [2], unanswerable: false }],
+    }
+    const deps = makeDeps({
+      retrieveContext: vi.fn().mockResolvedValue(retrievalStage({
+        retrievals: [pipelineRetrieval({
+          context: 'FLAT_CONTEXT',
+          sources: ['Pages 3–3: S0'],
+          selected: [leaf('0', 0, 0)],
+          semantic: {
+            selectedNodeCount: 0,
+            selectedNodeIds: [],
+            evidenceBlockIds: [],
+            expandedBlockIds: [],
+            insufficientEvidence: true,
+            routableNodeCount: 2,
+            usedFlatFallback: true,
+            droppedBlockCount: 0,
+          },
+        })],
+        context: 'FLAT_CONTEXT',
+        treeRouted: true,
+        contextPageOrder: [2],
+      })),
+    })
+    const hook = createSemanticTreeHook({ params, client: fakeClient(async () => TREE_JSON) })
+    const result = await runQaTask(argsWith({ samples: [fallbackSample], deps, semanticTree: hook }))
+
+    expect(result.perSample[0].metrics.contextPageMrr).toBe(1)
+    expect(result.perSample[0].metrics.evidenceHit).toBe(1)
+    expect(result.metrics.treeDegradationRate).toBe(1)
   })
 
   it('未提供 hook 时不产生任何树诊断字段', async () => {
     const deps = makeDeps()
-    const result = await runQaTask({ ...baseArgs, client: fakeClient(async () => TREE_JSON) as never, deps: deps as never })
+    const result = await runQaTask(argsWith({ deps }))
 
     expect(result.perPaper![0].treeNodeCount).toBeUndefined()
     expect(result.metrics.treeBuildFailureRate).toBeUndefined()
     expect(result.meta.retrievalAlgorithm).toBe('papermind-llm')
+  })
+
+  it('speed timeline starts after flat and semantic indexes and streams through the wrapper', async () => {
+    const events: string[] = []
+    let snapshotIndex = 0
+    const snapshots = [
+      { totalTokens: 10, incompleteRequestCount: 0 },
+      { totalTokens: 16, incompleteRequestCount: 0 },
+    ]
+    const client: StreamingLlmClient = {
+      complete: vi.fn(async () => {
+        events.push('semantic-tree')
+        return TREE_JSON
+      }),
+      chat: vi.fn(),
+      chatStream: vi.fn(),
+      stats: () => ({ hits: 0, misses: 0 }),
+      latencies: () => [],
+      requestTimings: () => [],
+      tokenSnapshot: () => {
+        events.push(snapshotIndex === 0 ? 'token-before' : 'token-after')
+        return snapshots[snapshotIndex++]
+      },
+      cacheEnabled: () => false,
+    }
+    const deps = makeDeps({
+      buildIndex: vi.fn(async () => {
+        events.push('flat-index')
+        return tree
+      }),
+      retrieveContext: vi.fn(async () => {
+        events.push('retrieve')
+        return retrievalStage()
+      }),
+      generateAnswer: vi.fn(async () => {
+        throw new Error('non-stream generation must not run in speed mode')
+      }),
+    })
+    const timelineValues = [100, 120, 140, 160]
+    const timelineLabels = ['t0', 't1', 'ttft', 't3']
+    let timelineIndex = 0
+    const evaluationContract = buildEvaluationContract([sample])
+
+    const result = await runSemanticTreeQaTask({
+      ...baseArgs,
+      config: { ...baseArgs.config, semanticTree: params },
+      client,
+      deps,
+      materialize: groups => materializeContext(groups, tokenizer, CONTEXT_BUDGET_TOKENS),
+      evaluationContract,
+      now: () => 0,
+      speed: {
+        contract: speedContract(evaluationContract.datasetFingerprint),
+        now: () => {
+          events.push(timelineLabels[timelineIndex])
+          return timelineValues[timelineIndex++]
+        },
+        streamAnswer: async (_messages, onVisibleText) => {
+          events.push('stream')
+          onVisibleText('8')
+          return { content: '8' }
+        },
+      },
+    })
+
+    expect(events).toEqual([
+      'flat-index',
+      'semantic-tree',
+      'token-before',
+      't0',
+      'retrieve',
+      't1',
+      'stream',
+      'ttft',
+      't3',
+      'token-after',
+    ])
+    expect(deps.generateAnswer).not.toHaveBeenCalled()
+    expect(result.perSample[0].answer).toBe('8')
+    expect(result.perSample[0].speed).toMatchObject({
+      evidenceReadyLatencyMs: 20,
+      timeToFirstTokenMs: 40,
+      fullAnswerLatencyMs: 60,
+      onlineTokenCount: 6,
+      tokenAccountingComplete: true,
+    })
   })
 })

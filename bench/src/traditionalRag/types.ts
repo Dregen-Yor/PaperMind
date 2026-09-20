@@ -1,6 +1,7 @@
 import type { TraditionalRagConfig } from '../types'
+import type { ContextPiece } from '../../../src/utils/contextTrace'
 
-export interface BenchChunk { id: number; text: string; tokenCount: number; startPage: number; endPage: number }
+export interface BenchChunk { id: number; text: string; tokenCount: number; startPage: number; endPage: number; pieces: ContextPiece[] }
 export interface ScoredChunk { id: number; score: number }
 export interface Retriever { score(query: string): Promise<ScoredChunk[]> | ScoredChunk[] }
 export interface BuiltRetriever extends Retriever { chunks: BenchChunk[] }

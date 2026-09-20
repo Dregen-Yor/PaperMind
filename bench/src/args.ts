@@ -5,6 +5,7 @@ export interface BenchArgs {
   limit?: number
   judge: boolean
   useCache: boolean
+  speed: boolean
   out?: string
   compare?: [string, string]
   mode: 'rag' | 'full-context'
@@ -35,6 +36,7 @@ export function parseArgs(argv: string[]): BenchArgs {
     config: 'default',
     judge: false,
     useCache: true,
+    speed: false,
     mode: 'rag',
   }
 
@@ -85,6 +87,9 @@ export function parseArgs(argv: string[]): BenchArgs {
       case '--no-cache':
         args.useCache = false
         break
+      case '--speed':
+        args.speed = true
+        break
       case '--mode': {
         const v = argv[++i]
         if (v !== 'rag' && v !== 'full-context') throw new Error('--mode 取值非法：rag / full-context')
@@ -101,6 +106,9 @@ export function parseArgs(argv: string[]): BenchArgs {
       default:
         throw new Error(`未知参数：${flag}`)
     }
+  }
+  if (args.speed && args.task !== 'qa') {
+    throw new Error('--speed 仅支持显式选择 --task qa')
   }
   return args
 }

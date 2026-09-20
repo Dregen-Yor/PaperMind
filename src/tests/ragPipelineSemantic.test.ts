@@ -10,6 +10,12 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 }))
 
 const { runRagPipeline } = await import('../utils/ragPipeline')
+const { materializeContext } = await import('../utils/contextTrace')
+
+/** 与 contextTrace.test.ts 同款分词器：按空白切词并渲染为 ▁word。 */
+const tokenizer = {
+  tokenize: (text: string) => text.split(/\s+/).filter(Boolean).map(word => `▁${word}`),
+}
 
 function leaf(id: string, start: number, end: number): IndexNode {
   return { title: `FLAT-${id}`, nodeId: id, startPage: start, endPage: end, summary: `sum ${id}`, nodes: [] }
@@ -26,6 +32,7 @@ const block = (order: number): EvidenceBlock => {
   const id = `B${String(order + 1).padStart(3, '0')}`
   return {
     id, rawText: `RAWTEXT-${id}`, normalizedText: `n-${id}`,
+    pieces: [{ page: order, text: `RAWTEXT-${id}` }],
     startPage: order, endPage: order, order,
     previousId: null, nextId: null, sourceType: 'body',
   }
@@ -209,5 +216,21 @@ describe('runRagPipeline — 语义树路由', () => {
     )
 
     expect(result.retrievals[0].semantic?.selectedNodeIds).toEqual(['a1', 'a2'])
+  })
+
+  it('注入 materializer 时上下文与页序由同一次物化产出，并逐字进入生成提示词', async () => {
+    const llm = vi.fn().mockResolvedValue(scores({ 2: 9 }))   // a2 → B005，邻居 B004/B006
+    const generate = vi.fn().mockResolvedValue('answer')
+    const result = await runRagPipeline(
+      [{ tree: flatTree, pages, semantic: { tree: semanticTree, blocks: BLOCKS } }],
+      'q', [], llm, generate, 'sys', {},
+      { materialize: groups => materializeContext(groups, tokenizer, 5) },
+    )
+
+    // 证据块顺序 B004/B005/B006 对应 0-based 第 3/4/5 页
+    expect(result.contextPageOrder).toEqual([3, 4, 5])
+    expect(result.contextTokenCount).toBe(5)
+    expect(result.context).toBe('RAWTEXT-B004 --- RAWTEXT-B005 --- RAWTEXT-B006')
+    expect(generate.mock.calls[0][0][0].content).toContain(`参考内容：\n${result.context}`)
   })
 })

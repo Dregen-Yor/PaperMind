@@ -1,7 +1,8 @@
 /**
  * 轻量语义树 QA runner（方案 §11.2 的第二个对照组）。
  *
- * 与 `papermind` 走的是**同一条**生产 RAG 管线（`runQaTask` → `runRagPipeline`），
+ * 与 `papermind` 走的是**同一条**生产 RAG 管线（`runQaTask` 分阶段调用
+ * `retrieveRagContext` → `generateRagAnswer`），
  * 唯一变量是每篇论文多挂一棵语义树索引：建树一次 LLM 调用，
  * 提问时整棵树进入同一次检索判断，最终上下文仍来自原文证据块。
  *

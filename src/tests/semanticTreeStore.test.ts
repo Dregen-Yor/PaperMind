@@ -140,7 +140,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
     const [paperId, record] = mockDb().tree.set.mock.calls[0]
     expect(paperId).toBe('p1')
-    expect(record).toMatchObject({ schemaVersion: 1 })
+    expect(record).toMatchObject({ schemaVersion: 2 })
     expect(record.buildModel).toEqual(expect.any(String))
     expect(record.buildLatencyMs).toEqual(expect.any(Number))
     expect(record.sourceHash).toBe(hashTreeSource(JSON.stringify(['Attention is all you need.'])))
@@ -251,6 +251,44 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     })
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(record)
+
+    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
+  })
+
+  it('schema v1 的记录一律作废重建（v2 起块必须带逐页分区）', async () => {
+    const store = useChatStore()
+    await store.init()
+    // 缓存键（原文 + 构建配置）相同，只有 schema 过期
+    const record = await realTreeRecord(store, { schemaVersion: 1 })
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
+    mockDb().tree.get.mockResolvedValue(record)
+
+    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
+  })
+
+  it('schema v2 记录缺少 pieces 时视为损坏，整树作废重建', async () => {
+    const store = useChatStore()
+    await store.init()
+    const base = await realTreeRecord(store)
+    const withoutPieces = JSON.parse(base.blocksJson).map(({ pieces, ...rest }: any) => rest)
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
+    mockDb().tree.get.mockResolvedValue({ ...base, blocksJson: JSON.stringify(withoutPieces) })
+
+    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
+  })
+
+  it('schema v2 记录的 pieces 拼不回 rawText 时同样作废重建', async () => {
+    const store = useChatStore()
+    await store.init()
+    const base = await realTreeRecord(store)
+    const tampered = JSON.parse(base.blocksJson).map((block: any) => ({
+      ...block, pieces: [{ page: block.startPage, text: 'TAMPERED' }],
+    }))
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
+    mockDb().tree.get.mockResolvedValue({ ...base, blocksJson: JSON.stringify(tampered) })
 
     expect(await store.buildPaperTree('p1')).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
@@ -385,7 +423,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockImplementation((paperId: string) =>
       Promise.resolve(storedIndex(PAGES_JSON)))
     mockDb().tree.get.mockImplementation((paperId: string) =>
-      Promise.resolve({ paperId, treeJson: VALID_TREE, blocksJson: '[]', schemaVersion: 1,
+      Promise.resolve({ paperId, treeJson: VALID_TREE, blocksJson: '[]', schemaVersion: SEMANTIC_TREE_SCHEMA_VERSION,
         promptVersion: 'v1', buildModel: 'm', sourceHash: hashTreeSource(PAGES_JSON),
         buildConfigHash: '', inputTokens: 0, outputTokens: 0, buildLatencyMs: 0, createdAt: 0 }))
     const store = useChatStore()
@@ -400,7 +438,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
   it('论文内容变化时重建（指纹不匹配）', async () => {
     mockDb().index.get.mockResolvedValue(storedIndex(JSON.stringify(['new body'])))
     mockDb().tree.get.mockResolvedValue({
-      paperId: 'p1', treeJson: VALID_TREE, blocksJson: '[]', schemaVersion: 1,
+      paperId: 'p1', treeJson: VALID_TREE, blocksJson: '[]', schemaVersion: SEMANTIC_TREE_SCHEMA_VERSION,
       promptVersion: 'v1', buildModel: 'm', sourceHash: 'stale-hash',
       inputTokens: 0, outputTokens: 0, buildLatencyMs: 0, createdAt: 0,
     })
@@ -498,14 +536,17 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
 
   it('持久化的树结构非法时视为不可用，回落到平面检索', async () => {
     const store = useChatStore()
-    const conv = await seedPaper(store, true)
+    await store.init()
+    const record = await persistRealTree(store)
     // 缓存键完全匹配，只有内容坏掉：节点引用了不存在的证据块 ——
     // 载入时必须整体作废，而不是把坏树塞进检索
-    const record = await mockDb().tree.get.mock.results.at(-1)!.value
+    mockDb().tree.set.mockClear()
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue({
       ...record,
       treeJson: JSON.stringify({ root: { id: 'r', label: '根', description: 'd', relationToParent: null, evidenceRefs: ['B999'], children: [] } }),
     })
+    const conv = await store.newConversation('c', ['p1'])
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
@@ -523,11 +564,43 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
   })
 
+  it('schema v1 的树视为不可用，回落平面检索', async () => {
+    const store = useChatStore()
+    await store.init()
+    const record = await persistRealTree(store)
+    mockDb().tree.set.mockClear()
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
+    mockDb().tree.get.mockResolvedValue({ ...record, schemaVersion: 1 })
+    const conv = await store.newConversation('c', ['p1'])
+    await store.sendMessage(conv.id, '问题')
+
+    const assistant = store.conversations[0].messages.at(-1)!
+    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+  })
+
+  it('pieces 缺失的 schema v2 记录同样回落平面检索', async () => {
+    const store = useChatStore()
+    await store.init()
+    const record = await persistRealTree(store)
+    mockDb().tree.set.mockClear()
+    const withoutPieces = JSON.parse(record.blocksJson).map(({ pieces, ...rest }: any) => rest)
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
+    mockDb().tree.get.mockResolvedValue({ ...record, blocksJson: JSON.stringify(withoutPieces) })
+    const conv = await store.newConversation('c', ['p1'])
+    await store.sendMessage(conv.id, '问题')
+
+    const assistant = store.conversations[0].messages.at(-1)!
+    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+  })
+
   it('构建配置变过的树不再用于检索（回落平面）', async () => {
     const store = useChatStore()
-    const conv = await seedPaper(store, true)
-    const record = await mockDb().tree.get.mock.results.at(-1)!.value
+    await store.init()
+    const record = await persistRealTree(store)
+    mockDb().tree.set.mockClear()
+    mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue({ ...record, buildConfigHash: 'built-with-an-older-model' })
+    const conv = await store.newConversation('c', ['p1'])
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
