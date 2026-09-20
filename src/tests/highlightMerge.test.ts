@@ -24,23 +24,34 @@ describe('划选合并（#7）', () => {
     ])).toEqual([{ page: 1, start: 50, end: 120 }])
   })
 
-  it('历史碎片计划：同论文/页/文本/秒的 3 条 → 1 更新 + 2 删除', () => {
-    const base = { paperId: 'p1', pageNum: 1, text: 'ale reinforcement learning (RL) without', createdAt: 1000 }
+  it('历史碎片计划：同论文/页/文本的 3 条跨毫秒碎片 → 1 更新 + 2 删除', () => {
+    const base = { paperId: 'p1', pageNum: 1, text: 'ale reinforcement learning (RL) without' }
     const plan = planFragmentMerge([
-      { id: 'a', ...base, startOffset: 252, endOffset: 298 },
-      { id: 'b', ...base, startOffset: 298, endOffset: 392 },
-      { id: 'c', ...base, startOffset: 392, endOffset: 449 },
+      { id: 'a', ...base, startOffset: 252, endOffset: 298, createdAt: 1788435487939 },
+      { id: 'b', ...base, startOffset: 298, endOffset: 392, createdAt: 1788435487940 },
+      { id: 'c', ...base, startOffset: 392, endOffset: 449, createdAt: 1788435487940 },
     ])
     expect(plan.updates).toEqual([{ id: 'a', endOffset: 449 }])
     expect(plan.removals).toEqual(['b', 'c'])
   })
 
-  it('不同秒的相同文本不合并（跨会话重复划选保持独立）', () => {
+  it('相隔 3000ms 的相同文本不合并（单行簇各自不动）', () => {
     const plan = planFragmentMerge([
       { id: 'a', paperId: 'p1', pageNum: 1, text: 'x', startOffset: 0, endOffset: 10, createdAt: 1000 },
-      { id: 'b', paperId: 'p1', pageNum: 1, text: 'x', startOffset: 0, endOffset: 10, createdAt: 2000 },
+      { id: 'b', paperId: 'p1', pageNum: 1, text: 'x', startOffset: 0, endOffset: 10, createdAt: 4000 },
     ])
     expect(plan.updates).toEqual([])
     expect(plan.removals).toEqual([])
+  })
+
+  it('链式时间窗：相邻各 1900ms（总跨度 3800ms）仍并为一簇', () => {
+    const base = { paperId: 'p1', pageNum: 1, text: 'x' }
+    const plan = planFragmentMerge([
+      { id: 'a', ...base, startOffset: 0, endOffset: 10, createdAt: 1000 },
+      { id: 'b', ...base, startOffset: 10, endOffset: 20, createdAt: 2900 },
+      { id: 'c', ...base, startOffset: 20, endOffset: 30, createdAt: 4800 },
+    ])
+    expect(plan.updates).toEqual([{ id: 'a', endOffset: 30 }])
+    expect(plan.removals).toEqual(['b', 'c'])
   })
 })
