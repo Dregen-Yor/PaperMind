@@ -19,7 +19,7 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['src/tests/setup.ts'],
-    exclude: ['node_modules', 'dist', 'dist-electron', 'release', 'electron/**'],
+    exclude: ['**/node_modules/**', 'dist', 'dist-electron', 'release', 'electron/**', '**/.worktrees/**'],
   },
   plugins: [
     vue(),
