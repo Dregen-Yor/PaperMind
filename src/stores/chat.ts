@@ -42,6 +42,8 @@ export interface Message {
   error?: string
   /** finish_reason=length：回答被截断（#3） */
   truncated?: boolean
+  /** 用户划选原文（externalContext）：重试时按原上下文重放，不退回检索（#2） */
+  context?: string
 }
 
 export interface Conversation {
@@ -107,6 +109,21 @@ async function readErrorBody(res: Response): Promise<string> {
     if (typeof data?.detail === 'string' && data.detail) return data.detail
   } catch { /* fall through to status text */ }
   return `${res.status} ${res.statusText}`.trim()
+}
+
+/**
+ * 带超时的 fetch。`AbortSignal.timeout` 触发时抛出的是英文 DOMException，
+ * 原样落进失败轮的 `error` 会中英混杂，这里统一映射为中文提示（#2）。
+ */
+async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      throw new Error('请求超时，请检查网络后重试')
+    }
+    throw error
+  }
 }
 
 const PROMPT_TEMPLATES = [
@@ -274,12 +291,11 @@ export const useChatStore = defineStore('chat', () => {
     if (profile.provider === 'ollama') {
       const body: Record<string, unknown> = { model: profile.model, messages, stream: false }
       if (profile.topK > 0) body.options = { top_k: profile.topK }
-      const res = await fetch(`${profile.baseUrl}/api/chat`, {
+      const res = await requestWithTimeout(`${profile.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
-      })
+      }, LLM_REQUEST_TIMEOUT_MS)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       const data = await res.json()
       if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
@@ -302,7 +318,7 @@ export const useChatStore = defineStore('chat', () => {
       if (system) body.system = system
       if (profile.topK > 0) body.top_k = profile.topK
 
-      const res = await fetch(`${profile.baseUrl}/v1/messages`, {
+      const res = await requestWithTimeout(`${profile.baseUrl}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -310,8 +326,7 @@ export const useChatStore = defineStore('chat', () => {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
-      })
+      }, LLM_REQUEST_TIMEOUT_MS)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       const data = await res.json()
       const content = data.content?.[0]?.text
@@ -330,12 +345,11 @@ export const useChatStore = defineStore('chat', () => {
       max_tokens: profile.maxTokens,
     }
 
-    const res = await fetch(`${profile.baseUrl}/chat/completions`, {
+    const res = await requestWithTimeout(`${profile.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
-    })
+    }, LLM_REQUEST_TIMEOUT_MS)
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
@@ -584,7 +598,7 @@ export const useChatStore = defineStore('chat', () => {
     role: 'user' | 'assistant',
     content: string,
     sources?: string[],
-    extra?: { error?: string; truncated?: boolean },
+    extra?: { error?: string; truncated?: boolean; context?: string },
   ) {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) return
@@ -594,14 +608,14 @@ export const useChatStore = defineStore('chat', () => {
     await window.db.chat.addMessage({
       id: msg.id, conversationId: convId, role, content,
       sources: sources ?? [], timestamp: msg.timestamp,
-      error: extra?.error, truncated: extra?.truncated,
+      error: extra?.error, truncated: extra?.truncated, context: extra?.context,
     })
   }
 
   async function updateMessage(
     convId: string,
     messageId: string,
-    patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean },
+    patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean; context?: string },
   ) {
     const conv = conversations.value.find(c => c.id === convId)
     const msg = conv?.messages.find(m => m.id === messageId)
@@ -720,7 +734,13 @@ export const useChatStore = defineStore('chat', () => {
     await addMessage(convId, 'assistant', '', undefined, { error: errorMessageOf(error) })
   }
 
-  async function generateReply(conv: Conversation, userMessage: string, context?: string, historyEnd?: number) {
+  async function generateReply(
+    conv: Conversation,
+    userMessage: string,
+    context?: string,
+    historyEnd?: number,
+    opts?: { writeBack?: string },
+  ) {
     let papers: IndexedPaper[] = []
     if (!context && conv.paperIds.length > 0) {
       papers = (await collectIndexedPapers(conv)).papers
@@ -736,14 +756,20 @@ export const useChatStore = defineStore('chat', () => {
       chatProfile.value.systemPrompt,
       { externalContext: context },
     )
-    await addMessage(conv.id, 'assistant', answer, sources.length ? sources : undefined)
+    // 重试是原地更新失败轮；首次提问才追加新消息
+    if (opts?.writeBack) {
+      await updateMessage(conv.id, opts.writeBack, { content: answer, sources: sources.length ? sources : undefined, error: '' })
+    } else {
+      await addMessage(conv.id, 'assistant', answer, sources.length ? sources : undefined)
+    }
   }
 
   async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) throw new Error('Conversation not found')
 
-    await addMessage(convId, 'user', userMessage)
+    // 划选原文随用户消息持久化：失败轮重试时才能重放同一上下文（#2）
+    await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
 
     try {
       if (userMessage.trim().toLowerCase() === '/abstract') {
@@ -765,31 +791,18 @@ export const useChatStore = defineStore('chat', () => {
     if (!conv || index === -1) return
     const target = conv.messages[index]
     const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
-    if (!userMessage) return
+    if (!target || !userMessage) return
 
-    await updateMessage(convId, messageId, { error: '' })
     try {
       if (userMessage.content.trim().toLowerCase() === '/abstract') {
         const result = await generateAbstract(conv)
-        await updateMessage(convId, messageId, { content: result.content, sources: result.sources })
+        await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '' })
         return
       }
-      const papers = conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
-      const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
-      const result = await runRagPipeline(
-        papers,
-        userMessage.content,
-        history,
-        (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
-        callLLM,
-        chatProfile.value.systemPrompt,
-      )
-      await updateMessage(convId, messageId, {
-        content: result.answer,
-        sources: result.sources.length ? result.sources : undefined,
-      })
+      // 单次写回：成功才落内容，失败由 catch 保持失败态，中途崩溃不留空窗
+      await generateReply(conv, userMessage.content, userMessage.context || undefined, index, { writeBack: messageId })
     } catch (error) {
-      await updateMessage(convId, messageId, { error: errorMessageOf(error) })
+      await updateMessage(convId, messageId, { content: '', error: errorMessageOf(error) })
       throw error
     }
   }
