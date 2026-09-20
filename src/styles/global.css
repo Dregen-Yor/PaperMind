@@ -132,7 +132,7 @@ button { touch-action: manipulation; }
 .el-dialog__header { padding-bottom: 20px; }
 .el-dialog__title { color: var(--text-primary); font-weight: 600; }
 .el-dialog__footer { padding-top: 20px; }
-.el-message-box { max-width: calc(100vw - 32px); }
+.el-message-box { max-width: min(var(--el-messagebox-width), calc(100vw - 32px)); }
 
 .el-tag {
   --el-tag-bg-color: var(--bg-elevated);

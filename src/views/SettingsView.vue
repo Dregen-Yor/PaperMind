@@ -296,7 +296,8 @@ async function saveProfile() {
 }
 
 async function doRemove(id: string) {
-  await ElMessageBox.confirm('确认删除该配置？', '删除配置', { type: 'warning' })
+  const profile = profiles.value.find(p => p.id === id)
+  await ElMessageBox.confirm(`确认删除配置《${profile?.name ?? '未命名'}》？`, '删除配置', { type: 'warning' })
   await chatStore.removeProfile(id)
   // 同步本地选择器
   chatProfileIdLocal.value = chatProfileId.value

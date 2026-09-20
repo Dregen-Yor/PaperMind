@@ -130,7 +130,8 @@ function selectConv(c: Conversation) {
 }
 
 async function delConv(id: string) {
-  await ElMessageBox.confirm('确认删除该对话？', '删除', { type: 'warning' })
+  const conv = chatStore.conversations.find(c => c.id === id)
+  await ElMessageBox.confirm(`确认删除对话《${conv?.title ?? '未命名'}》？`, '删除', { type: 'warning' })
   await chatStore.removeConversation(id)
   if (activeConvId.value === id) activeConvId.value = ''
 }

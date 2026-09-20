@@ -106,7 +106,7 @@
                   <el-dropdown-menu>
                     <el-dropdown-item @click="movePaper(paper)">移动到知识库</el-dropdown-item>
                     <el-dropdown-item @click="store.updatePaper(paper.id, { status: 'done' })">标记完成</el-dropdown-item>
-                    <el-dropdown-item divided @click="deletePaper(paper.id)"><span class="danger-text">删除</span></el-dropdown-item>
+                    <el-dropdown-item divided @click="deletePaper(paper)"><span class="danger-text">删除</span></el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -204,7 +204,7 @@
 import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from '@element-plus/icons-vue'
-import { usePaperStore } from '../stores/paper'
+import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
 import { parsePdfMeta } from '../utils/pdfUtils'
 import { filterLibraryPapers, type LibraryFilters } from '../utils/libraryFilters'
@@ -317,14 +317,15 @@ function createKb() {
 }
 
 async function removeKb(id: string) {
-  await ElMessageBox.confirm('删除知识库会同时删除其中所有论文，确认继续？', '删除知识库', { type: 'warning' })
+  const kb = store.knowledgeBases.find(k => k.id === id)
+  await ElMessageBox.confirm(`删除知识库《${kb?.name ?? '未命名'}》会同时删除其中所有论文，确认继续？`, '删除知识库', { type: 'warning' })
   await store.removeKnowledgeBase(id)
   if (activeKbId.value === id) activeKbId.value = 'default'
 }
 
-async function deletePaper(id: string) {
-  await ElMessageBox.confirm('确认删除该论文？', '删除', { type: 'warning' })
-  await store.removePaper(id)
+async function deletePaper(paper: Paper) {
+  await ElMessageBox.confirm(`确认删除《${paper.title || paper.fileName}》？`, '删除', { type: 'warning' })
+  await store.removePaper(paper.id)
 }
 
 function movePaper(paper: any) {
