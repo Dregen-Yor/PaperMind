@@ -201,7 +201,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from '@element-plus/icons-vue'
 import { usePaperStore, type Paper } from '../stores/paper'
@@ -272,11 +272,21 @@ const importPercent = computed(() =>
   importItems.value.length === 0 ? 0 : Math.round((doneCount.value / importItems.value.length) * 100),
 )
 
+let importPanelTimer: number | undefined
+watch(allDone, done => {
+  if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
+  if (done && !importHasError.value) {
+    importPanelTimer = window.setTimeout(() => { showImportPanel.value = false }, 2500)
+  }
+})
+
 function triggerUpload() { fileInput.value?.click() }
 
 async function onFilesSelected(e: Event) {
   const files = (e.target as HTMLInputElement).files
   if (!files || files.length === 0) return
+
+  if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
 
   // 初始化进度列表
   importItems.value = Array.from(files).map(f => ({ name: f.name, status: 'pending' as ImportStatus }))
