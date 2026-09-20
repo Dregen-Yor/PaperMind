@@ -65,6 +65,26 @@ describe('划选合并（#7）', () => {
     expect(plan.removals).toEqual([])
   })
 
+  it('反向倒序远距对（左行后创建、与右行不重叠）不合并：空 plan', () => {
+    const base = { paperId: 'p1', pageNum: 1, text: 'x' }
+    const plan = planFragmentMerge([
+      { id: 'a', ...base, startOffset: 252, endOffset: 298, createdAt: 1788435487939 },
+      { id: 'b', ...base, startOffset: 100, endOffset: 110, createdAt: 1788435487941 },
+    ])
+    expect(plan.updates).toEqual([])
+    expect(plan.removals).toEqual([])
+  })
+
+  it('反向倒序相邻对（左行后创建但与右行无缝衔接）仍合并为一簇', () => {
+    const base = { paperId: 'p1', pageNum: 1, text: 'x' }
+    const plan = planFragmentMerge([
+      { id: 'a', ...base, startOffset: 110, endOffset: 120, createdAt: 1788435487939 },
+      { id: 'b', ...base, startOffset: 100, endOffset: 110, createdAt: 1788435487941 },
+    ])
+    expect(plan.updates).toEqual([{ id: 'b', endOffset: 120 }])
+    expect(plan.removals).toEqual(['a'])
+  })
+
   it('一次调用两个可并簇（不同 page，各自连通）互不串簇：各 1 更新 + 各自删除', () => {
     const base = { paperId: 'p1', text: 'x', createdAt: 1788435487939 }
     const plan = planFragmentMerge([
