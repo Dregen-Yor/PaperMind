@@ -36,12 +36,16 @@
             </div>
             <div class="profile-actions">
               <el-button size="small" plain @click="openEdit(p)">编辑</el-button>
-              <el-button
-                size="small"
-                plain
-                :disabled="profiles.length <= 1"
-                @click="doRemove(p.id)"
-              >删除</el-button>
+              <el-tooltip content="至少保留一个配置" placement="top" :disabled="profiles.length > 1">
+                <span class="tooltip-wrap">
+                  <el-button
+                    size="small"
+                    plain
+                    :disabled="profiles.length <= 1"
+                    @click="doRemove(p.id)"
+                  >删除</el-button>
+                </span>
+              </el-tooltip>
             </div>
           </div>
         </div>
@@ -494,6 +498,7 @@ async function clearData() {
 .badge-chat { background: var(--accent-dim); color: var(--accent); }
 .badge-index { background: var(--gold-dim); color: var(--gold); }
 .profile-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.tooltip-wrap { display: inline-flex; }
 
 /* Settings rows */
 .setting-row {
