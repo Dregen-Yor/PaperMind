@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdir
 import { SCHEMA } from './schema'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
+import { planFragmentMerge } from '../../src/utils/highlightMerge'
 
 let db: Database.Database
 let papersDir: string
@@ -41,6 +42,21 @@ export function initDb() {
   if (count === 0) {
     db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
       .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
+  }
+
+  // 历史碎片合并（#7，2026-09-21）：一次划选被按文本节点拆成的多行，合并为一条
+  const fragmentRows = db.prepare('SELECT id, paper_id, page_num, text, start_offset, end_offset, created_at FROM highlights').all() as any[]
+  const mergePlan = planFragmentMerge(fragmentRows.map(r => ({
+    id: r.id, paperId: r.paper_id, pageNum: r.page_num, text: r.text,
+    startOffset: r.start_offset, endOffset: r.end_offset, createdAt: r.created_at,
+  })))
+  if (mergePlan.removals.length > 0) {
+    const updateFragment = db.prepare('UPDATE highlights SET end_offset = ? WHERE id = ?')
+    const removeFragment = db.prepare('DELETE FROM highlights WHERE id = ?')
+    db.transaction(() => {
+      for (const item of mergePlan.updates) updateFragment.run(item.endOffset, item.id)
+      for (const id of mergePlan.removals) removeFragment.run(id)
+    })()
   }
 }
 

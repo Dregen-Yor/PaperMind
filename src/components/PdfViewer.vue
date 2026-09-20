@@ -38,6 +38,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen } from '@element-plus/icons-vue'
 import { usePaperStore } from '../stores/paper'
+import { mergeSegments, type HighlightSegment } from '../utils/highlightMerge'
 
 const props = defineProps<{ src: string; paperId: string }>()
 const paperStore = usePaperStore()
@@ -57,11 +58,6 @@ const selectedText = ref('')
 let pdfDoc: any = null
 let selectedRange: Range | null = null
 const selectionPopup = ref({ visible: false, x: 0, y: 0 })
-interface HighlightSegment {
-  page: number
-  start: number
-  end: number
-}
 const highlightSegments: HighlightSegment[] = []
 
 const popupStyle = computed(() => ({ left: `${selectionPopup.value.x}px`, top: `${selectionPopup.value.y}px` }))
@@ -320,7 +316,7 @@ function highlightSelection() {
     }
 
     const added: HighlightSegment[] = []
-    for (const candidate of candidates) {
+    for (const candidate of mergeSegments(candidates)) {
       for (const segment of subtractExisting(candidate)) {
         highlightSegments.push(segment)
         added.push(segment)
