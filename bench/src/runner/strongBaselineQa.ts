@@ -1,30 +1,39 @@
 /**
  * 强基线共享 QA 编排引擎（hybrid-rerank / long-section-rag 复用）：
- * 每篇建索引一次 → 逐问调用注入的检索器 → 与既有 runner 完全相同的
- * 生成 prompt、拒答/judge 口径、指标计算与聚合尾部。
+ * 每篇建索引一次 → 逐问调用注入的检索器 → 公共 materializer 施加统一 token 预算 →
+ * 与既有 runner 完全相同的生成 prompt、拒答/judge 口径、指标计算与聚合尾部。
  * 计划 §1.1 冻结契约：原始问题直投（无改写）、4096 token 预算、
  * 失败记入 errors 且不伪造上下文、index 阶段 LLM 调用恒为 0。
+ *
+ * 检索与生成是两个独立阶段（§6.2 / §6.3）：检索产物先落断点，生成即便失败也不丢检索指标。
+ * 断点 v2 逐题登记 `{ record, pendingContext }`：pendingContext 存在且签名一致时跳过检索，
+ * 从已物化的页序与文本继续生成与打分；生成成功即清除 pendingContext，只留 record。
  */
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, SampleError } from '../types'
-import type { PageSpan, ScoredPageSpan } from '../metrics/retrieval'
+import type { BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, SampleError } from '../types'
+import type { PageSpan } from '../metrics/retrieval'
+import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
+import type { EvaluationContract } from '../evaluationContract'
 import type { LlmClient } from '../llmClient'
-import { answerF1, isRefusal, REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
-import { computeRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
-import { aggregate, metricSampleCounts, renameQaRates, withLatencyStats, withPercentiles } from '../metrics/aggregate'
-import { judgeAnswer, judgeUnanswerable, RUBRIC_VERSION } from '../metrics/judge'
 import { MATH_FORMAT_INSTRUCTION } from '../../../src/utils/ragPipeline'
+import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
+import { isRetrievalEligible } from '../evaluationContract'
+import { judgeSample, type JudgeSampleState } from '../metrics/judge'
+import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
 
 export interface StrongRetrievalOutcome {
-  context: string
-  /** 选中的上下文单元（页区间，含端点） */
-  selected: PageSpan[]
-  /** 全部候选，供 MRR 把 scores 的 id 映射回页区间 */
-  leaves: PageSpan[]
-  /** 完整排序（最终次序），分数必须单调于名次 */
-  scores: ScoredPageSpan[]
+  /**
+   * 选中候选的逐页精确分片组（按最终候选顺序）。最终上下文文本与页序由公共 materializer
+   * 在统一 token 预算内同源产出（§3.1 / §4.2），禁止从事后推断的候选包络反推。
+   */
+  contextGroups: ContextGroup[]
+  /**
+   * 选中候选的页区间包络，仅供诊断字段 selectedPages 使用（含被预算截掉的页），
+   * 不参与任何检索指标。可省略；省略时该题 selectedPages 记空数组。
+   */
+  selected?: PageSpan[]
   /** 检索阶段自身消耗的 LLM 调用次数（如 agentic 检索）；计入 llmCalls */
   retrievalLlmCalls?: number
 }
@@ -41,6 +50,12 @@ export interface StrongRetrievalRuntime {
     indexCacheMisses?: number
     retrieve(question: string): Promise<StrongRetrievalOutcome>
   }>
+}
+
+/** 生成侧固定设置；任一项变化都会让旧断点失效（进入 signature），但不含任何凭据。 */
+export interface StrongGenerationSettings {
+  maxTokens?: number
+  requestTimeoutMs?: number
 }
 
 export interface StrongBaselineQaArgs {
@@ -64,30 +79,75 @@ export interface StrongBaselineQaArgs {
   checkpointPath?: string
   /** CLI 进度观察；测试默认静默。processed 包含成功与失败题。 */
   onProgress?: (event: { processed: number; total: number; completed: number; errors: number; sampleId: string; status: 'completed' | 'failed' | 'resumed' }) => void
+  /**
+   * 受控上下文物化器（§3.1）：统一 token 预算由它施加——四个检索指标消费的最终页序与
+   * 提示词上下文文本同源产出，禁止从事后推断的候选包络反推。与 runQaTask 一样是必填参数。
+   */
+  materialize: (groups: ContextGroup[]) => MaterializedContext
+  /**
+   * 版本化评测契约（§7）：断点签名的身份来源与「有效题数 == contextPageMrr 观测数」的
+   * 固定分母不变量依据；全量写入结果 meta。
+   */
+  evaluationContract: EvaluationContract
+  /**
+   * provider + 规范化 base URL 的身份指纹（**绝不含 API key**）：换端点必须让旧断点失效。
+   * 与 systemPromptHash 一样由调用方在 CLI 层算出（Task 9 接线）。
+   */
+  llmEndpointIdentity: string
+  /** 生效 system prompt（含 answerLanguageInstruction）的哈希：改 prompt 必须让旧断点失效。 */
+  systemPromptHash: string
+  /** 生成侧固定设置；随签名落盘，任一项变化都会让旧断点失效。 */
+  generationSettings?: StrongGenerationSettings
+  /** judge 是否启用；缺省按是否提供 judgeClient 判定。与 judgeModel 一并进入断点签名。 */
+  judgeEnabled?: boolean
 }
 
-const message = (e: unknown) => e instanceof Error ? e.message : String(e)
+/** 断点里逐题登记的条目：record 是已落盘的逐样本记录，pendingContext 标记「检索已产出、生成未完成」。 */
+interface StrongCheckpointEntry {
+  record: PerSampleRecord
+  /** 检索已物化、生成尚未完成时保存的最终上下文；生成成功后清除（断点只剩 record） */
+  pendingContext?: MaterializedContext
+}
 
 interface StrongCheckpoint {
-  version: 1
+  version: 2
   signature: string
   startedAt: string
   elapsedMs: number
-  records: PerSampleRecord[]
+  entries: StrongCheckpointEntry[]
   llmLatencies: number[]
   cacheHits: number
   cacheMisses: number
+  /**
+   * 上一进程的 judge 口径状态快照（仅两个布尔量，**不含任何凭据**）。`sawUnanswerable`
+   * 与 `usedPatternFallback` 都是「一旦为真即保持」的闩锁，续跑加载即等价于按 OR 合并，
+   * 否则上一进程判定过的不可回答题会在本进程被跳过，meta.unanswerableMethod 静默消失。
+   */
+  judgeState?: JudgeSampleState
 }
 
+/**
+ * 断点签名：只有「同一份实验身份」才允许复用旧断点。进入签名的量覆盖评测契约、
+ * 模型、代码版本、配置、切片题号、端点身份、生效 prompt 指纹、生成设置与 judge 身份；
+ * **绝不包含 API key 或任何凭据**（端点只取 provider + 规范化 base URL 的身份哈希）。
+ */
 function checkpointSignature(args: StrongBaselineQaArgs): string {
   const allQuestionIds = args.samples.flatMap(sample => sample.questions.map(question => question.id))
   const questionIds = args.limit === undefined ? allQuestionIds : allQuestionIds.slice(0, args.limit)
   return createHash('sha256').update(JSON.stringify({
-    version: 1,
+    version: 2,
+    // 契约整体入签：数据集/有效题指纹、指标 schema、MRR 口径、evidence 映射版本、
+    // 上下文 tokenizer/revision/budget 任一变化都必须让旧断点失效
+    contract: args.evaluationContract,
     model: args.model,
     gitSha: args.gitSha,
     config: args.meta.config,
     questionIds,
+    llmEndpointIdentity: args.llmEndpointIdentity,
+    systemPromptHash: args.systemPromptHash,
+    generationSettings: args.generationSettings ?? null,
+    judgeEnabled: args.judgeEnabled ?? args.judgeClient !== undefined,
+    judgeModel: args.judgeModel ?? null,
   })).digest('hex')
 }
 
@@ -95,8 +155,15 @@ function readCheckpoint(path: string | undefined, signature: string): StrongChec
   if (!path) return undefined
   try {
     const checkpoint = JSON.parse(readFileSync(path, 'utf-8')) as StrongCheckpoint
-    if (checkpoint.version !== 1 || checkpoint.signature !== signature || !Array.isArray(checkpoint.records)) return undefined
-    return checkpoint
+    if (!checkpoint || checkpoint.version !== 2 || checkpoint.signature !== signature || !Array.isArray(checkpoint.entries)) return undefined
+    // 逐条校验条目形状：合法 JSON 但被截断/改写成 `[{}]` 的断点必须回落全新运行，
+    // 不能让后续 `entry.record.id` 抛出未捕获 TypeError 中断续跑（违反本函数「无效即忽略」的契约）。
+    const entriesValid = checkpoint.entries.every(
+      entry => entry !== null && typeof entry === 'object'
+        && entry.record !== null && typeof entry.record === 'object'
+        && typeof entry.record.id === 'string',
+    )
+    return entriesValid ? checkpoint : undefined
   } catch {
     return undefined
   }
@@ -120,13 +187,23 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
   const priorLlmLatencies = checkpoint?.llmLatencies ?? []
   const priorCacheHits = checkpoint?.cacheHits ?? 0
   const priorCacheMisses = checkpoint?.cacheMisses ?? 0
-  const records: PerSampleRecord[] = checkpoint ? [...checkpoint.records] : []
-  const completedIds = new Set(records.map(record => record.id))
+  // 断点逐题登记。records 是结果全量清单，entries 只登记「可续跑」的题：检索/索引失败的
+  // 记录（skipSampleRecord / recordIndexFailure）刻意只进 records 不入 entries，续跑时整题重试，
+  // 故两者并非一一对应。检索成功的新题同时入列并登记断点，续跑题原地复用 record。
+  const entries: StrongCheckpointEntry[] = checkpoint ? checkpoint.entries.map(entry => ({ ...entry })) : []
+  const entryById = new Map(entries.map(entry => [entry.record.id, entry]))
+  const records: PerSampleRecord[] = entries.map(entry => entry.record)
   const perPaper: PaperTimingRecord[] = []
   const errors: SampleError[] = []
+  // judge 阶段累计口径状态：sawUnanswerable 决定 meta.unanswerableMethod 是否落盘，
+  // usedPatternFallback（judge 不可用/失败而回落正则）决定该标注为 judge 还是 pattern。
+  // 两者都是只从 false 置 true 的闩锁（judgeSample 从不复位），故从断点恢复即等价于按 OR 合并：
+  // 上一进程判定过的不可回答题在本进程被跳过时，unanswerableMethod 不会静默消失。
+  const judgeState: JudgeSampleState = {
+    sawUnanswerable: checkpoint?.judgeState?.sawUnanswerable ?? false,
+    usedPatternFallback: checkpoint?.judgeState?.usedPatternFallback ?? false,
+  }
   let total = 0
-  let sawUnanswerable = false
-  let usedPatternFallback = false
   let qasperEvidenceQuestions = 0
   let mappedEvidenceQuestions = 0
   let ambiguousEvidenceQuestions = 0
@@ -139,18 +216,22 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
     args.samples.reduce((sum, sample) => sum + sample.questions.length, 0),
     args.limit ?? Number.POSITIVE_INFINITY,
   )
+  // meta.completed 的语义（§6.2）只有一处定义：走完生成阶段的题；续跑恢复的题同样计入
+  const completedCount = () => records.filter(record => record.generationStatus === 'completed').length
 
   const saveCheckpoint = () => {
     const stats = args.client.stats()
     writeCheckpoint(args.checkpointPath, {
-      version: 1,
+      version: 2,
       signature,
       startedAt,
       elapsedMs: elapsedBeforeResume + Math.max(0, now() - started),
-      records,
+      entries,
       llmLatencies: [...priorLlmLatencies, ...args.client.latencies()],
       cacheHits: priorCacheHits + stats.hits,
       cacheMisses: priorCacheMisses + stats.misses,
+      // 快照当前 judge 口径闩锁；只有两个布尔量，凭据（API key 等）绝不进入断点
+      judgeState: { sawUnanswerable: judgeState.sawUnanswerable, usedPatternFallback: judgeState.usedPatternFallback },
     })
   }
 
@@ -162,8 +243,12 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
     try {
       runtime = await args.retrieval.build(sample)
     } catch (e) {
-      perPaper.push({ paperId: sample.paperId, source: sample.source, pageCount: sample.pages.length, questionCount, indexBuildLatencyMs: Math.max(0, now() - indexStart), error: message(e) })
-      for (const q of sample.questions.slice(0, questionCount)) errors.push({ sampleId: q.id, stage: 'index', message: message(e) })
+      const message = errorMessage(e)
+      perPaper.push({ paperId: sample.paperId, source: sample.source, pageCount: sample.pages.length, questionCount, indexBuildLatencyMs: Math.max(0, now() - indexStart), error: message })
+      // 建索引失败：该篇尚未有断点记录的题按有效题补四个零观测（固定分母不变量），
+      // 已在断点里完成或待生成的题不重复登记（否则会写重记录并破坏分母）。
+      const pending = sample.questions.slice(0, questionCount).filter(question => !entryById.has(question.id))
+      if (pending.length > 0) recordIndexFailure({ ...sample, questions: pending }, pending.length, message, errors, records)
       total += questionCount
       saveCheckpoint()
       continue
@@ -184,62 +269,141 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
         else if (question.evidenceMapping === 'ambiguous') ambiguousEvidenceQuestions++
         else unmappedEvidenceQuestions++
       }
-      if (completedIds.has(question.id)) {
-        args.onProgress?.({ processed: total, total: targetTotal, completed: records.length, errors: errors.length, sampleId: question.id, status: 'resumed' })
-        continue
-      }
-      const queryStart = now()
-      let stage: SampleError['stage'] = 'retrieve'
       try {
-        const retrievalStart = now()
-        const outcome = await runtime.retrieve(question.question)
-        const retrievalLatencyMs = Math.max(0, now() - retrievalStart)
-        const systemPrompt = `${baseSystemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` + (outcome.context ? `\n\n参考内容：\n${outcome.context}` : '')
-        stage = 'generate'
-        const generateStart = now()
-        const answer = args.generateAnswer
-          ? await args.generateAnswer(systemPrompt, question.question)
-          : await args.client.chat([{ role: 'system', content: systemPrompt }, { role: 'user', content: question.question }])
-        const answerGenerationLatencyMs = Math.max(0, now() - generateStart)
-        const timing = { queryRewriteLatencyMs: 0, retrievalLatencyMs, answerGenerationLatencyMs, queryEndToEndLatencyMs: Math.max(0, now() - queryStart) }
-        const metrics: Record<string, number> = { llmCalls: 1 + (outcome.retrievalLlmCalls ?? 0), rewrite: 0, leafCount: runtime.leafCount, ...timing }
-        if (outcome.retrievalLlmCalls !== undefined) metrics.retrievalLlmCalls = outcome.retrievalLlmCalls
-
-        // 与既有 runner 相同的映射证据排除规则；MRR 用完整最终排序
-        const retrievalEligible = question.evidencePages.length > 0 && question.evidenceMapping !== 'ambiguous' && question.evidenceMapping !== 'unmapped'
-        if (retrievalEligible) {
-          Object.assign(metrics, computeRetrievalMetrics({
-            selected: outcome.selected,
-            leaves: outcome.leaves,
-            scores: outcome.scores,
-            evidencePages: question.evidencePages,
-            context: outcome.context,
-            degraded: false,
-          }))
-        } else {
-          metrics.contextTokens = estimateTokens(outcome.context)
+        const existingEntry = entryById.get(question.id)
+        // 生成已完成、打分非 failed（completed 或 skipped）的题整套续跑跳过。
+        // judgeStatus==='skipped' 表示 judge 未启用或该题不适用，必须保持跳过，不重放。
+        if (existingEntry && existingEntry.record.generationStatus === 'completed' && existingEntry.record.judgeStatus !== 'failed') {
+          args.onProgress?.({ processed: total, total: targetTotal, completed: completedCount(), errors: errors.length, sampleId: question.id, status: 'resumed' })
+          continue
         }
 
-        if (question.unanswerable) {
-          sawUnanswerable = true
-          const verdict = args.judgeClient ? await judgeUnanswerable({ question: question.question, answer, client: args.judgeClient }) : null
-          if (verdict === null) usedPatternFallback = true
-          metrics.unanswerableAccuracy = verdict === null ? (isRefusal(answer) ? 1 : 0) : (verdict ? 1 : 0)
-        } else {
-          metrics.answerF1 = answerF1(answer, question.answers)
-          const evidence = question.evidencePages.map(p => sample.pages[p] ?? '').join('\n\n').trim()
-          if (args.judgeClient && evidence) {
-            const judged = await judgeAnswer({ question: question.question, evidence, answer, client: args.judgeClient })
-            if (judged) Object.assign(metrics, { judgeFactuality: judged.factuality, judgeCompleteness: judged.completeness, judgeGroundedness: judged.groundedness })
+        // 打分阶段的唯一入口（正常路径与续跑重放共用）：只看 evidence 原文，不看检索到的上下文——
+        // 避免检索失败连带压低 judge 分；trim 保证 evidencePages 全部越界（join 为纯空白）时也跳过评分。
+        const runJudgeStage = async (record: PerSampleRecord) => {
+          const evidenceText = question.evidencePages.map(p => sample.pages[p] ?? '').join('\n\n').trim()
+          try {
+            await judgeSample({ question, answer: record.answer ?? '', evidenceText, judgeClient: args.judgeClient, metrics: record.metrics, record, state: judgeState })
+          } catch (e) {
+            // judge 是独立阶段：其异常不得牵连已产出的检索指标与答案
+            record.judgeStatus = 'failed'
+            errors.push({ sampleId: question.id, stage: 'judge', message: errorMessage(e) })
           }
         }
 
-        records.push({ id: question.id, paperId: sample.paperId, source: sample.source, metrics, timing, retrievalQuery: question.question, selectedPages: expandPages(outcome.selected), evidencePages: question.evidencePages, answer })
-        completedIds.add(question.id)
-        args.onProgress?.({ processed: total, total: targetTotal, completed: records.length, errors: errors.length, sampleId: question.id, status: 'completed' })
-      } catch (e) {
-        errors.push({ sampleId: question.id, stage, message: message(e) })
-        args.onProgress?.({ processed: total, total: targetTotal, completed: records.length, errors: errors.length, sampleId: question.id, status: 'failed' })
+        // 生成已完成但打分失败（生成成功、judge 抛异常或降级）：answer 已落盘，只重放打分阶段——
+        // judge 模型在断点签名里，重放是缓存确定性的；检索与生成都不重跑，判分分母不被永久缩小。
+        if (existingEntry && existingEntry.record.generationStatus === 'completed') {
+          await runJudgeStage(existingEntry.record)
+          args.onProgress?.({ processed: total, total: targetTotal, completed: completedCount(), errors: errors.length, sampleId: question.id, status: 'completed' })
+          continue
+        }
+
+        const eligible = isRetrievalEligible(question)
+        const queryStart = now()
+
+        // ---------- 检索阶段 ----------
+        let context: MaterializedContext
+        let entry: StrongCheckpointEntry
+        if (existingEntry?.pendingContext) {
+          // 续跑：检索产物已在上一轮物化并落盘，跳过检索，从已保存的页序与文本继续
+          entry = existingEntry
+          context = existingEntry.pendingContext
+        } else {
+          const record = newSampleRecord(sample, question)
+          try {
+            const retrievalStart = now()
+            const outcome = await runtime.retrieve(question.question)
+            const retrievalLatencyMs = Math.max(0, now() - retrievalStart)
+            // 最终 token 预算由注入的物化器施加；上下文文本与页序同源产出（§3.1）
+            context = args.materialize(outcome.contextGroups)
+            const metrics = record.metrics
+            metrics.llmCalls = 1 + (outcome.retrievalLlmCalls ?? 0)
+            metrics.rewrite = 0
+            metrics.leafCount = runtime.leafCount
+            if (outcome.retrievalLlmCalls !== undefined) metrics.retrievalLlmCalls = outcome.retrievalLlmCalls
+            metrics.contextTruncated = context.truncated ? 1 : 0
+            // 检索阶段就写下检索时延：续跑跳过检索时仍能从记录里恢复该分位数样本
+            metrics.queryRewriteLatencyMs = 0
+            metrics.retrievalLatencyMs = retrievalLatencyMs
+            // 四个检索指标统一消费最终物化页序，不再事后反推候选包络
+            applyRetrievalMetrics(metrics, {
+              eligible,
+              pageOrder: context.pageOrder,
+              questionId: question.id,
+              evidencePages: question.evidencePages,
+              context: context.text,
+            })
+            // 非有效题照常记录运行诊断，但状态是 ineligible（不进检索质量分母），不是 completed
+            record.retrievalStatus = eligible ? 'completed' : 'ineligible'
+            record.retrievalQuery = question.question
+            record.contextPageOrder = context.pageOrder
+            record.contextTokenCount = context.tokenCount
+            record.contextTruncated = context.truncated
+            // selectedPages 仅是诊断包络（按检索器自报的页区间），真实页集合一律看 contextPageOrder
+            record.selectedPages = outcome.selected ? expandPages(outcome.selected) : []
+            records.push(record)
+            // 检索完成即登记「待生成」断点并立刻落盘：即便随后生成失败或进程被杀，
+            // 续跑也无需重跑检索（finally 里的 saveCheckpoint 只是常规兜底）
+            entry = { record, pendingContext: context }
+            entries.push(entry)
+            entryById.set(record.id, entry)
+            saveCheckpoint()
+          } catch (e) {
+            // 检索失败：有效题补四个零观测，整题记 retrieve 错误；不登记断点，续跑时整题重试
+            skipSampleRecord(record, eligible, eligible ? 'failed' : 'ineligible')
+            records.push(record)
+            errors.push({ sampleId: question.id, stage: 'retrieve', message: errorMessage(e) })
+            continue
+          }
+        }
+
+        const record = entry.record
+        const metrics = record.metrics
+
+        // ---------- 生成阶段 ----------
+        const systemPrompt = `${baseSystemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` + (context.text ? `\n\n参考内容：\n${context.text}` : '')
+        const generationStart = now()
+        let answer: string
+        try {
+          answer = args.generateAnswer
+            ? await args.generateAnswer(systemPrompt, question.question)
+            : await args.client.chat([{ role: 'system', content: systemPrompt }, { role: 'user', content: question.question }])
+        } catch (e) {
+          // 生成失败不得丢弃已落盘的检索指标与断点：pendingContext 保留，续跑直接重跑生成
+          record.generationStatus = 'failed'
+          record.judgeStatus = 'skipped'
+          errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
+          continue
+        }
+        const answerGenerationLatencyMs = Math.max(0, now() - generationStart)
+        // 续跑路径的检索时延来自检索阶段写入记录的 metrics（检索本身不再重放）
+        // queryEndToEndLatencyMs 只量本进程此次迭代：续跑题的检索发生在上一进程，端到端仅覆盖
+        // 生成半程，故含续跑题的整轮 queryEndToEndLatencyP50/P95 天然偏低——这是「题内续跑」的
+        // 固有口径，勿伪造一段检索时延来「修正」。
+        const timing: PipelineTiming = {
+          queryRewriteLatencyMs: 0,
+          retrievalLatencyMs: metrics.retrievalLatencyMs ?? 0,
+          answerGenerationLatencyMs,
+          queryEndToEndLatencyMs: Math.max(0, now() - queryStart),
+        }
+        record.generationStatus = 'completed'
+        record.answer = answer
+        record.timing = { ...timing }
+        // 端到端与阶段时延写入 metrics 让 aggregate 能产生均值；分位数由 withPercentiles
+        // 从 perSample.timing 单独计算，不能把 P50/P95 误当均值。
+        // 注意 retrievalLatencyMs 在此与检索阶段写入的值相同，是刻意重写而非「修正」：
+        // 值取自记录 metrics，早期那次写入才是续跑跳过检索时恢复分位数样本的依据，勿删除。
+        metrics.queryRewriteLatencyMs = timing.queryRewriteLatencyMs
+        metrics.retrievalLatencyMs = timing.retrievalLatencyMs
+        metrics.answerGenerationLatencyMs = timing.answerGenerationLatencyMs
+        metrics.queryEndToEndLatencyMs = timing.queryEndToEndLatencyMs
+        // 生成成功：清除待生成标记，断点只剩 record
+        entry.pendingContext = undefined
+
+        // ---------- 打分阶段（生成成功后才执行；异常不牵连检索指标与答案） ----------
+        await runJudgeStage(record)
+        args.onProgress?.({ processed: total, total: targetTotal, completed: completedCount(), errors: errors.length, sampleId: question.id, status: 'completed' })
       } finally {
         saveCheckpoint()
       }
@@ -250,45 +414,31 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
   const currentStats = args.client.stats()
   const hits = priorCacheHits + currentStats.hits
   const misses = priorCacheMisses + currentStats.misses
-  const llmLatencies = [...priorLlmLatencies, ...args.client.latencies()]
-  const values = {
-    indexBuildLatency: perPaper.flatMap(p => p.indexBuildLatencyMs === undefined ? [] : [p.indexBuildLatencyMs]),
-    retrievalLatency: records.map(r => r.timing!.retrievalLatencyMs),
-    answerGenerationLatency: records.map(r => r.timing!.answerGenerationLatencyMs),
-    queryEndToEndLatency: records.map(r => r.timing!.queryEndToEndLatencyMs),
-    llmNetworkLatency: llmLatencies,
-  }
-  const raw = aggregate(records)
-  const counts = metricSampleCounts(records)
-  for (const metric of ['evidenceRecall', 'evidenceHit', 'contextPrecision', 'mrr']) if (counts[metric] !== undefined) raw[`${metric}SampleCount`] = counts[metric]
-  const metrics = withPercentiles(withLatencyStats(renameQaRates(raw), llmLatencies), values)
-  return {
-    task: 'qa',
+  // 续跑时把上一轮的 LLM 网络时延并入分位数样本；stats 已单独累加，避免重复计入
+  const mergedClient: LlmClient = { ...args.client, latencies: () => [...priorLlmLatencies, ...args.client.latencies()] }
+  return finalizeQaResult({
     config: args.meta.config,
-    meta: {
-      model: args.model,
-      ...(args.judgeModel ? { judgeModel: args.judgeModel } : {}),
-      timestamp: finishedAt,
-      gitSha: args.gitSha,
-      startedAt,
-      finishedAt,
-      runWallClockMs: elapsedBeforeResume + Math.max(0, now() - started),
-      cacheHits: hits,
-      cacheMisses: misses,
-      cacheHitRate: hits + misses ? hits / (hits + misses) : 0,
-      completed: records.length,
-      total,
-      retrievalAlgorithm: args.meta.retrievalAlgorithm,
-      baselineFamily: args.meta.baselineFamily,
-      candidateGranularity: args.retrieval.granularity,
-      refusalPatternVersion: REFUSAL_PATTERN_VERSION,
-      rubricVersion: RUBRIC_VERSION,
-      ...(sawUnanswerable ? { unanswerableMethod: (args.judgeClient && !usedPatternFallback ? 'judge' : 'pattern') as 'judge' | 'pattern' } : {}),
-      ...(qasperEvidenceQuestions ? { evidenceMappingCoverage: mappedEvidenceQuestions / qasperEvidenceQuestions, ambiguousEvidenceRate: ambiguousEvidenceQuestions / qasperEvidenceQuestions, unmappedEvidenceRate: unmappedEvidenceQuestions / qasperEvidenceQuestions } : {}),
-    },
-    metrics,
-    perSample: records,
+    contract: args.evaluationContract,
+    records,
     perPaper,
     errors,
-  }
+    client: mergedClient,
+    model: args.model,
+    judgeModel: args.judgeModel,
+    hasJudgeClient: args.judgeClient !== undefined,
+    judgeState,
+    gitSha: args.gitSha,
+    startedAt,
+    finishedAt,
+    runWallClockMs: elapsedBeforeResume + Math.max(0, now() - started),
+    total,
+    cacheHits: hits,
+    cacheMisses: misses,
+    retrievalAlgorithm: args.meta.retrievalAlgorithm,
+    qasperEvidenceQuestions,
+    mappedEvidenceQuestions,
+    ambiguousEvidenceQuestions,
+    unmappedEvidenceQuestions,
+    extraMeta: { baselineFamily: args.meta.baselineFamily, candidateGranularity: args.retrieval.granularity },
+  })
 }

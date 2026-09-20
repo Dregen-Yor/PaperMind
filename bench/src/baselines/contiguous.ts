@@ -1,5 +1,6 @@
 import type { Section } from './sections'
-import { sliceText, spanPages, type PageToken } from './tokenStream'
+import type { ContextPiece } from '../../../src/utils/contextTrace'
+import { tokenRangeToPieces, spanPages, type PageToken } from './tokenStream'
 
 /**
  * 长章节基线的「定位后阅读」扩展（计划 §2.3）：
@@ -15,6 +16,8 @@ export interface ContiguousRegion {
   endPage: number
   /** 所属章节标题；preamble 为空串 */
   sectionTitle: string
+  /** text 的逐页精确分片：拼接后与 text 逐字相等 */
+  pieces: ContextPiece[]
 }
 
 /**
@@ -40,12 +43,18 @@ export function expandWithinSection(
     if (start > section.startToken) start--
     if (end - start < maxTokens && end < section.endToken) end++
   }
+  const pieces = tokenRangeToPieces(tokens, start, end)
   return {
-    text: sliceText(tokens, start, end),
+    text: pieces.map(piece => piece.text).join(''),
     tokenCount: end - start,
     startToken: start,
     endToken: end,
+    // span 是 token 区间包络，可能点名未产出文本的页：pieces[0].page 可大于 startPage。
+    // 页序以 pieces 为准；四个 Context Page 指标消费 materializer 的 pageOrder，而非这里的 span。
+    // 且 pieces 可能为空：生产 atomsToPieces 从不过滤，bench tokenRangeToPieces 会，
+    // 不得把 evidenceBlock.ts:245 的「由 pieces 反推 span」照搬进 bench（缺长度守卫）。
     ...spanPages(tokens, start, end),
     sectionTitle: section.title,
+    pieces,
   }
 }

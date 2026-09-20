@@ -10,7 +10,11 @@
 import type { EvidenceBlock } from './evidenceBlock'
 import type { LLMFn } from './llm'
 
-export const SEMANTIC_TREE_SCHEMA_VERSION = 1
+/**
+ * 持久化 schema 版本。v2 起证据块必须携带逐页 `pieces` 分区，
+ * 因此旧记录一律作废重建（不再有 v1 的块 JSON 语义）。
+ */
+export const SEMANTIC_TREE_SCHEMA_VERSION = 2
 export const SEMANTIC_TREE_PROMPT_VERSION = 'v1'
 
 /** 整棵树最多 16 个节点（§6.2）。 */

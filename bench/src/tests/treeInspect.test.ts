@@ -4,9 +4,9 @@ import type { SemanticTree } from '../../../src/utils/semanticTree'
 import { renderTreeOutline, renderTreeReport } from '../treeInspect'
 
 const blocks: EvidenceBlock[] = [
-  { id: 'B001', rawText: 'ABSTRACT_TEXT', normalizedText: 'abstract', startPage: 0, endPage: 0, order: 0, previousId: null, nextId: 'B002', sourceType: 'body' },
-  { id: 'B002', rawText: 'We propose an attention-only architecture.', normalizedText: 'we propose', startPage: 1, endPage: 2, order: 1, previousId: 'B001', nextId: 'B003', sourceType: 'body' },
-  { id: 'B003', rawText: 'RESULTS_TEXT', normalizedText: 'results', startPage: 3, endPage: 3, order: 2, previousId: 'B002', nextId: null, sourceType: 'table-caption' },
+  { id: 'B001', rawText: 'ABSTRACT_TEXT', normalizedText: 'abstract', pieces: [{ page: 0, text: 'ABSTRACT_TEXT' }], startPage: 0, endPage: 0, order: 0, previousId: null, nextId: 'B002', sourceType: 'body' },
+  { id: 'B002', rawText: 'We propose an attention-only architecture.', normalizedText: 'we propose', pieces: [{ page: 1, text: 'We propose an ' }, { page: 2, text: 'attention-only architecture.' }], startPage: 1, endPage: 2, order: 1, previousId: 'B001', nextId: 'B003', sourceType: 'body' },
+  { id: 'B003', rawText: 'RESULTS_TEXT', normalizedText: 'results', pieces: [{ page: 3, text: 'RESULTS_TEXT' }], startPage: 3, endPage: 3, order: 2, previousId: 'B002', nextId: null, sourceType: 'table-caption' },
 ]
 
 const tree: SemanticTree = {

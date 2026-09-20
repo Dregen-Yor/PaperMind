@@ -96,6 +96,11 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
       runWallClockMs: Math.max(0, now() - startedMs), cacheHits, cacheMisses,
       cacheHitRate: cacheHits + cacheMisses ? cacheHits / (cacheHits + cacheMisses) : 0,
       mode: 'full-context', retrievalAlgorithm: 'none', gitSha: args.gitSha, completed: records.length, total,
+      // 全文直投是「回答模型能用全文时的效果上限」，不受 4096 受控预算约束（§5），
+      // 因此不参与检索 MRR 横向排名。这是一份显式资格声明而非失败标记：
+      // 缺了它，比较门禁只能靠「有没有 contextPageMrr」反推，full-context 会被算进检索排名。
+      comparisonEligible: false,
+      comparisonIneligibleReason: 'full-context-generation-ceiling',
       refusalPatternVersion: REFUSAL_PATTERN_VERSION, rubricVersion: RUBRIC_VERSION,
       ...(qasperEvidenceQuestions ? { evidenceMappingCoverage: mappedEvidenceQuestions / qasperEvidenceQuestions, ambiguousEvidenceRate: ambiguousEvidenceQuestions / qasperEvidenceQuestions, unmappedEvidenceRate: unmappedEvidenceQuestions / qasperEvidenceQuestions } : {}),
       ...(sawUnanswerable ? { unanswerableMethod: (args.judgeClient && !usedPatternFallback ? 'judge' : 'pattern') as 'judge' | 'pattern' } : {}),

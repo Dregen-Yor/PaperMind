@@ -21,6 +21,7 @@ const block = (order: number, overrides: Partial<EvidenceBlock> = {}): EvidenceB
     id,
     rawText: `text of ${id}`,
     normalizedText: `text of ${id}`,
+    pieces: [{ page: order, text: `text of ${id}` }],
     startPage: order,
     endPage: order,
     order,
@@ -375,7 +376,7 @@ describe('semanticTreeConfigHash — 建树缓存身份（§10.3）', () => {
   })
 
   it.each([
-    ['schema 版本', { schemaVersion: 2 }],
+    ['schema 版本', { schemaVersion: SEMANTIC_TREE_SCHEMA_VERSION + 1 }],
     ['提示词版本', { promptVersion: 'v2' }],
     ['建树模型或端点', { model: 'openai:gpt-4o-mini@https://api.openai.com/v1' }],
     ['输入字符上限', { maxInputChars: 60_000 }],

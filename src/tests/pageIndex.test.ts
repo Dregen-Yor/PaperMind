@@ -124,6 +124,50 @@ describe('scoreAndSelect structured result (benchmark hooks)', () => {
   })
 })
 
+describe('scoreAndSelect context provenance (benchmark hooks)', () => {
+  it('exposes one page-attributed group per selected node', async () => {
+    const llm = vi.fn().mockResolvedValue('[{"id":1,"score":9},{"id":2,"score":6},{"id":0,"score":1}]')
+    const result = await scoreAndSelect(makeRoot(), pages, 'methods and results?', llm)
+
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 2, text: pages[2] }, { page: 3, text: `\n\n${pages[3]}` }] },
+      { pieces: [{ page: 4, text: pages[4] }, { page: 5, text: `\n\n${pages[5]}` }] },
+    ])
+  })
+
+  it('concatenating group pieces with the group separator reproduces the legacy context', async () => {
+    const llm = vi.fn().mockResolvedValue('[{"id":1,"score":9},{"id":2,"score":6},{"id":0,"score":1}]')
+    const result = await scoreAndSelect(makeRoot(), pages, 'methods and results?', llm)
+
+    const rebuilt = result.contextGroups
+      .map(group => group.pieces.map(piece => piece.text).join(''))
+      .join('\n\n---\n\n')
+    expect(rebuilt).toBe(result.context)
+  })
+
+  it('carries context groups on the single-node short circuit', async () => {
+    const singleRoot: IndexNode = {
+      title: 'Short Paper', nodeId: 'root',
+      startPage: 0, endPage: 2,
+      summary: 'A very short paper.', nodes: [],
+    }
+    const result = await scoreAndSelect(singleRoot, ['a', 'b', 'c'], 'anything', vi.fn())
+
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 0, text: 'a' }, { page: 1, text: '\n\nb' }, { page: 2, text: '\n\nc' }] },
+    ])
+  })
+
+  it('carries context groups on the degraded fallback path too', async () => {
+    const llm = vi.fn().mockResolvedValue('this is not valid json at all')
+    const result = await scoreAndSelect(makeRoot(), pages, 'anything', llm)
+
+    expect(result.contextGroups).toEqual([
+      { pieces: [{ page: 0, text: pages[0] }, { page: 1, text: `\n\n${pages[1]}` }] },
+    ])
+  })
+})
+
 describe('scoreAndSelect topK / minScore options', () => {
   it('selects three nodes in document order when topK is 3', async () => {
     const llm = vi.fn().mockResolvedValue('[{"id":2,"score":9},{"id":1,"score":7},{"id":0,"score":5}]')

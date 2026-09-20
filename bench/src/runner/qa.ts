@@ -1,19 +1,38 @@
 /**
  * QA 任务 Runner——整个评测的中枢编排：
- * 加载数据（由调用方完成）→ 建索引 → 跑生产 RAG 管线 → 计算检索/答案指标 → 聚合。
- * 复用 src/utils/ 的生产实现（buildPageIndex / runRagPipeline），
+ * 加载数据（由调用方完成）→ 建索引 → 分阶段跑生产 RAG 管线 → 计算检索/答案指标 → 聚合。
+ * 复用 src/utils/ 的生产实现（buildPageIndex / retrieveRagContext / generateRagAnswer），
  * 评测与应用跑同一份代码，这是 benchmark 有效性的前提。
+ *
+ * 检索与生成是两个独立阶段：检索产物先落盘（页序指标与诊断），生成即便失败也不丢检索指标（§6.2 / §6.3）。
  */
 import { buildPageIndex, collectLeafNodes, type IndexNode, type IndexOptions } from '../../../src/utils/pageIndex'
-import { runRagPipeline, type RagOptions } from '../../../src/utils/ragPipeline'
+import {
+  generateRagAnswer,
+  retrieveRagContext,
+  type RagGenerationStage,
+  type RagOptions,
+  type RagRetrievalStage,
+} from '../../../src/utils/ragPipeline'
+import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
 import type { SemanticTreeHook } from '../metrics/treeDiagnostics'
 import { summarizeTreeDiagnostics, treeRecordFields } from '../metrics/treeDiagnostics'
-import type { PaperMindConfig, BenchResult, EvalSample, PaperTimingRecord, PerSampleRecord, PipelineTiming, SampleError } from '../types'
+import type {
+  PaperMindConfig,
+  BenchResult,
+  EvalSample,
+  PaperTimingRecord,
+  PerSampleRecord,
+  PipelineTiming,
+  QaQuestion,
+  SampleError,
+} from '../types'
 import type { LlmClient } from '../llmClient'
-import { computeRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
-import { answerF1, isRefusal, REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
-import { judgeAnswer, judgeUnanswerable, RUBRIC_VERSION } from '../metrics/judge'
-import { aggregate, metricSampleCounts, renameQaRates, withLatencyStats, withPercentiles } from '../metrics/aggregate'
+import { applyRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
+import { isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
+import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
+import { judgeSample, type JudgeSampleState } from '../metrics/judge'
+import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
 
 /** 与 src/stores/chat.ts 的 DEFAULT_PROFILE.systemPrompt 保持一致的字面值。 */
 export const DEFAULT_SYSTEM_PROMPT =
@@ -21,9 +40,9 @@ export const DEFAULT_SYSTEM_PROMPT =
 
 export interface QaTaskDeps {
   buildIndex?: typeof buildPageIndex
-  runPipeline?: typeof runRagPipeline
+  retrieveContext?: typeof retrieveRagContext
+  generateAnswer?: typeof generateRagAnswer
 }
-
 
 export interface QaTaskArgs {
   samples: EvalSample[]
@@ -51,6 +70,17 @@ export interface QaTaskArgs {
    * 同一条生产 RAG 管线，只是每篇论文多挂一棵树。
    */
   semanticTree?: SemanticTreeHook
+  /**
+   * 受控上下文物化器（§3.1）：对比实验的统一 token 预算由它施加——四个检索指标
+   * 消费的最终页序与上下文文本同源产出，禁止从事后推断的候选包络反推。
+   * CLI 与测试都必须提供；产品默认的 maxContextChars 字符预算不受影响。
+   */
+  materialize: (groups: ContextGroup[]) => MaterializedContext
+  /**
+   * 版本化评测契约（§7）：指标 schema、tokenizer、预算、数据集与有效题集合身份。
+   * 全量写入结果 meta，并据此校验「有效题数 == contextPageMrr 观测数」的固定分母不变量。
+   */
+  evaluationContract: EvaluationContract
 }
 
 /** 只透传 config 中显式给出的分块字段，未设置的字段让生产代码用默认值。 */
@@ -63,7 +93,11 @@ function indexOptions(config: PaperMindConfig): IndexOptions {
   return out
 }
 
-/** 只透传 config 中显式给出的检索字段（externalContext 已被 BenchConfig Omit，永不传入）。 */
+/**
+ * 只透传 config 中显式给出的检索字段（externalContext 已被 BenchConfig Omit，永不传入）。
+ * 注入 `materialize` 时最终预算由物化器掌控，maxContextChars 不再生效——这由调用方决定，
+ * 此处仍如实透传配置值，避免在同一 runner 里私改口径。
+ */
 function ragOptions(config: PaperMindConfig): RagOptions {
   const out: RagOptions = {}
   if (config.topK !== undefined) out.topK = config.topK
@@ -73,17 +107,15 @@ function ragOptions(config: PaperMindConfig): RagOptions {
   return out
 }
 
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
-}
-
 export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const { samples, config, client, limit, gitSha, model } = args
   const now = args.now ?? Date.now
   const startedAt = new Date().toISOString()
   const runStartedMs = now()
   const buildIndex = args.deps?.buildIndex ?? buildPageIndex
-  const runPipeline = args.deps?.runPipeline ?? runRagPipeline
+  const retrieveContext = args.deps?.retrieveContext ?? retrieveRagContext
+  const generateAnswer = args.deps?.generateAnswer ?? generateRagAnswer
+  const contract = args.evaluationContract
   // 语言覆盖指令追加在调用方 systemPrompt 之后；未传时 prompt 原样透传
   const systemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`
@@ -93,9 +125,9 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const perPaper: PaperTimingRecord[] = []
   const errors: SampleError[] = []
   let total = 0
-  let sawUnanswerable = false
-  // judge 不可用或部分失败而回落 pattern 时置位；meta.unanswerableMethod 据此如实标注口径
-  let usedPatternFallback = false
+  // judge 阶段累计口径状态：sawUnanswerable 决定 meta.unanswerableMethod 是否落盘，
+  // usedPatternFallback（judge 不可用/失败而回落正则）决定该标注为 judge 还是 pattern
+  const judgeState: JudgeSampleState = { sawUnanswerable: false, usedPatternFallback: false }
   let qasperEvidenceQuestions = 0
   let mappedEvidenceQuestions = 0
   let ambiguousEvidenceQuestions = 0
@@ -104,50 +136,50 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   for (const sample of samples) {
     if (limit !== undefined && total >= limit) break
 
-    // 每篇论文只建一次索引，同篇的多个问题复用
-    let tree: IndexNode
     const indexClientBefore = client.stats()
     const indexStartedMs = now()
+    let tree: IndexNode | undefined
+    let indexError: unknown
     try {
       tree = await buildIndex(sample.pages, client.complete, indexOptions(config))
     } catch (e) {
-      // 建索引失败：该论文全部问题按 index 阶段记错，不静默跳过。
-      // 仍记录已消耗的索引时长与缓存差值——「索引慢后失败」的论文不能被时延分析漏掉，
-      // 否则首次索引的真实成本在故障样本上完全不可见
-      const indexFinishedMs = now()
-      const indexClientAfter = client.stats()
-      const questionCount = countExecutedQuestions(sample, limit, total)
-      total += questionCount
-      for (let i = 0; i < questionCount; i++) {
-        errors.push({ sampleId: sample.questions[i].id, stage: 'index', message: errorMessage(e) })
-      }
+      indexError = e
+    }
+    const indexFinishedMs = now()
+    const indexClientAfter = client.stats()
+    // 本篇在 limit 约束下实际将执行的问题数；失败分支与成功分支共用，保证口径一致
+    const paperQuestionCount = countExecutedQuestions(sample, limit, total)
+
+    if (indexError !== undefined || tree === undefined) {
+      // 建索引失败：该论文全部问题记 index 阶段错误，并写底部逐题记录。
+      // 有效题必须补齐四个零检索观测，否则有效题数少于契约数、固定分母不变量会误报；
+      // 生成阶段从未开始，按 skipped 计，不污染 meta.completed（§6.2）
+      recordIndexFailure(sample, paperQuestionCount, errorMessage(indexError), errors, perSample)
+      total += paperQuestionCount
+      // 仍记录已消耗的索引时长与缓存差值——「索引慢后失败」的论文不能被时延分析漏掉
       perPaper.push({
         paperId: sample.paperId,
         source: sample.source,
         pageCount: sample.pages.length,
-        questionCount,
+        questionCount: paperQuestionCount,
         indexBuildLatencyMs: Math.max(0, indexFinishedMs - indexStartedMs),
         indexLlmCalls:
           (indexClientAfter.hits - indexClientBefore.hits)
           + (indexClientAfter.misses - indexClientBefore.misses),
         indexCacheHits: indexClientAfter.hits - indexClientBefore.hits,
         indexCacheMisses: indexClientAfter.misses - indexClientBefore.misses,
-        error: errorMessage(e),
+        error: errorMessage(indexError),
       })
       continue
     }
-    const indexFinishedMs = now()
-    const indexClientAfter = client.stats()
+
     // 单节点文档（buildPageIndex 直接返回叶子）时叶节点是树本身，
     // 与生产 pipeline 里的树路由用同一个取法，保证两边的候选集合一致
     const leaves = collectLeafNodes(tree)
-
     // 语义树在平面索引之后单独建：树的输入是原文证据块，与平面索引互不依赖。
     // 建树失败只是没有树，本篇所有问题照常走平面路径（§8.2）
     const treeInfo = args.semanticTree ? await args.semanticTree(sample) : undefined
 
-    // questionCount 为本篇在 limit 约束下实际将执行的问题数，而不是原始总数
-    const paperQuestionCount = countExecutedQuestions(sample, limit, total)
     perPaper.push({
       paperId: sample.paperId,
       source: sample.source,
@@ -174,11 +206,15 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
         else unmappedEvidenceQuestions++
       }
 
-      // 生产 scoreAndSelect 对野值打分可能在 try 块外抛 TypeError，
-      // 这里必须 catch 一切异常——单个坏样本不能终止整轮评测
+      const eligible = isRetrievalEligible(question)
+      const record = newSampleRecord(sample, question)
+      // 先入列：后续任何阶段的失败都保留这条记录，生成异常不得把它整条删掉（§6.3）
+      perSample.push(record)
+
+      // ---------- 检索阶段 ----------
+      let retrieval: RagRetrievalStage
       try {
-        const questionStartedMs = now()
-        const result = await runPipeline(
+        retrieval = await retrieveContext(
           [{
             tree,
             pages: sample.pages,
@@ -187,133 +223,130 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
           question.question,
           [],                       // 单轮评测，无历史；rewriteRate 因此在本评测中恒为 0
           client.complete,
-          client.chat,
-          systemPrompt,
           ragOptions(config),
-          { now },
+          { now, materialize: args.materialize },
         )
-        // timing 是 benchmark 与生产 pipeline 的硬契约；必须在任何 judge 调用前验证。
-        assertTiming(result.timing)
-
-        const retrieval = result.retrievals[0]
-        const metrics: Record<string, number> = {
-          llmCalls: result.llmCalls,
-          rewrite: result.rewritten ? 1 : 0,
-          leafCount: leaves.length,
-          contextTruncated: result.contextTruncated ? 1 : 0,
-        }
-        // 树诊断（§11.4）：本篇根本没建出树时记 treeDegraded，与「有树但没被选中」区分开。
-        // 降级有两种来源，漏掉任何一种都会把失败路由统计成成功：
-        // - 树取证不足（insufficientEvidence，已就地回落平面）
-        // - 打分本身失败（retrieval.degraded：JSON 非法 / 覆盖不全 / 请求异常）
-        if (treeInfo) {
-          const semantic = retrieval?.semantic
-          metrics.treeUsed = semantic ? 1 : 0
-          metrics.treeDegraded = semantic
-            ? (semantic.insufficientEvidence || retrieval?.degraded ? 1 : 0)
-            : 1
-          if (semantic) {
-            metrics.selectedNodeCount = semantic.selectedNodeCount
-            metrics.routableNodeCount = semantic.routableNodeCount
-          }
-        }
-
-        if (retrieval) {
-          const retrievalEligible = question.evidencePages.length > 0 && question.evidenceMapping !== 'ambiguous' && question.evidenceMapping !== 'unmapped'
-          if (retrievalEligible) {
-            // scores 的 id 必须与 leaves 同坐标系，否则 MRR 会把分数映射到别的页区间。
-            // 树路由返回的 scores 已由 semanticRoute 保证只含平面叶节点下标（树域打分一律为空），
-            // 走平面回落时这两个集合本来就是同一批叶节点。
-            Object.assign(metrics, computeRetrievalMetrics({
-              selected: retrieval.selected,
-              leaves,
-              scores: retrieval.scores,
-              evidencePages: question.evidencePages,
-              context: result.context,
-              degraded: retrieval.degraded,
-            }))
-          } else {
-            metrics.contextTokens = estimateTokens(result.context)
-          }
-          metrics.selectedContextTokens = estimateTokens(retrieval.context)
-          metrics.degraded = retrieval.degraded ? 1 : 0
-          metrics.partialScoreCoverage = retrieval.degradedReason === 'incomplete-score-coverage' ? 1 : 0
-          // 单叶索引短路时 scoreAndSelect 不发 LLM 打分（llmCalled=false），
-          // 排序无从谈起——此时不写 mrr，否则「无排序可言」被误算成「排得差」，
-          // 系统性拉低均值；缺指标交给聚合层自动剔除分母。
-          // evidenceRecall / evidenceHit / contextPrecision 与有无打分无关，照常写入。
-          if (!retrieval.llmCalled || retrieval.degraded) delete metrics.mrr
-        }
-
-        // judge 只看 evidence 原文，不看检索到的上下文——避免检索失败连带压低 judge 分；
-        // trim 保证 evidencePages 全部越界时（join 结果为纯空白）也走「为空则跳过 judge 打分」的裁定
-        const evidenceText = question.evidencePages
-          .map(p => sample.pages[p] ?? '')
-          .join('\n\n')
-          .trim()
-
-        if (question.unanswerable) {
-          sawUnanswerable = true
-          if (args.judgeClient) {
-            const verdict = await judgeUnanswerable({
-              question: question.question,
-              answer: result.answer,
-              client: args.judgeClient,
-            })
-            // judge 不可用时回落到正则口径，并如实记录用了哪种
-            if (verdict === null) {
-              metrics.unanswerableAccuracy = isRefusal(result.answer) ? 1 : 0
-              usedPatternFallback = true
-            } else {
-              metrics.unanswerableAccuracy = verdict ? 1 : 0
-            }
-          } else {
-            metrics.unanswerableAccuracy = isRefusal(result.answer) ? 1 : 0
-            usedPatternFallback = true
-          }
-        } else {
-          metrics.answerF1 = answerF1(result.answer, question.answers)
-
-          if (args.judgeClient && evidenceText) {
-            const scores = await judgeAnswer({
-              question: question.question,
-              evidence: evidenceText,
-              answer: result.answer,
-              client: args.judgeClient,
-            })
-            if (scores) {
-              metrics.judgeFactuality = scores.factuality
-              metrics.judgeCompleteness = scores.completeness
-              metrics.judgeGroundedness = scores.groundedness
-            }
-            // scores 为 null 时不写指标 → aggregate 自动从分母剔除
-          }
-        }
-
-        const { timing } = result
-
-        perSample.push({
-          id: question.id,
-          paperId: sample.paperId,
-          source: sample.source,
-          metrics,
-          timing: { ...timing },
-          retrievalQuery: result.retrievalQuery,
-          selectedPages: retrieval ? expandPages(retrieval.selected) : [],
-          evidencePages: question.evidencePages,
-          answer: result.answer,
-        })
-
-        // 端到端与阶段时延写入 metrics 让 aggregate 能产生均值；分位数由 withPercentiles
-        // 从 perSample.timing 单独计算，不能把 P50/P95 误当均值
-        metrics.queryRewriteLatencyMs = timing.queryRewriteLatencyMs
-        metrics.retrievalLatencyMs = timing.retrievalLatencyMs
-        metrics.answerGenerationLatencyMs = timing.answerGenerationLatencyMs
-        metrics.queryEndToEndLatencyMs = timing.queryEndToEndLatencyMs
+        assertRetrievalTiming(retrieval)
       } catch (e) {
         // 时延不变量破坏是评测口径漂移而非样本失败，向上抛出让整轮失效
         if (e instanceof TimingInvariantViolation) throw e
+        skipSampleRecord(record, eligible, eligible ? 'failed' : 'ineligible')
+        errors.push({ sampleId: question.id, stage: 'retrieve', message: errorMessage(e) })
+        continue
+      }
+
+      const first = retrieval.retrievals[0]
+      const metrics = record.metrics
+      // 非有效题照常记录运行诊断，但状态是 ineligible（不进检索质量分母），不是 completed
+      record.retrievalStatus = eligible ? 'completed' : 'ineligible'
+      record.retrievalQuery = retrieval.retrievalQuery
+      if (retrieval.contextPageOrder !== undefined) record.contextPageOrder = retrieval.contextPageOrder
+      if (retrieval.contextTokenCount !== undefined) record.contextTokenCount = retrieval.contextTokenCount
+      record.contextTruncated = retrieval.contextTruncated
+      // selectedPages 是诊断字段（候选页区间包络），真实页集合一律看 contextPageOrder
+      record.selectedPages = first ? expandPages(first.selected) : []
+
+      // 生成阶段必定再发一次调用；检索阶段只记改写 + 逐题评分（与 runRagPipeline 口径一致）
+      metrics.llmCalls = retrieval.llmCalls + 1
+      metrics.rewrite = retrieval.rewritten ? 1 : 0
+      metrics.leafCount = leaves.length
+      metrics.contextTruncated = retrieval.contextTruncated ? 1 : 0
+      // 必须量最终送入生成模型的**合并**上下文（`retrieval.context`，正是 generateAnswer 组提示词时
+      // 读的同一个对象）。量 `first.context` 会在多篇检索时报出单篇物化前的大小，单篇时也不等于提示词，
+      // 从而与同一份 JSON 里的 contextTokens / contextTokenCount 自相矛盾。
+      metrics.selectedContextTokens = estimateTokens(retrieval.context)
+
+      // 四个检索指标统一消费最终物化页序（§2.1 目标 2 / §3.1），不再事后反推候选包络。
+      // 有效题页序为 undefined 的契约违约守卫已收敛进 applyRetrievalMetrics：undefined
+      // 会把「本该有观测却丢失」伪装成合法的 MRR 0，而空上下文写 [] 照常按未命中计。
+      applyRetrievalMetrics(metrics, {
+        eligible,
+        pageOrder: retrieval.contextPageOrder,
+        questionId: question.id,
+        evidencePages: question.evidencePages,
+        context: retrieval.context,
+      })
+
+      // 树诊断（§11.4）：本篇根本没建出树时记 treeDegraded，与「有树但没被选中」区分开。
+      // 降级有两种来源，漏掉任何一种都会把失败路由统计成成功：
+      // - 树取证不足（insufficientEvidence，已就地回落平面）
+      // - 打分本身失败（first.degraded：JSON 非法 / 覆盖不全 / 请求异常）
+      if (treeInfo) {
+        const semantic = first?.semantic
+        metrics.treeUsed = semantic ? 1 : 0
+        metrics.treeDegraded = semantic
+          ? (semantic.insufficientEvidence || first?.degraded ? 1 : 0)
+          : 1
+        if (semantic) {
+          metrics.selectedNodeCount = semantic.selectedNodeCount
+          metrics.routableNodeCount = semantic.routableNodeCount
+        }
+      }
+      if (first) {
+        metrics.degraded = first.degraded ? 1 : 0
+        metrics.partialScoreCoverage = first.degradedReason === 'incomplete-score-coverage' ? 1 : 0
+      }
+
+      // ---------- 生成阶段 ----------
+      let generation: RagGenerationStage
+      try {
+        generation = await generateAnswer(
+          retrieval,
+          question.question,
+          [],
+          client.chat,
+          systemPrompt,
+          { now },
+        )
+        assertGenerationTiming(generation)
+      } catch (e) {
+        if (e instanceof TimingInvariantViolation) throw e
+        record.generationStatus = 'failed'
+        record.judgeStatus = 'skipped'
         errors.push({ sampleId: question.id, stage: 'generate', message: errorMessage(e) })
+        continue
+      }
+
+      record.generationStatus = 'completed'
+      record.answer = generation.answer
+      const timing: PipelineTiming = {
+        queryRewriteLatencyMs: retrieval.queryRewriteLatencyMs,
+        retrievalLatencyMs: retrieval.retrievalLatencyMs,
+        answerGenerationLatencyMs: generation.answerGenerationLatencyMs,
+        queryEndToEndLatencyMs: generation.queryEndToEndLatencyMs,
+      }
+      record.timing = { ...timing }
+      // 端到端与阶段时延写入 metrics 让 aggregate 能产生均值；分位数由 withPercentiles
+      // 从 perSample.timing 单独计算，不能把 P50/P95 误当均值
+      metrics.queryRewriteLatencyMs = timing.queryRewriteLatencyMs
+      metrics.retrievalLatencyMs = timing.retrievalLatencyMs
+      metrics.answerGenerationLatencyMs = timing.answerGenerationLatencyMs
+      metrics.queryEndToEndLatencyMs = timing.queryEndToEndLatencyMs
+
+      // ---------- 打分阶段（生成成功后才执行；失败不牵连检索指标与答案） ----------
+      // judge 只看 evidence 原文，不看检索到的上下文——避免检索失败连带压低 judge 分；
+      // trim 保证 evidencePages 全部越界时（join 结果为纯空白）也走「为空则跳过 judge 打分」的裁定
+      const evidenceText = question.evidencePages
+        .map(p => sample.pages[p] ?? '')
+        .join('\n\n')
+        .trim()
+
+      try {
+        await judgeSample({
+          question,
+          answer: generation.answer,
+          evidenceText,
+          judgeClient: args.judgeClient,
+          metrics,
+          record,
+          state: judgeState,
+        })
+      } catch (e) {
+        // judge 是独立阶段：其异常不得牵连已产出的检索指标与答案。
+        // 时延不变量破坏是评测口径漂移而非样本失败，向上抛出让整轮失效
+        if (e instanceof TimingInvariantViolation) throw e
+        record.judgeStatus = 'failed'
+        errors.push({ sampleId: question.id, stage: 'judge', message: errorMessage(e) })
       }
     }
   }
@@ -321,116 +354,66 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const finishedAt = new Date().toISOString()
   const { hits: cacheHits, misses: cacheMisses } = client.stats()
   const runWallClockMs = Math.max(0, now() - runStartedMs)
-  const raw = aggregate(perSample)
-  const counts = metricSampleCounts(perSample)
-  for (const metric of ['evidenceRecall', 'evidenceHit', 'contextPrecision', 'mrr']) {
-    if (counts[metric] !== undefined) raw[`${metric}SampleCount`] = counts[metric]
-  }
   // 树诊断与检索质量指标合流进同一份 metrics，报表才能在同一行同时回答
   // 「检索有没有变好」与「树是什么样、贵不贵、失败得多不多」（§阶段 E）
   const treeAgg = summarizeTreeDiagnostics(perPaper)
-  // 重命名 0/1 指标的聚合结果为「率」，让报表列名自解释；
-  // withLatencyStats 追加既有 latencyP50/P95（与 llmNetworkLatency* 同值，deprecated 待移除）
-  const metrics = withPercentiles(
-    { ...withLatencyStats(renameQaRates(raw), client.latencies()), ...treeAgg.metrics },
-    { ...collectTimingValues(perSample, perPaper, client), treeBuildLatency: treeAgg.latencies },
-  )
-
-  return {
-    task: 'qa',
+  return finalizeQaResult({
     config,
-    meta: {
-      model,
-      ...(args.judgeModel ? { judgeModel: args.judgeModel } : {}),
-      timestamp: finishedAt,
-      startedAt,
-      finishedAt,
-      runWallClockMs,
-      cacheHits,
-      cacheMisses,
-      // 无请求时为 0，不能 NaN
-      cacheHitRate: cacheHits + cacheMisses > 0 ? cacheHits / (cacheHits + cacheMisses) : 0,
-      gitSha,
-      refusalPatternVersion: REFUSAL_PATTERN_VERSION,
-      rubricVersion: RUBRIC_VERSION,
-      retrievalAlgorithm: args.semanticTree ? 'semantic-tree' : 'papermind-llm',
-      completed: perSample.length,
-      total,
-      ...(sawUnanswerable
-        ? { unanswerableMethod: (args.judgeClient && !usedPatternFallback ? 'judge' : 'pattern') as 'judge' | 'pattern' }
-        : {}),
-      ...(qasperEvidenceQuestions > 0
-        ? {
-            evidenceMappingCoverage: mappedEvidenceQuestions / qasperEvidenceQuestions,
-            ambiguousEvidenceRate: ambiguousEvidenceQuestions / qasperEvidenceQuestions,
-            unmappedEvidenceRate: unmappedEvidenceQuestions / qasperEvidenceQuestions,
-          }
-        : {}),
-    },
-    metrics,
-    perSample,
+    contract,
+    records: perSample,
     perPaper,
     errors,
-  }
+    client,
+    model,
+    judgeModel: args.judgeModel,
+    hasJudgeClient: args.judgeClient !== undefined,
+    judgeState,
+    gitSha,
+    startedAt,
+    finishedAt,
+    runWallClockMs,
+    total,
+    cacheHits,
+    cacheMisses,
+    retrievalAlgorithm: args.semanticTree ? 'semantic-tree' : 'papermind-llm',
+    qasperEvidenceQuestions,
+    mappedEvidenceQuestions,
+    ambiguousEvidenceQuestions,
+    unmappedEvidenceQuestions,
+    extraMetrics: treeAgg.metrics,
+    extraTimingValues: { treeBuildLatency: treeAgg.latencies },
+  })
 }
 
 /**
- * 时延不变量破坏（pipeline 缺失 timing，或四个字段非有限/为负）是评测口径漂移
+ * 时延不变量破坏（检索/生成阶段缺失 timing，或字段非有限/为负）是评测口径漂移
  * 而非样本失败，用专用异常向上抛出让整轮失效，避免把诊断性失败吞成 errors 数据点。
  */
 class TimingInvariantViolation extends Error {
   constructor() {
-    super('runRagPipeline 返回的 timing 缺失，或存在非有限/负值的字段')
+    super('检索或生成阶段返回的 timing 缺失，或存在非有限/负值的字段')
     this.name = 'TimingInvariantViolation'
   }
 }
 
-function assertTiming(timing: PipelineTiming | undefined): asserts timing is PipelineTiming {
-  if (!timing
-    || !Number.isFinite(timing.queryRewriteLatencyMs) || timing.queryRewriteLatencyMs < 0
-    || !Number.isFinite(timing.retrievalLatencyMs) || timing.retrievalLatencyMs < 0
-    || !Number.isFinite(timing.answerGenerationLatencyMs) || timing.answerGenerationLatencyMs < 0
-    || !Number.isFinite(timing.queryEndToEndLatencyMs) || timing.queryEndToEndLatencyMs < 0) throw new TimingInvariantViolation()
+/** 检索阶段的时延字段在生成之前就应成立，单独校验让它在生成失败时也不被漏检。 */
+function assertRetrievalTiming(stage: RagRetrievalStage): void {
+  if (!Number.isFinite(stage.queryRewriteLatencyMs) || stage.queryRewriteLatencyMs < 0
+    || !Number.isFinite(stage.retrievalLatencyMs) || stage.retrievalLatencyMs < 0) throw new TimingInvariantViolation()
+}
+
+function assertGenerationTiming(stage: RagGenerationStage): void {
+  if (!Number.isFinite(stage.answerGenerationLatencyMs) || stage.answerGenerationLatencyMs < 0
+    || !Number.isFinite(stage.queryEndToEndLatencyMs) || stage.queryEndToEndLatencyMs < 0) throw new TimingInvariantViolation()
 }
 
 /**
  * 本篇论文在 limit 约束下实际将执行的问题数。索引失败分支与成功分支共用，
- * 保证 perPaper.questionCount 与 errors 计数口径一致。
+ * 保证 perPaper.questionCount 与 errors / 逐题记录计数口径一致。
  */
 function countExecutedQuestions(sample: EvalSample, limit: number | undefined, total: number): number {
   const remaining = limit === undefined ? Infinity : Math.max(0, limit - total)
   return Math.min(sample.questions.length, remaining)
-}
-
-/**
- * 收集分位数聚合需要的时延样本：
- * - perSample.timing 中的 retrieval / generation / end-to-end（失败样本不写 timing，自动缺席）
- * - perPaper 成功索引的 indexBuildLatencyMs（失败只写 error，不产生时长）
- * - client.latencies() 的网络 LLM 延迟
- */
-function collectTimingValues(
-  perSample: PerSampleRecord[],
-  perPaper: PaperTimingRecord[],
-  client: LlmClient,
-): Record<string, number[]> {
-  const values: Record<string, number[]> = {
-    indexBuildLatency: [],
-    retrievalLatency: [],
-    answerGenerationLatency: [],
-    queryEndToEndLatency: [],
-    llmNetworkLatency: [],
-  }
-  for (const record of perPaper) {
-    if (record.indexBuildLatencyMs !== undefined) values.indexBuildLatency.push(record.indexBuildLatencyMs)
-  }
-  for (const record of perSample) {
-    if (!record.timing) continue
-    values.retrievalLatency.push(record.timing.retrievalLatencyMs)
-    values.answerGenerationLatency.push(record.timing.answerGenerationLatencyMs)
-    values.queryEndToEndLatency.push(record.timing.queryEndToEndLatencyMs)
-  }
-  values.llmNetworkLatency.push(...client.latencies())
-  return values
 }
 
 export { REFUSAL_PATTERN_VERSION }

@@ -1,4 +1,6 @@
 import type { LlmClient } from '../llmClient'
+import type { PerSampleRecord, QaQuestion } from '../types'
+import { answerF1, isRefusal } from './answerF1'
 
 /**
  * Rubric 版本号。嵌在 prompt 中，因此改动 rubric 会自动使缓存失效
@@ -89,5 +91,78 @@ export async function judgeUnanswerable(args: {
     return null
   } catch {
     return null
+  }
+}
+
+/**
+ * 跨样本累计的 judge 口径状态，judgeSample 原地写入：
+ * - `sawUnanswerable`：本轮是否出现过不可回答题，决定 meta.unanswerableMethod 是否落盘
+ * - `usedPatternFallback`：judge 不可用或失败而回落到正则口径时置位
+ */
+export interface JudgeSampleState {
+  sawUnanswerable: boolean
+  usedPatternFallback: boolean
+}
+
+export interface JudgeSampleArgs {
+  question: QaQuestion
+  answer: string
+  /** evidence 原文（已 join + trim）；可回答题在此为空时不调用 judge */
+  evidenceText: string
+  /** 未提供 judge 客户端时只跑 answerF1 与正则拒答口径 */
+  judgeClient?: LlmClient
+  /** 逐样本指标，judge 结果原地写入 */
+  metrics: Record<string, number>
+  /** 逐样本记录，judgeStatus 原地写入 */
+  record: PerSampleRecord
+  /** 跨样本累计状态，原地写入 */
+  state: JudgeSampleState
+}
+
+/**
+ * 打分阶段的唯一实现：不可回答题走「拒答判定」，可回答题走 answerF1 + 三维修分。
+ * 逐样本 judgeStatus 状态机（completed / failed / skipped）与 judge 回落口径都在这里
+ * 定义一次，禁止各 runner 复制后分叉。
+ *
+ * 刻意不在此处 catch：异常策略依 runner 而异——runQaTask 需把时延不变量破坏重新抛出
+ * 让整轮失效，传统 RAG 不区分，因此外层 try/catch 留在各自调用点。
+ */
+export async function judgeSample(args: JudgeSampleArgs): Promise<void> {
+  const { question, answer, evidenceText, judgeClient, metrics, record, state } = args
+  if (question.unanswerable) {
+    state.sawUnanswerable = true
+    if (judgeClient) {
+      const verdict = await judgeUnanswerable({ question: question.question, answer, client: judgeClient })
+      // judge 不可用时回落到正则口径，并如实记录用了哪种
+      if (verdict === null) {
+        metrics.unanswerableAccuracy = isRefusal(answer) ? 1 : 0
+        state.usedPatternFallback = true
+        record.judgeStatus = 'failed'
+      } else {
+        metrics.unanswerableAccuracy = verdict ? 1 : 0
+        record.judgeStatus = 'completed'
+      }
+    } else {
+      metrics.unanswerableAccuracy = isRefusal(answer) ? 1 : 0
+      state.usedPatternFallback = true
+      record.judgeStatus = 'skipped'
+    }
+  } else {
+    metrics.answerF1 = answerF1(answer, question.answers)
+    if (judgeClient && evidenceText) {
+      const scores = await judgeAnswer({ question: question.question, evidence: evidenceText, answer, client: judgeClient })
+      if (scores) {
+        metrics.judgeFactuality = scores.factuality
+        metrics.judgeCompleteness = scores.completeness
+        metrics.judgeGroundedness = scores.groundedness
+        record.judgeStatus = 'completed'
+      } else {
+        // scores 为 null（非法/失败）时不写 judge 指标 → aggregate 自动从分母剔除，
+        // 但状态如实记为 failed，检索指标与 answerF1 原样保留
+        record.judgeStatus = 'failed'
+      }
+    } else {
+      record.judgeStatus = 'skipped'
+    }
   }
 }

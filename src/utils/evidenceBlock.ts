@@ -6,6 +6,7 @@
  * 一律只作用于 `normalizedText`（§5.3）。即使某个证据块从未被语义树引用，
  * 它也照样保留在存储中，可由平面检索召回。
  */
+import type { ContextPiece } from './contextTrace'
 
 /** 证据块来源类型，供诊断与后续按来源加权使用。 */
 export type EvidenceSourceType =
@@ -23,6 +24,11 @@ export interface EvidenceBlock {
   rawText: string
   /** 仅供搜索的轻度清洗文本 */
   normalizedText: string
+  /**
+   * `rawText` 的逐页精确分区：按原文顺序拼接所有 piece 的 `text` 得到 `rawText`。
+   * 供评测从真实进入上下文的块反推页序，`rawText` 本身不因此改变。
+   */
+  pieces: ContextPiece[]
   /** 0-based 闭区间 */
   startPage: number
   /** 0-based 闭区间 */
@@ -32,6 +38,26 @@ export interface EvidenceBlock {
   previousId: string | null
   nextId: string | null
   sourceType: EvidenceSourceType
+}
+
+/**
+ * 校验持久化的证据块是否带有合法的逐页分区（schema v2 起）。
+ * `pieces` 必须是 `rawText` 的精确分区：拼接回原文，且首末页等于块的页区间。
+ * 任何一项不满足即判非法——调用方整树作废并重建，不做局部修补（§13）。
+ */
+export function hasExactPagePartition(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false
+  const { pieces, rawText, startPage, endPage } = block as Record<string, unknown>
+  if (typeof rawText !== 'string' || !Array.isArray(pieces) || pieces.length === 0) return false
+  for (const piece of pieces) {
+    if (!piece || typeof piece !== 'object') return false
+    const { page, text } = piece as Record<string, unknown>
+    if (typeof page !== 'number' || !Number.isInteger(page) || page < 0) return false
+    if (typeof text !== 'string') return false
+  }
+  const typed = pieces as ContextPiece[]
+  if (typed.map(piece => piece.text).join('') !== rawText) return false
+  return typed[0].page === startPage && typed[typed.length - 1].page === endPage
 }
 
 export interface EvidenceBlockOptions {
@@ -191,14 +217,33 @@ function joinAtoms(atoms: Atom[]): string {
   return out
 }
 
+/**
+ * 把原子序列折叠成逐页 piece：同页原子并进同一个 piece，
+ * 段落分隔符（`\n\n`）归属到它开启的新原子，从而保证按序拼接无损。
+ */
+function atomsToPieces(atoms: Atom[]): ContextPiece[] {
+  const pieces: ContextPiece[] = []
+  atoms.forEach((atom, index) => {
+    const fragment = `${index > 0 && atom.breakBefore ? '\n\n' : ''}${atom.text}`
+    const last = pieces.at(-1)
+    if (last?.page === atom.page) last.text += fragment
+    else pieces.push({ page: atom.page, text: fragment })
+  })
+  return pieces
+}
+
 function makeBlock(atoms: Atom[], index: number, runningLines: Set<string>): EvidenceBlock {
-  const rawText = joinAtoms(atoms)
+  const pieces = atomsToPieces(atoms)
+  // rawText 结构上等于 pieces 的拼接，逐页分区因此天然无损而非近似
+  const rawText = pieces.map(piece => piece.text).join('')
   return {
     id: `B${String(index + 1).padStart(3, '0')}`,
     rawText,
     normalizedText: normalizeEvidenceText(rawText, runningLines),
-    startPage: atoms[0].page,
-    endPage: atoms[atoms.length - 1].page,
+    pieces,
+    // 页区间与逐页分区同源：两者都从 piece 推出，天然不会互相矛盾
+    startPage: pieces[0].page,
+    endPage: pieces.at(-1)!.page,
     order: index,
     previousId: null,
     nextId: null,

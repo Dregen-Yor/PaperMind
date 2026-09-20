@@ -48,14 +48,11 @@ export async function createLongSectionRetrieval(config: LongSectionRagConfig, d
           for (const anchor of ranked) {
             const region = expandWithinSection(tokens, sections, { startToken: anchors[anchor.id].startToken, endToken: anchors[anchor.id].endToken }, maxTokens)
             if (!region) continue
-            if (region.tokenCount > maxTokens) throw new Error(`连续区域 ${region.tokenCount} token 超出预算 ${maxTokens}`)
-            // 排序保持 BM25 锚点名次（分数原样传入，指标层重排序后仍还原该次序）；
-            // 连续区域是单一上下文单元，其页区间即选中集合
+            // 连续区域是单一上下文单元：其逐页分片即物化输入，页区间即诊断包络。
+            // 最终 4096 预算仍由公共 materializer 统一施加（允许在边界处部分进入）。
             return {
-              context: region.text,
+              contextGroups: [{ pieces: region.pieces }],
               selected: [{ startPage: region.startPage, endPage: region.endPage }],
-              leaves: anchors,
-              scores: ranked,
             }
           }
           throw new Error('所有召回锚点均无法解析出有效章节区域')

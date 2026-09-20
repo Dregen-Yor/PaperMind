@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildEvidenceBlocks,
+  hasExactPagePartition,
   detectRunningLines,
   classifySourceType,
   type EvidenceBlock,
@@ -55,6 +56,103 @@ describe('buildEvidenceBlocks — 结构契约', () => {
     }
     expect(blocks[0].startPage).toBe(0)
     expect(blocks.at(-1)!.endPage).toBe(2)
+  })
+
+  it('stores an exact per-page partition of rawText', () => {
+    const blocks = buildEvidenceBlocks(['page zero paragraph', 'page one paragraph'], {
+      targetChars: 1000, maxChars: 1200, minChars: 1,
+    })
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].pieces.map(piece => piece.page)).toEqual([0, 1])
+    expect(blocks[0].pieces.map(piece => piece.text).join('')).toBe(blocks[0].rawText)
+  })
+})
+
+describe('buildEvidenceBlocks — 逐页来源（§4 上下文来源契约）', () => {
+  it('每个块的 pieces 拼接后逐字等于 rawText，且首末页与页区间一致', () => {
+    const pages = [
+      'Journal of Testing Vol 1\n\nFirst paragraph with enough words to matter.\n\n1',
+      'Journal of Testing Vol 1\n\nSecond paragraph continues the discussion here.\n\n2',
+      'Journal of Testing Vol 1\n\nThird paragraph concludes the argument.\n\n3',
+      'Journal of Testing Vol 1\n\nFourth paragraph wraps everything up.\n\n4',
+    ]
+    const blocks = buildEvidenceBlocks(pages, OPTS)
+    expect(blocks.length).toBeGreaterThan(0)
+    for (const block of blocks) {
+      expect(block.pieces.map(piece => piece.text).join('')).toBe(block.rawText)
+      expect(block.pieces[0].page).toBe(block.startPage)
+      expect(block.pieces.at(-1)!.page).toBe(block.endPage)
+      // 页码在块内单调不减，且都落在块的页区间内
+      const pageNumbers = block.pieces.map(piece => piece.page)
+      expect([...pageNumbers].sort((a, b) => a - b)).toEqual(pageNumbers)
+      for (const page of pageNumbers) {
+        expect(page).toBeGreaterThanOrEqual(block.startPage)
+        expect(page).toBeLessThanOrEqual(block.endPage)
+      }
+    }
+  })
+
+  it('同页硬切产生的多个原子合并成一个 piece，不虚增页码', () => {
+    const blocks = buildEvidenceBlocks([para('huge', 3000)], OPTS)
+    expect(blocks.length).toBeGreaterThan(1)
+    for (const block of blocks) {
+      expect(block.pieces).toHaveLength(1)
+      expect(block.pieces[0].page).toBe(0)
+    }
+  })
+})
+
+describe('hasExactPagePartition', () => {
+  // 正例直接取自真实分块输出：校验器认可的基线就是生产路径真正会写盘的形状
+  const valid = buildEvidenceBlocks(['first page paragraph', 'second page paragraph'], {
+    targetChars: 1000, maxChars: 1200, minChars: 1,
+  })[0]
+
+  it('真实分块产出的跨页块通过校验（基线）', () => {
+    expect(valid.pieces.map(piece => piece.page)).toEqual([0, 1])
+    expect(hasExactPagePartition(valid)).toBe(true)
+  })
+
+  // 三片基线：中间片既不参与首页校验也不参与末页校验，对它做数值突变
+  // 才能唯一钉住「page 必须是合法非负整数」这条分支，而不是被首/末页校验顺带拦下
+  const threePages = buildEvidenceBlocks(
+    ['first page paragraph', 'second page paragraph', 'third page paragraph'],
+    { targetChars: 1000, maxChars: 1200, minChars: 1 },
+  )[0]
+
+  it('三页块的中间片同样通过校验（基线）', () => {
+    expect(threePages.pieces.map(piece => piece.page)).toEqual([0, 1, 2])
+    expect(hasExactPagePartition(threePages)).toBe(true)
+  })
+
+  const mutatePiece = (block: EvidenceBlock, index: number, patch: Record<string, unknown>): EvidenceBlock => ({
+    ...block,
+    pieces: block.pieces.map((piece, i) => (i === index ? { ...piece, ...patch } : piece)),
+  })
+
+  const cases: Array<{ name: string; block: unknown; ok: boolean }> = [
+    { name: '合法块 → true', block: valid, ok: true },
+    { name: 'null → false', block: null, ok: false },
+    { name: '字符串 → false', block: 'x', ok: false },
+    { name: '数字 → false', block: 42, ok: false },
+    { name: 'rawText 非字符串 → false', block: { ...valid, rawText: 42 }, ok: false },
+    { name: 'pieces 不是数组 → false', block: { ...valid, pieces: 'nope' }, ok: false },
+    { name: 'pieces 为空数组 → false', block: { ...valid, pieces: [] }, ok: false },
+    { name: 'piece 不是对象（null）→ false', block: { ...valid, pieces: [null] }, ok: false },
+    { name: 'piece 为真值非对象（字符串）→ false', block: { ...valid, pieces: ['x'] }, ok: false },
+    { name: 'piece 为真值非对象（数字）→ false', block: { ...valid, pieces: [42] }, ok: false },
+    { name: 'page 为负 → false', block: mutatePiece(valid, 0, { page: -1 }), ok: false },
+    { name: 'page 为小数 → false', block: mutatePiece(valid, 0, { page: 1.5 }), ok: false },
+    { name: '中间片 page 为负 → false', block: mutatePiece(threePages, 1, { page: -1 }), ok: false },
+    { name: '中间片 page 为小数 → false', block: mutatePiece(threePages, 1, { page: 1.5 }), ok: false },
+    { name: 'piece.text 非字符串 → false', block: mutatePiece(valid, 0, { text: 42 }), ok: false },
+    { name: '拼接不回 rawText → false', block: { ...valid, rawText: `${valid.rawText}!` }, ok: false },
+    { name: '首 piece 页 ≠ startPage → false', block: { ...valid, startPage: valid.startPage + 1 }, ok: false },
+    { name: '末 piece 页 ≠ endPage → false', block: { ...valid, endPage: valid.endPage + 1 }, ok: false },
+  ]
+
+  it.each(cases)('$name', ({ block, ok }) => {
+    expect(hasExactPagePartition(block)).toBe(ok)
   })
 })
 

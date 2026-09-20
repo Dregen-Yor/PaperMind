@@ -179,8 +179,27 @@ export interface PerSampleRecord {
   timing?: PipelineTiming
   /** QA 专有 */
   retrievalQuery?: string
+  /**
+   * 诊断专用：被选中候选的页区间包络（去重升序）。
+   * 它包含「仅被选中、但可能被最终预算截掉」的页，**不是**生成模型实际读到的页集合，
+   * 任何跨方法指标都不得读取本字段；真实页集合一律看 `contextPageOrder`。
+   */
   selectedPages?: number[]
   evidencePages?: number[]
+  /**
+   * schema-v2 阶段状态（§6）。旧结果缺这些字段时按「未知」处理，不得据此推断成功。
+   * retrievalStatus：completed=检索产物齐全；failed=检索/索引失败（有效题四个指标写 0）；
+   * ineligible=非有效题，不产生检索指标。
+   */
+  retrievalStatus?: 'completed' | 'failed' | 'ineligible'
+  generationStatus?: 'completed' | 'failed' | 'skipped'
+  judgeStatus?: 'completed' | 'failed' | 'skipped'
+  /** 最终生成上下文的去重首次出现页序；四个检索指标的唯一来源 */
+  contextPageOrder?: number[]
+  /** 最终生成上下文的实际 token 数 */
+  contextTokenCount?: number
+  /** 最终上下文是否被预算截断 */
+  contextTruncated?: boolean
   answer?: string
   /** 摘要专有 */
   summary?: string
@@ -226,6 +245,22 @@ export interface BenchResult {
     evidenceMappingCoverage?: number
     ambiguousEvidenceRate?: number
     unmappedEvidenceRate?: number
+    /**
+     * —— schema-v2 评测契约（§7）——
+     * 缺 `mrrDefinition: 'context-page-v1'` 的结果一律按 legacy 处理，禁止与新口径算差值。
+     * comparisonEligible=false 时（如 full-context 生成上限）不进入检索排名。
+     */
+    metricSchemaVersion?: number
+    mrrDefinition?: string
+    contextBudgetTokens?: number
+    contextTokenizer?: string
+    contextTokenizerRevision?: string
+    evidenceMappingVersion?: string
+    datasetFingerprint?: string
+    eligibleRetrievalQuestionIdsHash?: string
+    eligibleRetrievalQuestionCount?: number
+    comparisonEligible?: boolean
+    comparisonIneligibleReason?: string
   }
   metrics: Record<string, number>
   perSample: PerSampleRecord[]

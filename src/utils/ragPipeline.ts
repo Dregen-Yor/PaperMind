@@ -4,6 +4,7 @@ import {
   routeWithSemanticTree,
   type SemanticRouteDiagnostics,
 } from './semanticRoute'
+import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type MaterializedContext } from './contextTrace'
 import type { EvidenceBlock } from './evidenceBlock'
 import type { SemanticTree } from './semanticTree'
 import type { ChatLLMFn, LLMFn } from './llm'
@@ -68,9 +69,58 @@ export interface PipelineTiming {
   queryEndToEndLatencyMs: number
 }
 
-/** 注入式依赖：`now` 供单测注入单调时钟（返回预设序列而非真实 sleep）；生产默认 Date.now。 */
+/**
+ * 注入式依赖：`now` 供单测注入单调时钟（返回预设序列而非真实 sleep）；生产默认 Date.now。
+ * `materialize` 供 benchmark 注入受控 token 预算（§5）；生产不注入时上下文沿用字符预算。
+ */
 export interface RagPipelineDeps {
   now?: () => number
+  materialize?: (groups: ContextGroup[]) => MaterializedContext
+}
+
+/**
+ * 检索阶段的产物：改写到上下文构造为止的全部结果与计时。
+ * 生成失败时该对象依然完整，runner 可据此先落盘检索指标再进入生成（§6.2 / §6.3）。
+ */
+export interface RagRetrievalStage {
+  /** 每篇论文一份检索结果，顺序与入参 papers 一致 */
+  retrievals: PipelineRetrieval[]
+  /** 实际用于检索的查询（未改写时等于原始 query） */
+  retrievalQuery: string
+  /** 是否发生了查询改写 */
+  rewritten: boolean
+  /** 合并后的参考内容；无可用索引时为空串 */
+  context: string
+  /** 最终上下文的来源页首次出现顺序；仅在注入 `materialize` 时产出（§3.1） */
+  contextPageOrder?: number[]
+  /** 最终上下文的实际 token 数；仅在注入 `materialize` 时产出 */
+  contextTokenCount?: number
+  /** 上下文是否被预算截断：字符预算路径按 maxContextChars 判定，materializer 路径取自物化结果 */
+  contextTruncated: boolean
+  /** 各篇检索来源汇总 */
+  sources: string[]
+  /** 检索阶段（改写 + 逐篇评分）实际发出的 LLM 请求数，不含生成 */
+  llmCalls: number
+  /** 本次检索是否至少有一篇论文走了轻量语义树路由 */
+  treeRouted: boolean
+  queryRewriteLatencyMs: number
+  retrievalLatencyMs: number
+  /**
+   * 整问的起点时刻（同一进程内的绝对 epoch 毫秒），供生成阶段计算端到端时长。
+   * `queryEndToEndLatencyMs` 只在**同进程连续调用**下有意义：经由 `runRagPipeline`
+   * 两阶段共享同一个时钟且紧邻执行，结果精确。§6.5 允许 runner 从「仅完成检索」的
+   * checkpoint 恢复生成——此时若把本字段持久化后在新进程/新时钟里重放，
+   * 端到端时长会变成数小时（注入时钟下甚至为负），因此断点续跑的调用方必须自行测量
+   * 端到端时长，不能依赖这里回传的值。
+   */
+  pipelineStartedAt: number
+}
+
+/** 生成阶段的产物。 */
+export interface RagGenerationStage {
+  answer: string
+  answerGenerationLatencyMs: number
+  queryEndToEndLatencyMs: number
 }
 
 export interface RagResult {
@@ -92,28 +142,37 @@ export interface RagResult {
   llmCalls: number
   /** 本次检索是否至少有一篇论文走了轻量语义树路由 */
   treeRouted: boolean
-  /** Whether retrieval context was clipped to maxContextChars. */
+  /**
+   * 上下文是否被预算截断，单位随生效的预算路径而变：
+   * 未注入 `materialize` 时为字符截断（超过 `maxContextChars`），
+   * 注入 `materialize` 时为 token 截断（物化结果超出受控 token 预算）。
+   */
   contextTruncated: boolean
+  /** 最终上下文的来源页首次出现顺序；仅在注入 `materialize` 时产出（§3.1） */
+  contextPageOrder?: number[]
+  /** 最终上下文的实际 token 数；仅在注入 `materialize` 时产出 */
+  contextTokenCount?: number
   /** 本问热路径的时延分阶段口径 */
   timing: PipelineTiming
 }
 
 /**
- * 论文问答 RAG 主流程（纯函数）：查询改写 → 逐篇评分多选 → 生成回答。
+ * 检索阶段（纯函数）：查询改写 → 逐篇评分多选 → 合并上下文。
  *
- * 不依赖 store / IPC / DOM，供渲染层与离线评测复用同一份实现。
+ * 不注入 `deps.materialize` 时完全沿用产品的字符预算路径（`maxContextChars` 截断）；
+ * 注入时改用 materializer 在受控 token 预算内物化上下文，并同步产出页序与 token 数。
+ * 传入 `opts.externalContext`（用户划选原文）时优先级最高：跳过改写与检索，
+ * 直接以该文本作为上下文，`deps.materialize` 随之失效、页序/token 数不产出。
  * 所有时长经 Math.max(0, value) 钳制，以兼容测试注入时钟与系统时间回拨。
  */
-export async function runRagPipeline(
+export async function retrieveRagContext(
   papers: IndexedPaper[],
   query: string,
   history: ChatTurn[],
   llm: LLMFn,
-  generate: ChatLLMFn,
-  systemPrompt: string,
   opts: RagOptions = {},
   deps: RagPipelineDeps = {},
-): Promise<RagResult> {
+): Promise<RagRetrievalStage> {
   const now = deps.now ?? Date.now
   const pipelineStartedAt = now()
   const { enableRewrite = true, externalContext, maxContextChars, ...scoreOpts } = opts
@@ -160,37 +219,123 @@ export async function runRagPipeline(
     }
   }
 
-  const unboundedContext = skipRetrieval
-    ? (externalContext as string)
-    : retrievals.map(r => r.context).join('\n\n---\n\n')
-  const contextTruncated = maxContextChars !== undefined && unboundedContext.length > maxContextChars
-  const context = contextTruncated ? unboundedContext.slice(0, maxContextChars) : unboundedContext
+  let context: string
+  let contextPageOrder: number[] | undefined
+  let contextTokenCount: number | undefined
+  let contextTruncated: boolean
+  if (!skipRetrieval && deps.materialize) {
+    // benchmark 受控预算：上下文文本与页序从同一次物化产出，禁止事后反推（§3.1 / §4.1）
+    const materialized = deps.materialize(retrievals.flatMap(r => r.contextGroups))
+    context = materialized.text
+    contextPageOrder = materialized.pageOrder
+    contextTokenCount = materialized.tokenCount
+    contextTruncated = materialized.truncated
+  } else {
+    const unboundedContext = skipRetrieval
+      ? (externalContext as string)
+      : retrievals.map(r => r.context).join(CONTEXT_GROUP_SEPARATOR)
+    contextTruncated = maxContextChars !== undefined && unboundedContext.length > maxContextChars
+    context = contextTruncated ? unboundedContext.slice(0, maxContextChars) : unboundedContext
+  }
   const sources = retrievals.flatMap(r => r.sources)
   const retrievalLatencyMs = Math.max(0, now() - retrievalStartedAt)
 
-  // Call 3：生成回答
+  return {
+    retrievals,
+    retrievalQuery,
+    rewritten,
+    context,
+    ...(contextPageOrder !== undefined ? { contextPageOrder } : {}),
+    ...(contextTokenCount !== undefined ? { contextTokenCount } : {}),
+    contextTruncated,
+    sources,
+    llmCalls,
+    treeRouted,
+    queryRewriteLatencyMs,
+    retrievalLatencyMs,
+    pipelineStartedAt,
+  }
+}
+
+/**
+ * 生成阶段（纯函数）：按检索阶段已算好的上下文组装提示词并调用回答模型。
+ *
+ * `generate` 抛错时直接向上抛出，不改写传入的 `retrieval`——
+ * 调用方据此在生成之前落盘检索指标，生成失败也不丢（§6.3）。
+ *
+ * 依赖只取 `now`：`materialize` 在检索阶段就已生效，生成阶段不会（也不能）再改上下文，
+ * 因此这里不接受它，避免调用方误以为注入 materializer 能左右提示词。
+ */
+export async function generateRagAnswer(
+  retrieval: RagRetrievalStage,
+  query: string,
+  history: ChatTurn[],
+  generate: ChatLLMFn,
+  systemPrompt: string,
+  deps: Pick<RagPipelineDeps, 'now'> = {},
+): Promise<RagGenerationStage> {
+  const now = deps.now ?? Date.now
   const messages = [
     {
       role: 'system',
       content:
         `${systemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` +
-        (context ? `\n\n参考内容：\n${context}` : ''),
+        (retrieval.context ? `\n\n参考内容：\n${retrieval.context}` : ''),
     },
     ...history.slice(-GENERATE_HISTORY_WINDOW),
     { role: 'user', content: query },
   ]
-  llmCalls++
   const generationStartedAt = now()
   const answer = await generate(messages)
   const answerGenerationLatencyMs = Math.max(0, now() - generationStartedAt)
 
-  const timing: PipelineTiming = {
-    queryRewriteLatencyMs,
-    retrievalLatencyMs,
+  return {
+    answer,
     answerGenerationLatencyMs,
     // 总计时直接量测起止，不要以子阶段相加替代：本地消息组装的差异留给总账
-    queryEndToEndLatencyMs: Math.max(0, now() - pipelineStartedAt),
+    queryEndToEndLatencyMs: Math.max(0, now() - retrieval.pipelineStartedAt),
+  }
+}
+
+/**
+ * 论文问答 RAG 主流程（纯函数）：检索阶段 → 生成阶段。
+ *
+ * 不依赖 store / IPC / DOM，供渲染层与离线评测复用同一份实现；
+ * 现有应用调用方继续走这个组合封装，未注入 `materialize` 时行为与拆分前逐字一致。
+ */
+export async function runRagPipeline(
+  papers: IndexedPaper[],
+  query: string,
+  history: ChatTurn[],
+  llm: LLMFn,
+  generate: ChatLLMFn,
+  systemPrompt: string,
+  opts: RagOptions = {},
+  deps: RagPipelineDeps = {},
+): Promise<RagResult> {
+  const retrieval = await retrieveRagContext(papers, query, history, llm, opts, deps)
+  const generation = await generateRagAnswer(retrieval, query, history, generate, systemPrompt, deps)
+
+  const timing: PipelineTiming = {
+    queryRewriteLatencyMs: retrieval.queryRewriteLatencyMs,
+    retrievalLatencyMs: retrieval.retrievalLatencyMs,
+    answerGenerationLatencyMs: generation.answerGenerationLatencyMs,
+    queryEndToEndLatencyMs: generation.queryEndToEndLatencyMs,
   }
 
-  return { answer, retrievals, retrievalQuery, rewritten, context, sources, llmCalls, treeRouted, contextTruncated, timing }
+  return {
+    answer: generation.answer,
+    retrievals: retrieval.retrievals,
+    retrievalQuery: retrieval.retrievalQuery,
+    rewritten: retrieval.rewritten,
+    context: retrieval.context,
+    sources: retrieval.sources,
+    // 生成必定发出一次调用，检索阶段不计入
+    llmCalls: retrieval.llmCalls + 1,
+    treeRouted: retrieval.treeRouted,
+    contextTruncated: retrieval.contextTruncated,
+    ...(retrieval.contextPageOrder !== undefined ? { contextPageOrder: retrieval.contextPageOrder } : {}),
+    ...(retrieval.contextTokenCount !== undefined ? { contextTokenCount: retrieval.contextTokenCount } : {}),
+    timing,
+  }
 }

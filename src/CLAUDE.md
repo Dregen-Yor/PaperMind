@@ -105,5 +105,10 @@
 | `ragPipelineSemantic.test.ts` | 树路由接入 runRagPipeline 的调用次数、就地回落与预算（11 用例） |
 | `semanticTreeStore.test.ts` | 开关、后台建树、缓存身份（原文+构建配置）、配置快照与切换竞态、就绪集合刷新、强制重建摘要、非法树回落（31 用例） |
 | `settingsViewTree.test.ts` | 设置页语义树开关与强制重建按钮及其成败提示（挂载 Element Plus，7 用例） |
+| `contextTrace.test.ts` | materializeContext：文本与首次出现页序同源、预算边界计页与丢弃、分组分隔符守卫、恰好占满不截断（7 用例） |
+| `ragPipeline.test.ts` | runRagPipeline / retrieveRagContext / generateRagAnswer：调用次数、字符与 token 两条预算路径、externalContext 优先、生成失败不改写检索结果、分阶段时延（17 用例） |
+| `queryRewrite.test.ts` | rewriteQuery：改写结果、带入历史轮、trim、LLM 抛错/空返回回落原问题、不引入 pdfjs（6 用例） |
+| `libraryFilters.test.ts` | filterLibraryPapers：大小写不敏感搜索 × 阅读状态组合、排序、清空查询恢复（6 用例） |
+| `reader.view.test.ts` | ReaderView 对话生命周期：早先的创建请求迟到返回不覆盖当前论文对话（挂载 Element Plus，1 用例） |
 
 > 依赖 `pageIndex.ts` 的测试文件顶部需 `vi.mock('pdfjs-dist/legacy/build/pdf.mjs')`，否则 Node 环境缺 `DOMMatrix` 报错。
