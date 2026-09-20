@@ -17,12 +17,6 @@ const sse = (chunks: string[], finishReason = 'stop') => {
     + 'data: [DONE]\n\n'
   return { ok: true, status: 200, body: new Response(body).body }
 }
-/** 检索/改写/索引仍是非流式：body 里带 stream 的请求才是生成（#6）。 */
-const streamingFetch = (jsonBody: unknown) => vi.fn().mockImplementation((_url: string, init: any) => {
-  if (JSON.parse(init.body).stream) return Promise.resolve(sse(['Answer']))
-  return Promise.resolve({ ok: true, json: () => Promise.resolve(jsonBody) })
-})
-
 describe('useChatStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
