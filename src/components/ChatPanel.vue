@@ -136,6 +136,8 @@ async function retry(msg: { id: string }) {
   retrying.value = msg.id
   try {
     await chatStore.retryMessage(props.conversation.id, msg.id)
+  } catch {
+    // 失败已由 store 就地改写失败卡（msg.error）；这里只负责收尾
   } finally {
     retrying.value = ''
   }
@@ -157,8 +159,11 @@ async function send() {
   try {
     await chatStore.sendMessage(props.conversation.id, message, context || undefined)
     void chatStore.autoTitleConversation(props.conversation.id)
-  } catch {
-    // 失败已由 store 落成气泡级失败态（msg.error）；这里只负责 loading 收尾
+  } catch (error) {
+    // 正常失败由 store 落成气泡级失败态（msg.error），卡即反馈；
+    // 未落卡（会话不存在 / 用户消息落库失败 / 失败卡自身写库失败）时用 toast 兜底
+    const recorded = props.conversation?.messages.some(m => m.role === 'assistant' && m.error)
+    if (!recorded) ElMessage.error(error instanceof Error ? error.message : '请求失败，请稍后重试')
   } finally {
     loading.value = false
     await scrollToBottom()
