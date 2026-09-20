@@ -157,6 +157,7 @@
             <span class="import-item-icon" aria-hidden="true">
               <span v-if="item.status === 'done'">✓</span>
               <span v-else-if="item.status === 'error'">✕</span>
+              <span v-else-if="item.status === 'skipped'">–</span>
               <span v-else class="spin">⟳</span>
             </span>
             <span class="import-item-name">{{ item.name }}</span>
@@ -202,6 +203,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from '@element-plus/icons-vue'
 import { usePaperStore, type Paper } from '../stores/paper'
@@ -211,6 +213,7 @@ import { filterLibraryPapers, formatAuthors, type LibraryFilters } from '../util
 
 const store = usePaperStore()
 const chatStore = useChatStore()
+const router = useRouter()
 const fileInput = ref<HTMLInputElement>()
 const activeKbId = ref(store.knowledgeBases[0]?.id ?? 'default')
 const showNewKbDialog = ref(false)
@@ -244,7 +247,7 @@ function clearFilters() {
 }
 
 // ── 导入进度状态 ──────────────────────────────────────────
-type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error'
+type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error' | 'skipped'
 
 interface ImportItem {
   name: string
@@ -258,13 +261,15 @@ const stageLabel: Record<ImportStatus, string> = {
   saving:  '写入中…',
   done:    '完成',
   error:   '失败',
+  skipped: '已跳过',
 }
 
 const importItems = ref<ImportItem[]>([])
 const showImportPanel = ref(false)
 
+// 跳过重复导入也是终态：计入完成数，进度条才能走完并自动收起
 const doneCount = computed(() =>
-  importItems.value.filter(i => i.status === 'done' || i.status === 'error').length,
+  importItems.value.filter(i => i.status === 'done' || i.status === 'error' || i.status === 'skipped').length,
 )
 const allDone = computed(() => doneCount.value === importItems.value.length && importItems.value.length > 0)
 const importHasError = computed(() => importItems.value.some(i => i.status === 'error'))
@@ -292,12 +297,30 @@ async function onFilesSelected(e: Event) {
   importItems.value = Array.from(files).map(f => ({ name: f.name, status: 'pending' as ImportStatus }))
   showImportPanel.value = true
 
+  let openPaperIdAfterImport = ''
+
   for (let i = 0; i < importItems.value.length; i++) {
     const file = files[i]
     const item = importItems.value[i]
     try {
       item.status = 'parsing'
       const meta = await parsePdfMeta(file)
+
+      const existing = store.papers.find(p => p.fileHash && p.fileHash === meta.fileHash)
+      if (existing) {
+        try {
+          await ElMessageBox.confirm(
+            `《${existing.title || existing.fileName}》已在库中，是否打开现有条目？`,
+            '重复导入',
+            { type: 'info', confirmButtonText: '打开现有条目', cancelButtonText: '跳过' },
+          )
+          openPaperIdAfterImport = existing.id
+          item.status = 'done'
+        } catch {
+          item.status = 'skipped'
+        }
+        continue
+      }
 
       item.status = 'saving'
       const id = await store.addPaper({
@@ -316,6 +339,8 @@ async function onFilesSelected(e: Event) {
       item.error = err instanceof Error ? err.message : '未知错误'
     }
   }
+
+  if (openPaperIdAfterImport) void router.push('/library/' + openPaperIdAfterImport)
 
   ;(e.target as HTMLInputElement).value = ''
 }
@@ -560,6 +585,7 @@ function movePaper(paper: any) {
 }
 .import-item[data-status='done'] .import-item-stage   { color: var(--success); }
 .import-item[data-status='error'] .import-item-stage  { color: var(--danger); }
+.import-item[data-status='skipped'] .import-item-stage { color: var(--text-muted); }
 .import-item[data-status='parsing'] .import-item-stage,
 .import-item[data-status='saving']  .import-item-stage { color: var(--accent); }
 

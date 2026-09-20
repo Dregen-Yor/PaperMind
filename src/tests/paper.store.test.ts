@@ -33,7 +33,7 @@ describe('usePaperStore', () => {
     await store.init()
     const id = await store.addPaper({
       title: 'Test Paper', authors: ['Alice'], abstract: 'abc', year: 2024,
-      tags: [], status: 'unread', fileName: 'test.pdf', knowledgeBaseId: 'default',
+      tags: [], status: 'unread', fileName: 'test.pdf', fileHash: 'h-test', knowledgeBaseId: 'default',
       fileData: 'base64data',
     })
     expect(id).toBeTruthy()

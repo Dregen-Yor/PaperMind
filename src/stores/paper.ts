@@ -10,6 +10,7 @@ export interface Paper {
   tags: string[]
   status: 'unread' | 'reading' | 'done'
   fileName: string
+  fileHash: string
   addedAt: number
   knowledgeBaseId: string
 }

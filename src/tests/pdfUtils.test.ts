@@ -1,13 +1,15 @@
 import { describe, it, expect, vi } from 'vitest'
+import { webcrypto } from 'node:crypto'
 
 // Mock pdfjs-dist before importing pdfUtils — avoids DOMMatrix error in Node/jsdom
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   default: {},
   GlobalWorkerOptions: { workerSrc: '' },
+  getDocument: vi.fn(),
 }))
 
 // Import only after mock is set up
-const { base64ToUrl } = await import('../utils/pdfUtils')
+const { base64ToUrl, parsePdfMeta, sha256Hex } = await import('../utils/pdfUtils')
 
 describe('base64ToUrl', () => {
   it('returns a blob: URL', () => {
@@ -113,5 +115,38 @@ describe('mergeSmallSections', () => {
     ]
     const result = mergeSmallSections(ranges, 2)
     expect(result).toEqual(ranges)
+  })
+})
+
+describe('文件哈希（#10）', () => {
+  it('相同字节返回稳定十六进制哈希', async () => {
+    if (!globalThis.crypto?.subtle) vi.stubGlobal('crypto', webcrypto)
+    const bytes = new TextEncoder().encode('paper-content').buffer
+    const first = await sha256Hex(bytes)
+    const second = await sha256Hex(bytes)
+    expect(first).toBe(second)
+    expect(first).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('pdf.js 取走缓冲区之前完成哈希（getDocument 会 transfer 并 detach 它）', async () => {
+    if (!globalThis.crypto?.subtle) vi.stubGlobal('crypto', webcrypto)
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+    const getDocument = vi.mocked((pdfjs as any).getDocument)
+    const bytes = new Uint8Array(new TextEncoder().encode('%PDF-1.4 fake body'))
+
+    getDocument.mockImplementationOnce(({ data }: { data: ArrayBuffer }) => {
+      // 真实 pdf.js 把 data.buffer transfer 给 worker，调用方的 ArrayBuffer 随之 detach
+      structuredClone(data, { transfer: [data] })
+      expect(data.byteLength).toBe(0)
+      return {
+        promise: Promise.resolve({
+          getMetadata: () => Promise.resolve({ info: {} }),
+          getPage: () => Promise.resolve({ getTextContent: () => Promise.resolve({ items: [] }) }),
+        }),
+      } as any
+    })
+
+    const meta = await parsePdfMeta(new File([bytes], 'fake.pdf', { type: 'application/pdf' }))
+    expect(meta.fileHash).toBe(await sha256Hex(bytes.buffer))
   })
 })

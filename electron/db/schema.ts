@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS papers (
   status            TEXT DEFAULT 'unread',
   file_name         TEXT NOT NULL,
   file_path         TEXT NOT NULL,       -- absolute path on disk
+  file_hash         TEXT DEFAULT '',    -- 文件内容 SHA-256，重复导入检测（#10）
   added_at          INTEGER NOT NULL,
   FOREIGN KEY (knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
 );

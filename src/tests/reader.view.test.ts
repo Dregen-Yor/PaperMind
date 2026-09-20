@@ -20,6 +20,7 @@ const papers: Paper[] = ['a', 'b'].map(id => ({
   tags: [],
   status: 'reading',
   fileName: id + '.pdf',
+  fileHash: '',
   addedAt: 0,
   knowledgeBaseId: 'default',
 }))

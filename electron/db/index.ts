@@ -37,6 +37,10 @@ export function initDb() {
   if (!messageCols.includes('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER DEFAULT 0')
   if (!messageCols.includes('context')) db.exec("ALTER TABLE messages ADD COLUMN context TEXT DEFAULT ''")
 
+  // 论文文件内容哈希（#10，2026-09-21）。旧行留空串：空值不参与重复导入查重。
+  const paperCols = (db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>).map(c => c.name)
+  if (!paperCols.includes('file_hash')) db.exec("ALTER TABLE papers ADD COLUMN file_hash TEXT DEFAULT ''")
+
   // Seed default knowledge base
   const count = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
   if (count === 0) {
@@ -103,11 +107,11 @@ export const paperApi = {
     const filePath = join(papersDir, `${paper.id}.pdf`)
     writeFileSync(filePath, Buffer.from(paper.fileData, 'base64'))
     db.prepare(`INSERT INTO papers
-      (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, added_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, file_hash, added_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       paper.id, paper.knowledgeBaseId, paper.title, JSON.stringify(paper.authors ?? []),
       paper.abstract, paper.year, JSON.stringify(paper.tags ?? []), paper.status,
-      paper.fileName, filePath, paper.addedAt,
+      paper.fileName, filePath, paper.fileHash ?? '', paper.addedAt,
     )
     return { ...paper, filePath }
   },
@@ -150,6 +154,7 @@ function deserializePaper(row: any) {
     tags: JSON.parse(row.tags),
     status: row.status,
     fileName: row.file_name,
+    fileHash: row.file_hash ?? '',
     addedAt: row.added_at,
   }
 }
@@ -369,11 +374,11 @@ export function importAll(data: any) {
 
     for (const p of papers) {
       db.prepare(`INSERT INTO papers
-        (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, added_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, file_hash, added_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(p.id, p.knowledgeBaseId, p.title ?? '', JSON.stringify(p.authors ?? []),
           p.abstract ?? '', p.year ?? 0, JSON.stringify(p.tags ?? []), p.status ?? 'unread',
-          p.fileName ?? '', join(papersDir, `${p.id}.pdf`), p.addedAt ?? Date.now())
+          p.fileName ?? '', join(papersDir, `${p.id}.pdf`), p.fileHash ?? '', p.addedAt ?? Date.now())
     }
 
     for (const c of conversations) {

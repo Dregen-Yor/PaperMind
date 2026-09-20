@@ -3,9 +3,9 @@ import type { Paper } from '../stores/paper'
 import { filterLibraryPapers, formatAuthors } from '../utils/libraryFilters'
 
 const papers: Paper[] = [
-  { id: 'attention', title: 'Attention Is All You Need', authors: ['Ashish Vaswani'], abstract: '', year: 2017, tags: ['Transformer'], status: 'reading', fileName: 'attention.pdf', addedAt: 10, knowledgeBaseId: 'default' },
-  { id: 'bert', title: 'BERT: Pre-training of Deep Bidirectional Transformers', authors: ['Jacob Devlin'], abstract: '', year: 2018, tags: ['NLP'], status: 'unread', fileName: 'bert.pdf', addedAt: 30, knowledgeBaseId: 'default' },
-  { id: 'retrieval', title: 'Retrieval-Augmented Generation', authors: ['Patrick Lewis'], abstract: '', year: 2020, tags: ['检索增强'], status: 'done', fileName: 'rag-original.pdf', addedAt: 20, knowledgeBaseId: 'default' },
+  { id: 'attention', title: 'Attention Is All You Need', authors: ['Ashish Vaswani'], abstract: '', year: 2017, tags: ['Transformer'], status: 'reading', fileName: 'attention.pdf', fileHash: 'h-attention', addedAt: 10, knowledgeBaseId: 'default' },
+  { id: 'bert', title: 'BERT: Pre-training of Deep Bidirectional Transformers', authors: ['Jacob Devlin'], abstract: '', year: 2018, tags: ['NLP'], status: 'unread', fileName: 'bert.pdf', fileHash: 'h-bert', addedAt: 30, knowledgeBaseId: 'default' },
+  { id: 'retrieval', title: 'Retrieval-Augmented Generation', authors: ['Patrick Lewis'], abstract: '', year: 2020, tags: ['检索增强'], status: 'done', fileName: 'rag-original.pdf', fileHash: 'h-retrieval', addedAt: 20, knowledgeBaseId: 'default' },
 ]
 
 describe('library search and reading filters', () => {
