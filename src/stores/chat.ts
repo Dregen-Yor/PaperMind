@@ -947,7 +947,13 @@ export const useChatStore = defineStore('chat', () => {
     await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
 
     try {
-      if (userMessage.trim().toLowerCase() === '/abstract') {
+      // 命令只在本地识别一次：未知的 `/xxx` 直接回提示，不发模型（#8）
+      const normalized = userMessage.trim().toLowerCase()
+      if (normalized.startsWith('/') && normalized !== '/abstract') {
+        await addMessage(convId, 'assistant', `未识别的命令：${userMessage.trim()}。当前可用命令：/abstract（总结当前所选论文）。`)
+        return userMessage
+      }
+      if (normalized === '/abstract') {
         const result = await generateAbstract(conv)
         await addMessage(convId, 'assistant', result.content, result.sources)
         return result.content
