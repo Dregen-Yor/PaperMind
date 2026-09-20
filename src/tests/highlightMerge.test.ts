@@ -44,7 +44,7 @@ describe('划选合并（#7）', () => {
     expect(plan.removals).toEqual([])
   })
 
-  it('链式时间窗：相邻各 1900ms（总跨度 3800ms）仍并为一簇', () => {
+  it('链式时间窗 + 偏移连通：相邻各 1900ms（总跨度 3800ms）仍并为一簇', () => {
     const base = { paperId: 'p1', pageNum: 1, text: 'x' }
     const plan = planFragmentMerge([
       { id: 'a', ...base, startOffset: 0, endOffset: 10, createdAt: 1000 },
@@ -53,5 +53,47 @@ describe('划选合并（#7）', () => {
     ])
     expect(plan.updates).toEqual([{ id: 'a', endOffset: 30 }])
     expect(plan.removals).toEqual(['b', 'c'])
+  })
+
+  it('同毫秒但偏移相距很远（100-110 与 500-510）不合并', () => {
+    const base = { paperId: 'p1', pageNum: 1, text: 'x', createdAt: 1788435487939 }
+    const plan = planFragmentMerge([
+      { id: 'a', ...base, startOffset: 100, endOffset: 110 },
+      { id: 'b', ...base, startOffset: 500, endOffset: 510 },
+    ])
+    expect(plan.updates).toEqual([])
+    expect(plan.removals).toEqual([])
+  })
+
+  it('一次调用两个可并簇（不同 page，各自连通）互不串簇：各 1 更新 + 各自删除', () => {
+    const base = { paperId: 'p1', text: 'x', createdAt: 1788435487939 }
+    const plan = planFragmentMerge([
+      { id: 'a', ...base, pageNum: 1, startOffset: 0, endOffset: 10 },
+      { id: 'b', ...base, pageNum: 1, startOffset: 10, endOffset: 20 },
+      { id: 'c', ...base, pageNum: 2, startOffset: 100, endOffset: 110 },
+      { id: 'd', ...base, pageNum: 2, startOffset: 110, endOffset: 120 },
+    ])
+    expect(plan.updates).toEqual([{ id: 'a', endOffset: 20 }, { id: 'c', endOffset: 120 }])
+    expect(plan.removals).toEqual(['b', 'd'])
+  })
+
+  it('仅删不更：保留行 endOffset 已是簇内最大 → updates 为空，removals 正确', () => {
+    const plan = planFragmentMerge([
+      { id: 'a', paperId: 'p1', pageNum: 1, text: 'x', startOffset: 0, endOffset: 30, createdAt: 1000 },
+      { id: 'b', paperId: 'p1', pageNum: 1, text: 'x', startOffset: 10, endOffset: 20, createdAt: 1100, note: '  ' },
+    ])
+    expect(plan.updates).toEqual([])
+    expect(plan.removals).toEqual(['b'])
+  })
+
+  it('非保留行带非空 note（trim 后）时整簇跳过：空 plan', () => {
+    const base = { paperId: 'p1', pageNum: 1, text: 'ale reinforcement learning (RL) without' }
+    const plan = planFragmentMerge([
+      { id: 'a', ...base, startOffset: 252, endOffset: 298, createdAt: 1788435487939 },
+      { id: 'b', ...base, startOffset: 298, endOffset: 392, createdAt: 1788435487940, note: '重要' },
+      { id: 'c', ...base, startOffset: 392, endOffset: 449, createdAt: 1788435487940 },
+    ])
+    expect(plan.updates).toEqual([])
+    expect(plan.removals).toEqual([])
   })
 })

@@ -45,10 +45,22 @@ export function initDb() {
   }
 
   // 历史碎片合并（#7，2026-09-21）：一次划选被按文本节点拆成的多行，合并为一条
-  const fragmentRows = db.prepare('SELECT id, paper_id, page_num, text, start_offset, end_offset, created_at FROM highlights').all() as any[]
+  const fragmentRows = db.prepare(
+    'SELECT id, paper_id, page_num, text, start_offset, end_offset, created_at, note FROM highlights',
+  ).all() as Array<{
+    id: string
+    paper_id: string
+    page_num: number
+    text: string
+    start_offset: number
+    end_offset: number
+    created_at: number
+    note: string
+  }>
   const mergePlan = planFragmentMerge(fragmentRows.map(r => ({
     id: r.id, paperId: r.paper_id, pageNum: r.page_num, text: r.text,
     startOffset: r.start_offset, endOffset: r.end_offset, createdAt: r.created_at,
+    note: r.note ?? '',
   })))
   if (mergePlan.removals.length > 0) {
     const updateFragment = db.prepare('UPDATE highlights SET end_offset = ? WHERE id = ?')
