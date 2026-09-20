@@ -54,9 +54,13 @@ const totalPages = ref(0)
 const scale = ref(1)
 let fitOnNextRender = true
 let fitMode = true
+let lastFitWidth = 0
+let renderGeneration = 0
 let resizeTimer: number | undefined
 const resizeObserver = new ResizeObserver(() => {
   if (!fitMode) return
+  const width = scrollRef.value?.clientWidth ?? 0
+  if (Math.abs(width - lastFitWidth) < 1) return
   if (resizeTimer) clearTimeout(resizeTimer)
   resizeTimer = window.setTimeout(() => {
     fitOnNextRender = true
@@ -158,25 +162,31 @@ function restorePageHighlights(pageDiv: HTMLElement, page: number) {
 }
 
 async function renderPdf() {
+  const generation = ++renderGeneration
   if (!pagesRef.value) return
   pagesRef.value.innerHTML = ''
   pdfDoc = await pdfjsLib.getDocument({ url: props.src }).promise
+  if (generation !== renderGeneration) return
   totalPages.value = pdfDoc.numPages
   if (fitOnNextRender && scrollRef.value?.clientWidth) {
     const firstPage = await pdfDoc.getPage(1)
+    if (generation !== renderGeneration) return
     const pageWidth = firstPage.getViewport({ scale: 1 }).width
     const availableWidth = Math.max(scrollRef.value.clientWidth - 48, 160)
     scale.value = Math.min(availableWidth / pageWidth, 2)
+    lastFitWidth = scrollRef.value.clientWidth
     fitOnNextRender = false
   }
 
   for (let n = 1; n <= pdfDoc.numPages; n++) {
-    await renderPage(n)
+    if (generation !== renderGeneration) return
+    await renderPage(n, generation)
   }
 }
 
-async function renderPage(num: number) {
+async function renderPage(num: number, generation: number) {
   const page = await pdfDoc.getPage(num)
+  if (generation !== renderGeneration) return
   const viewport = page.getViewport({ scale: scale.value })
   // Canvas dimensions are device pixels, while the viewport dimensions are
   // CSS pixels. Rendering both at the same size makes PDF pages blurry on
@@ -209,8 +219,10 @@ async function renderPage(num: number) {
     ? undefined
     : [outputScale, 0, 0, outputScale, 0, 0]
   await page.render({ canvasContext: ctx, viewport, transform }).promise
+  if (generation !== renderGeneration) return
 
   const textContent = await page.getTextContent()
+  if (generation !== renderGeneration) return
   // @ts-ignore - renderTextLayer available in pdfjs
   const textLayer = new pdfjsLib.TextLayer({
     textContentSource: textContent,
@@ -218,6 +230,7 @@ async function renderPage(num: number) {
     viewport,
   })
   await textLayer.render()
+  if (generation !== renderGeneration) return
 
   restorePageHighlights(pageDiv, num)
 }
@@ -359,12 +372,16 @@ onMounted(async () => {
     highlightSegments.push(...stored.map((h: any) => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
   } catch { /* highlights unavailable */ }
   renderPdf()
-  if (scrollRef.value) resizeObserver.observe(scrollRef.value)
+  if (scrollRef.value) {
+    lastFitWidth = scrollRef.value.clientWidth
+    resizeObserver.observe(scrollRef.value)
+  }
   scrollRef.value?.addEventListener('scroll', onScroll)
   containerRef.value?.addEventListener('mouseup', onMouseUp)
 })
 
 onBeforeUnmount(() => {
+  renderGeneration++
   resizeObserver.disconnect()
   if (resizeTimer) clearTimeout(resizeTimer)
   scrollRef.value?.removeEventListener('scroll', onScroll)
