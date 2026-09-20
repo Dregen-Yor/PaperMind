@@ -1,15 +1,25 @@
-/** 备份脱敏（#5）：默认导出不含明文 API Key。 */
+/** 备份脱敏（#5）：默认导出不含任何明文凭据（API Key / Token）。 */
 export function stripApiKeysFromSettings(rows: Array<{ key: string; value: string }>): Array<{ key: string; value: string }> {
   return rows.map(row => {
-    if (row.key !== 'llm_profiles') return row
+    if (row.key === 'huggingface_token') return { ...row, value: JSON.stringify('') }
     try {
-      const profiles = JSON.parse(row.value)
-      if (!Array.isArray(profiles)) return row
-      const redacted = profiles.map(profile => ({ ...profile, apiKey: '' }))
-      return { ...row, value: JSON.stringify(redacted) }
+      if (row.key === 'llm_profiles') {
+        const profiles = JSON.parse(row.value)
+        if (!Array.isArray(profiles)) return row
+        const redacted = profiles.map(profile =>
+          typeof profile === 'object' && profile !== null ? { ...profile, apiKey: '' } : profile,
+        )
+        return { ...row, value: JSON.stringify(redacted) }
+      }
+      if (row.key === 'llm_config') {
+        const config = JSON.parse(row.value)
+        if (typeof config !== 'object' || config === null || Array.isArray(config)) return row
+        return { ...row, value: JSON.stringify({ ...config, apiKey: '' }) }
+      }
     } catch {
       return row
     }
+    return row
   })
 }
 

@@ -143,7 +143,7 @@
       <!-- ── 导出备份 Dialog ── -->
       <el-dialog v-model="exportDialogVisible" title="导出备份" width="460px">
         <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、对话与消息、高亮、索引与语义树、全部设置。</p>
-        <el-checkbox v-model="exportIncludeApiKey">包含 API Key（明文，分享前请谨慎）</el-checkbox>
+        <el-checkbox v-model="exportIncludeApiKey">包含 API Key / Token（明文，分享前请谨慎）</el-checkbox>
         <template #footer>
           <el-button @click="exportDialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="exporting" @click="doExport">导出</el-button>
