@@ -292,7 +292,7 @@ describe('useChatStore', () => {
     expect(init.headers).toMatchObject({ 'x-api-key': 'sk-ant-1', 'anthropic-version': '2023-06-01' })
     const body = JSON.parse(init.body)
     expect(body.model).toBe('claude-3-5-sonnet')
-    expect(body.max_tokens).toBe(2048)
+    expect(body.max_tokens).toBe(4096)
     expect(body.messages.every((m: any) => m.role !== 'system')).toBe(true)
     expect(body.system).toContain('学术论文阅读助手')
   })

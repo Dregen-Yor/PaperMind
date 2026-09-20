@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { extractPages, buildPageIndex } from '../utils/pageIndex'
-import { runRagPipeline, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
+import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
 import { buildEvidenceBlocks, hasExactPagePartition, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
 import {
   buildSemanticTree,
@@ -65,7 +65,7 @@ const DEFAULT_PROFILE: LLMProfile = {
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 4096,
   topK: 0,
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 }
@@ -282,10 +282,16 @@ export const useChatStore = defineStore('chat', () => {
     return (target ? profiles.value.find(p => p.id === target) : undefined) ?? chatProfile.value
   }
 
-  async function callLLM(
+  /**
+   * 单次对话补全的底层请求：记录 finish_reason 供截断提示使用（#3）。
+   *
+   * `opts` 供后续流式输出使用（#6），本任务先保留形参。
+   */
+  async function requestCompletion(
     messages: { role: string; content: string }[],
     profileOrId?: string | LLMProfile,
-  ): Promise<string> {
+    opts: { onToken?: (token: string) => void } = {},
+  ): Promise<{ content: string; truncated: boolean }> {
     const profile = resolveLlmProfile(profileOrId)
 
     if (profile.provider === 'ollama') {
@@ -299,7 +305,7 @@ export const useChatStore = defineStore('chat', () => {
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       const data = await res.json()
       if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
-      return data.message.content
+      return { content: data.message.content, truncated: data.done_reason === 'length' }
     }
 
     if (profile.provider === 'anthropic') {
@@ -331,7 +337,7 @@ export const useChatStore = defineStore('chat', () => {
       const data = await res.json()
       const content = data.content?.[0]?.text
       if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
-      return content
+      return { content, truncated: data.stop_reason === 'max_tokens' }
     }
 
     const headers: Record<string, string> = {
@@ -354,7 +360,15 @@ export const useChatStore = defineStore('chat', () => {
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
     if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
-    return content
+    return { content, truncated: data.choices?.[0]?.finish_reason === 'length' }
+  }
+
+  /** 只要文本的调用路径（索引、标题、查询改写等）继续走这个薄包装。 */
+  async function callLLM(
+    messages: { role: string; content: string }[],
+    profileOrId?: string | LLMProfile,
+  ): Promise<string> {
+    return (await requestCompletion(messages, profileOrId)).content
   }
 
   // ---------- Index Paper ----------
@@ -747,20 +761,32 @@ export const useChatStore = defineStore('chat', () => {
     }
     // 历史不含当前提问：默认排除最后一条（刚追加的用户消息）；重试时由调用方给 historyEnd
     const history = conv.messages.slice(0, historyEnd ?? -1).map(m => ({ role: m.role, content: m.content }))
+    // 生成回调负责把 finish_reason 带回来：截断的回答要能提示「已达长度上限」并续写（#3）
+    let lastTruncated = false
+    const generate = async (msgs: { role: string; content: string }[]) => {
+      const outcome = await requestCompletion(msgs)
+      lastTruncated = outcome.truncated
+      return outcome.content
+    }
     const { answer, sources } = await runRagPipeline(
       papers,
       userMessage,
       history,
       (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
-      callLLM,
+      generate,
       chatProfile.value.systemPrompt,
       { externalContext: context },
     )
     // 重试是原地更新失败轮；首次提问才追加新消息
     if (opts?.writeBack) {
-      await updateMessage(conv.id, opts.writeBack, { content: answer, sources: sources.length ? sources : undefined, error: '' })
+      await updateMessage(conv.id, opts.writeBack, {
+        content: answer,
+        sources: sources.length ? sources : undefined,
+        error: '',
+        truncated: lastTruncated,
+      })
     } else {
-      await addMessage(conv.id, 'assistant', answer, sources.length ? sources : undefined)
+      await addMessage(conv.id, 'assistant', answer, sources.length ? sources : undefined, { truncated: lastTruncated })
     }
   }
 
@@ -807,6 +833,39 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 「继续」：对截断的回答就地续写（#3）。检索按原问题重跑，生成时把已输出部分作为上文。 */
+  async function continueMessage(convId: string, messageId: string): Promise<void> {
+    const conv = conversations.value.find(c => c.id === convId)
+    const index = conv ? conv.messages.findIndex(m => m.id === messageId) : -1
+    if (!conv || index === -1) return
+    const target = conv.messages[index]
+    const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
+    if (!userMessage) return
+
+    const papers = conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
+    const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
+    // 改写阶段把「已输出的半截回答」也算作上一轮：与正常追问时的上下文一致，
+    // 否则续写往往会因历史轮数不足而跳过查询改写（#3）
+    const priorTurns = [...history, { role: 'assistant' as const, content: target.content }]
+    const retrieval = await retrieveRagContext(
+      papers,
+      userMessage.content,
+      priorTurns,
+      (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
+    )
+    const messages = buildAnswerMessages(
+      retrieval.context,
+      '请接着上一条回答继续输出，从中断处直接续写，不要重复已经输出过的内容。',
+      priorTurns,
+      chatProfile.value.systemPrompt,
+    )
+    const outcome = await requestCompletion(messages)
+    await updateMessage(convId, messageId, {
+      content: target.content + outcome.content,
+      truncated: outcome.truncated,
+    })
+  }
+
   return {
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
@@ -816,7 +875,8 @@ export const useChatStore = defineStore('chat', () => {
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
     newConversation, addMessage, updateMessage, removeConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, retryMessage, collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
+    sendMessage, retryMessage, continueMessage, requestCompletion,
+    collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }
 })

@@ -60,6 +60,20 @@
         <p class="hint">0 = 不限制</p>
       </div>
 
+      <!-- 回答长度上限 -->
+      <div class="param-section">
+        <label>
+          回答长度上限（Max Tokens）
+          <span class="val tabular-nums">{{ chatProfile?.maxTokens ?? 4096 }}</span>
+        </label>
+        <el-slider
+          :model-value="chatProfile?.maxTokens ?? 4096"
+          @update:model-value="updateCurrent('maxTokens', $event)"
+          :min="256" :max="8192" :step="256"
+        />
+        <p class="hint">长回答（表格、推导）建议 ≥4096</p>
+      </div>
+
       <el-divider />
 
       <!-- 前往设置 -->
@@ -81,7 +95,7 @@ defineEmits<{ (e: 'close'): void }>()
 const chatStore = useChatStore()
 const { profiles, chatProfileId, chatProfile } = storeToRefs(chatStore)
 
-function updateCurrent(key: 'temperature' | 'topK', value: number) {
+function updateCurrent(key: 'temperature' | 'topK' | 'maxTokens', value: number) {
   if (!chatProfile.value) return
   chatStore.updateProfile(chatProfile.value.id, { [key]: value })
 }

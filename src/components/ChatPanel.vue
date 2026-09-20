@@ -25,6 +25,10 @@
               <el-button size="small" text @click="router.push('/settings')">打开设置</el-button>
             </div>
           </div>
+          <div v-if="msg.truncated && !msg.error" class="msg-truncated">
+            <span>回答已达长度上限</span>
+            <el-button size="small" text :loading="continuing === msg.id" @click="continueMsg(msg)">继续</el-button>
+          </div>
           <div v-if="msg.sources?.length" class="msg-sources">
             <span class="sources-label"><el-icon aria-hidden="true"><Link /></el-icon> 参考来源</span>
             <span v-for="(s, i) in msg.sources" :key="i" class="source-chip">{{ s }}</span>
@@ -90,6 +94,7 @@ defineEmits<{ (e: 'create'): void }>()
 const chatStore = useChatStore()
 const router = useRouter()
 const retrying = ref('')
+const continuing = ref('')
 
 const input = ref('')
 const inputRef = ref<{ focus: () => void }>()
@@ -140,6 +145,19 @@ async function retry(msg: { id: string }) {
     // 失败已由 store 就地改写失败卡（msg.error）；这里只负责收尾
   } finally {
     retrying.value = ''
+  }
+}
+
+async function continueMsg(msg: { id: string }) {
+  if (continuing.value || !props.conversation) return
+  continuing.value = msg.id
+  try {
+    await chatStore.continueMessage(props.conversation.id, msg.id)
+  } catch (error) {
+    // 续写失败不动原回答，截断条仍在可再点；这里只兜底提示，避免静默失败
+    ElMessage.error(error instanceof Error ? error.message : '继续失败，请稍后重试')
+  } finally {
+    continuing.value = ''
   }
 }
 
@@ -290,6 +308,7 @@ async function send() {
 
 .msg-content :deep(img) { max-width: 100%; height: auto; }
 .msg-sources { font-size: 11px; color: var(--text-muted); margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.msg-truncated { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--gold); }
 .sources-label { display: flex; align-items: center; gap: 4px; margin-right: 4px; }
 .source-chip { background: var(--bg-base); padding: 3px 7px; border-radius: 4px; color: var(--text-secondary); border: 1px solid var(--border); overflow-wrap: anywhere; }
 .typing { padding: 10px 0; display: flex; gap: 5px; width: fit-content; }

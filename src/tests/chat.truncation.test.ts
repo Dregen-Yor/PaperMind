@@ -1,0 +1,117 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { setActivePinia, createPinia } from 'pinia'
+
+vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ default: {}, GlobalWorkerOptions: { workerSrc: '' } }))
+
+import { useChatStore } from '../stores/chat'
+
+const mockDb = () => (globalThis as any).mockDb
+const llm = (content: string, finishReason = 'stop') => ({
+  ok: true,
+  json: () => Promise.resolve({ choices: [{ message: { content }, finish_reason: finishReason }] }),
+})
+
+describe('截断与继续（#3）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockDb().chat.listConversations.mockResolvedValue([])
+    mockDb().chat.addMessage.mockClear()
+    mockDb().chat.updateMessage.mockClear()
+    mockDb().settings.get.mockResolvedValue(null)
+    mockDb().index.list.mockResolvedValue([])
+  })
+
+  it('finish_reason=length 标记 truncated 并落库', async () => {
+    global.fetch = vi.fn().mockResolvedValue(llm('半截回答', 'length')) as any
+    const store = useChatStore()
+    await store.init()
+    const conv = await store.newConversation('t', [])
+    await store.sendMessage(conv.id, '问题')
+
+    const assistant = conv.messages.find(m => m.role === 'assistant')!
+    expect(assistant.truncated).toBe(true)
+    const writes = mockDb().chat.addMessage.mock.calls.map((c: any[]) => c[0]).filter((m: any) => m.role === 'assistant')
+    expect(writes[0].truncated).toBe(true)
+  })
+
+  it('continueMessage 把续写追加到原回答并清除截断标记', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(llm('续写用查询'))     // 历史 ≥2 轮会触发查询改写
+      .mockResolvedValueOnce(llm('，这是续写部分。'))
+    const store = useChatStore()
+    await store.init()
+    const conv = await store.newConversation('t', [])
+    conv.messages.push(
+      { id: 'u1', role: 'user', content: '问题', timestamp: 1 },
+      { id: 'a1', role: 'assistant', content: '半截回答', timestamp: 2, truncated: true },
+    )
+    await store.continueMessage(conv.id, 'a1')
+
+    expect(conv.messages[1].content).toBe('半截回答，这是续写部分。')
+    expect(conv.messages[1].truncated).toBe(false)
+    const last = mockDb().chat.updateMessage.mock.calls.at(-1)!
+    expect(last[0]).toBe('a1')
+    expect(last[1].content).toBe('半截回答，这是续写部分。')
+  })
+
+  it('默认 maxTokens 已提升到 4096', async () => {
+    const store = useChatStore()
+    await store.init()
+    expect(store.profiles[0].maxTokens).toBe(4096)
+  })
+
+  it('anthropic 的 stop_reason=max_tokens 同样标记截断', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ content: [{ type: 'text', text: '半截回答' }], stop_reason: 'max_tokens' }),
+    }) as any
+    const store = useChatStore()
+    await store.init()
+    await store.updateProfile(store.chatProfile.id, {
+      provider: 'anthropic', model: 'claude-3-5-sonnet', baseUrl: 'https://api.anthropic.com',
+    })
+    const conv = await store.newConversation('t', [])
+    await store.sendMessage(conv.id, '问题')
+
+    expect((global.fetch as any).mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages')
+    expect(conv.messages.find(m => m.role === 'assistant')!.truncated).toBe(true)
+  })
+
+  it('ollama 的 done_reason=length 同样标记截断', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ message: { content: '半截回答' }, done_reason: 'length' }),
+    }) as any
+    const store = useChatStore()
+    await store.init()
+    await store.updateProfile(store.chatProfile.id, {
+      provider: 'ollama', model: 'qwen2.5', baseUrl: 'http://localhost:11434',
+    })
+    const conv = await store.newConversation('t', [])
+    await store.sendMessage(conv.id, '问题')
+
+    expect((global.fetch as any).mock.calls[0][0]).toBe('http://localhost:11434/api/chat')
+    expect(conv.messages.find(m => m.role === 'assistant')!.truncated).toBe(true)
+  })
+
+  it('重试被截断：写回补丁带 truncated=true', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 401, statusText: 'Unauthorized',
+      json: () => Promise.resolve({ error: { message: 'Invalid API key' } }),
+    }) as any
+    const store = useChatStore()
+    await store.init()
+    const conv = await store.newConversation('t', [])
+    await expect(store.sendMessage(conv.id, '问题')).rejects.toThrow('LLM 请求失败 (401)')
+    const failed = conv.messages.find(m => m.role === 'assistant')!
+
+    global.fetch = vi.fn().mockResolvedValue(llm('半截回答', 'length')) as any
+    await store.retryMessage(conv.id, failed.id)
+
+    expect(failed.error).toBe('')
+    expect(failed.truncated).toBe(true)
+    const last = mockDb().chat.updateMessage.mock.calls.at(-1)!
+    expect(last[0]).toBe(failed.id)
+    expect(last[1].truncated).toBe(true)
+  })
+})

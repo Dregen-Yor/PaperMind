@@ -265,7 +265,7 @@ const EMPTY_FORM = (): Omit<LLMProfile, 'id'> => ({
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 4096,
   topK: 0,
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 })

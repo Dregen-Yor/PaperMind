@@ -123,7 +123,8 @@ describe('问答失败路径（#2）', () => {
     const updates = mockDb().chat.updateMessage.mock.calls
     expect(updates).toHaveLength(1)
     expect(updates[0][0]).toBe(failed.id)
-    expect(updates[0][1]).toEqual({ content: '最终回答', error: '' })
+    // 重试写回同时刷新截断标记（#3），未截断即显式写 false
+    expect(updates[0][1]).toEqual({ content: '最终回答', error: '', truncated: false })
   })
 
   it('超时映射中文文案：AbortSignal.timeout 的 TimeoutError 不进失败卡', async () => {
