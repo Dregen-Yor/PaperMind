@@ -92,7 +92,10 @@ function updateSourceLayout(event: MediaQueryListEvent) {
   if (!event.matches) showSources.value = false
 }
 sourceMedia.addEventListener('change', updateSourceLayout)
-onBeforeUnmount(() => sourceMedia.removeEventListener('change', updateSourceLayout))
+onBeforeUnmount(() => {
+  sourceMedia.removeEventListener('change', updateSourceLayout)
+  if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
+})
 const chatPanelRef = ref<InstanceType<typeof ChatPanel>>()
 
 const activeConv = computed(() => chatStore.conversations.find(c => c.id === activeConvId.value) ?? null)
@@ -121,12 +124,14 @@ function toggleSelect(id: string) {
 }
 
 async function startNewConv() {
+  if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   const conv = await chatStore.newConversation('新对话', [...selectedPaperIds.value])
   activeConvId.value = conv.id
   showSources.value = false
 }
 
 function selectConv(c: Conversation) {
+  if (activeConvId.value && activeConvId.value !== c.id) void chatStore.discardEmptyConversation(activeConvId.value)
   activeConvId.value = c.id
   selectedPaperIds.value = [...c.paperIds]
   showSources.value = false

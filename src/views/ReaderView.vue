@@ -177,6 +177,7 @@ watch([() => paper.value?.id, () => chatStore.loaded], async ([id, chatReady], _
   fileError.value = ''
   if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
   pdfUrl.value = ''
+  if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   activeConvId.value = ''
   try {
     const base64 = await paperStore.readPaperFile(id)
@@ -206,6 +207,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   paperGeneration += 1
+  if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   stopResize()
   if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
   window.removeEventListener('mousemove', onMove)

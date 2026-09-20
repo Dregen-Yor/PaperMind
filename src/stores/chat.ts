@@ -295,6 +295,12 @@ export const useChatStore = defineStore('chat', () => {
   async function init() {
     if (loaded.value) return
     conversations.value = await window.db.chat.listConversations()
+    // 清理历史遗留的 0 消息对话（#15）：启动时不会有正在进行的空会话
+    const emptyConversations = conversations.value.filter(c => c.messages.length === 0)
+    for (const conv of emptyConversations) {
+      await window.db.chat.removeConversation(conv.id)
+    }
+    conversations.value = conversations.value.filter(c => c.messages.length > 0)
 
     // 加载配置列表
     const savedProfiles = await window.db.settings.get('llm_profiles')
@@ -781,6 +787,13 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value = conversations.value.filter(c => c.id !== id)
   }
 
+  /** 丢弃「已创建但从未发问」的空会话（#15）。 */
+  async function discardEmptyConversation(id: string) {
+    const conv = conversations.value.find(c => c.id === id)
+    if (!conv || conv.messages.length > 0) return
+    await removeConversation(id)
+  }
+
   async function syncPaperIds(convId: string, paperIds: string[]) {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) return
@@ -1065,7 +1078,7 @@ export const useChatStore = defineStore('chat', () => {
     init,
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
-    newConversation, addMessage, updateMessage, removeConversation, syncPaperIds, autoTitleConversation,
+    newConversation, addMessage, updateMessage, removeConversation, discardEmptyConversation, syncPaperIds, autoTitleConversation,
     sendMessage, retryMessage, continueMessage, requestCompletion,
     collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
