@@ -1,9 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { createMemoryHistory, createRouter } from 'vue-router'
+import ElementPlus, { ElMessage } from 'element-plus'
 
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ default: {}, GlobalWorkerOptions: { workerSrc: '' } }))
 
-import { useChatStore } from '../stores/chat'
+import ChatPanel from '../components/ChatPanel.vue'
+import { useChatStore, type Conversation } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
 const llm = (content: string, finishReason = 'stop') => ({
@@ -113,5 +117,83 @@ describe('截断与继续（#3）', () => {
     const last = mockDb().chat.updateMessage.mock.calls.at(-1)!
     expect(last[0]).toBe(failed.id)
     expect(last[1].truncated).toBe(true)
+  })
+})
+
+describe('ChatPanel 截断条（#3）', () => {
+  let wrapper: VueWrapper | undefined
+  afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.restoreAllMocks() })
+
+  const truncatedConv = (): Conversation => ({
+    id: 'c1', title: 't', paperIds: [], createdAt: 0,
+    messages: [
+      { id: 'm1', role: 'user', content: '问题', timestamp: 1 },
+      { id: 'm2', role: 'assistant', content: '半截回答', timestamp: 2, truncated: true },
+    ],
+  })
+
+  /** 挂载 ChatPanel；onError 接管 app.config.errorHandler，用于捕获逃逸出事件处理器的错误。 */
+  async function mountPanel(conversation: Conversation, onError?: (error: unknown) => void) {
+    const pinia = createPinia()
+    const chatStore = useChatStore(pinia)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/settings', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    wrapper = mount(ChatPanel, {
+      props: { conversation },
+      global: {
+        plugins: [pinia, router, ElementPlus],
+        ...(onError ? { config: { errorHandler: (error: unknown) => onError(error) } } : {}),
+      },
+    })
+    return { chatStore }
+  }
+
+  it('截断回答显示截断条，点「继续」调用 store.continueMessage', async () => {
+    const { chatStore } = await mountPanel(truncatedConv())
+    const continueMessage = vi.spyOn(chatStore, 'continueMessage').mockResolvedValue()
+
+    const bar = wrapper!.find('.msg-truncated')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('回答已达长度上限')
+
+    await bar.findAll('button').find(b => b.text() === '继续')!.trigger('click')
+    await flushPromises()
+    expect(continueMessage).toHaveBeenCalledWith('c1', 'm2')
+  })
+
+  it('失败轮不叠加截断条（失败卡优先）', async () => {
+    const conversation = truncatedConv()
+    conversation.messages[1] = { ...conversation.messages[1], content: '', error: 'LLM 请求失败 (401)' }
+    await mountPanel(conversation)
+
+    expect(wrapper!.find('.msg-error').exists()).toBe(true)
+    expect(wrapper!.find('.msg-truncated').exists()).toBe(false)
+  })
+
+  it('续写失败不逃逸：toast 兜底，按钮可再次点击', async () => {
+    const errors: unknown[] = []
+    const { chatStore } = await mountPanel(truncatedConv(), error => errors.push(error))
+    const continueMessage = vi
+      .spyOn(chatStore, 'continueMessage')
+      .mockRejectedValue(new Error('请求超时，请检查网络后重试'))
+    const toast = vi.spyOn(ElMessage, 'error')
+    const continueButton = () => wrapper!.find('.msg-truncated').findAll('button').find(b => b.text() === '继续')!
+
+    await continueButton().trigger('click')
+    await flushPromises()
+
+    expect(errors).toEqual([])
+    expect(toast).toHaveBeenCalledWith('请求超时，请检查网络后重试')
+    // 失败不动原回答：截断条仍在，可再次点击
+    expect(wrapper!.find('.msg-truncated').exists()).toBe(true)
+    await continueButton().trigger('click')
+    await flushPromises()
+    expect(continueMessage).toHaveBeenCalledTimes(2)
   })
 })
