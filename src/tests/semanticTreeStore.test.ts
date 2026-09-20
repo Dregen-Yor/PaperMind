@@ -72,6 +72,25 @@ const storedIndex = (pagesJson: string) => ({ indexJson: FLAT_INDEX_JSON, pagesJ
 const PAGES = ['Attention is all you need.']
 const PAGES_JSON = JSON.stringify(PAGES)
 
+/**
+ * 建树用例默认用一份填好 API Key 的索引配置：没配模型时 buildPaperTree 会在发请求前
+ * 短路成「未配置模型」（#13），而这些用例要验证的是真实请求路径（成功/失败/复用）。
+ * 除 apiKey 外与 DEFAULT_PROFILE 保持一致，避免顺带改变其他行为。
+ */
+const KEYED_PROFILE = [{
+  id: 'default', name: '默认配置', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-test',
+  baseUrl: 'https://api.openai.com/v1', temperature: 0.7, maxTokens: 4096, topK: 0,
+  systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
+}]
+
+/**
+ * settings.get：给出填好 Key 的配置，其余键返回 null（与无保存设置等价）。
+ * 每次返回新的数组与对象：init 拿到的就是 store 自己的副本，
+ * 用例里的 updateProfile 才不会把模块级常量改掉、泄漏给后面的用例。
+ */
+const keyedSettings = (key: string) =>
+  Promise.resolve(key === 'llm_profiles' ? KEYED_PROFILE.map(profile => ({ ...profile })) : null)
+
 /** 默认索引配置（provider openai / model gpt-4o）下、指定模型对应的建树配置指纹。 */
 const configHashFor = (model: string) => semanticTreeConfigHash({
   schemaVersion: SEMANTIC_TREE_SCHEMA_VERSION,
@@ -133,7 +152,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     mockDb().chat.listConversations.mockResolvedValue([])
-    mockDb().settings.get.mockResolvedValue(null)
+    mockDb().settings.get.mockImplementation(keyedSettings)
     mockDb().index.list.mockResolvedValue([])
     mockDb().tree.list.mockResolvedValue([])
     mockDb().tree.get.mockResolvedValue(null)
@@ -146,7 +165,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
     const [paperId, record] = mockDb().tree.set.mock.calls[0]
     expect(paperId).toBe('p1')
@@ -173,7 +192,9 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    await expect(store.buildPaperTree('p1')).resolves.toBe(false)
+    const outcome = await store.buildPaperTree('p1')
+    expect(outcome.ok).toBe(false)
+    expect(outcome.reason).toContain('输出不合规')
     expect(mockDb().tree.set).not.toHaveBeenCalled()
     expect(store.treeReadyPapers.has('p1')).toBe(false)
   })
@@ -184,7 +205,9 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    await expect(store.buildPaperTree('p1')).resolves.toBe(false)
+    const outcome = await store.buildPaperTree('p1')
+    expect(outcome.ok).toBe(false)
+    expect(outcome.reason).toContain('请求失败')
     expect(mockDb().tree.set).not.toHaveBeenCalled()
   })
 
@@ -193,7 +216,9 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    expect(await store.buildPaperTree('p1')).toBe(false)
+    const outcome = await store.buildPaperTree('p1')
+    expect(outcome.ok).toBe(false)
+    expect(outcome.reason).toContain('缺少可用原文')
     expect(mockDb().tree.set).not.toHaveBeenCalled()
   })
 
@@ -204,7 +229,9 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    expect(await store.buildPaperTree('p1')).toBe(false)
+    const outcome = await store.buildPaperTree('p1')
+    expect(outcome.ok).toBe(false)
+    expect(outcome.reason).toContain('语义树总开关已关闭')
     expect(mockDb().tree.set).not.toHaveBeenCalled()
   })
 
@@ -231,7 +258,9 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(record)
 
-    expect(await store.buildPaperTree('p1')).toBe(false)
+    const outcome = await store.buildPaperTree('p1')
+    expect(outcome.ok).toBe(false)
+    expect(outcome.reason).toContain('已有可复用的语义树')
     expect(mockDb().tree.set).not.toHaveBeenCalled()
     // 只有 realTreeRecord 里那一次建树调用
     expect(treeBuildCalls()).toHaveLength(1)
@@ -245,7 +274,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(record)
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
     expect(treeBuildCalls()).toHaveLength(2)
   })
@@ -262,7 +291,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(record)
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
@@ -274,7 +303,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(record)
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
@@ -286,7 +315,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue({ ...base, blocksJson: JSON.stringify(withoutPieces) })
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
@@ -300,7 +329,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue({ ...base, blocksJson: JSON.stringify(tampered) })
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
@@ -311,7 +340,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(record)
 
-    expect(await store.buildPaperTree('p1', undefined, { force: true })).toBe(true)
+    expect((await store.buildPaperTree('p1', undefined, { force: true })).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
@@ -324,7 +353,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
       return storedIndex(PAGES_JSON)
     })
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     const [, record] = mockDb().tree.set.mock.calls.at(-1)!
     // 树实际由 gpt-4o 建（LLM 调用也用快照），元数据与缓存键必须与之一致 ——
     // 否则以后切回 gpt-4o 会错误复用一个并非它建的树
@@ -345,7 +374,9 @@ describe('useChatStore — 后台建树（§8.2）', () => {
       return record
     })
 
-    expect(await store.buildPaperTree('p1')).toBe(false)
+    const outcome = await store.buildPaperTree('p1')
+    expect(outcome.ok).toBe(false)
+    expect(outcome.reason).toContain('已有可复用的语义树')
     expect(mockDb().tree.set).not.toHaveBeenCalled()
   })
 
@@ -363,7 +394,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     }) as any
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     // 这棵树属于旧配置，loadSemanticIndex 会拒它，UI 也不能把它算成可用
     expect(store.treeReadyPapers.has('p1')).toBe(false)
   })
@@ -402,7 +433,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     mockDb().index.list.mockResolvedValue(['p1', 'p2'])
     mockDb().index.get.mockResolvedValue(storedIndex(PAGES_JSON))
     mockDb().tree.get.mockResolvedValue(null)
-    // p2 的建树请求直接失败
+    // 两篇的建树请求都直接失败
     global.fetch = vi.fn().mockImplementation((_url: string, init: any) => {
       const prompt = JSON.parse(init.body).messages[0].content
       if (prompt.includes('轻量语义导航树')) return Promise.reject(new Error('network down'))
@@ -411,8 +442,10 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
+    // 失败计数之外必须带上首个失败原因（#13），否则 UI 只能报「失败」说不出为什么
     expect(await store.rebuildAllTrees()).toEqual({
       attempted: 2, rebuilt: 0, failed: 2, skipped: 0,
+      firstReason: expect.stringContaining('请求失败'),
     })
   })
 
@@ -423,9 +456,12 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    expect(await store.rebuildAllTrees()).toEqual({
+    const summary = await store.rebuildAllTrees()
+    expect(summary).toEqual({
       attempted: 0, rebuilt: 0, failed: 0, skipped: 1,
     })
+    // 没有失败就不该编造原因
+    expect(summary.firstReason).toBeUndefined()
   })
 
   it('rebuildAllTrees 对每篇已索引论文强制重建', async () => {
@@ -439,9 +475,11 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    expect(await store.rebuildAllTrees()).toEqual({
+    const summary = await store.rebuildAllTrees()
+    expect(summary).toEqual({
       attempted: 2, rebuilt: 2, failed: 0, skipped: 0,
     })
+    expect(summary.firstReason).toBeUndefined()
     expect(mockDb().tree.set.mock.calls.map(([paperId]: [string]) => paperId).sort()).toEqual(['p1', 'p2'])
   })
 
@@ -455,7 +493,7 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     const store = useChatStore()
     await store.init()
 
-    expect(await store.buildPaperTree('p1')).toBe(true)
+    expect((await store.buildPaperTree('p1')).ok).toBe(true)
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
@@ -475,7 +513,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     mockDb().chat.listConversations.mockResolvedValue([])
-    mockDb().settings.get.mockResolvedValue(null)
+    mockDb().settings.get.mockImplementation(keyedSettings)
     mockDb().index.list.mockResolvedValue([])
     mockDb().tree.list.mockResolvedValue([])
     mockDb().tree.set.mockResolvedValue(undefined)

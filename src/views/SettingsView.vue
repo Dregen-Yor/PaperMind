@@ -341,13 +341,14 @@ async function onRebuildTrees() {
   }
   rebuildingTrees.value = true
   try {
-    const { attempted, rebuilt, failed, skipped } = await chatStore.rebuildAllTrees()
+    const { attempted, rebuilt, failed, skipped, firstReason } = await chatStore.rebuildAllTrees()
     // 「重建成 0 篇」有两种截然不同的原因，不能合并成一句话：
-    // 没有候选（跳过）与真的失败（网络/输出非法/输入超限）必须分开报
+    // 没有候选（跳过）与真的失败（网络/输出非法/输入超限）必须分开报，
+    // 失败还要带上首个原因，用户才知道该去改配置还是换论文（#13）
     if (attempted > 0 && rebuilt === 0) {
-      ElMessage.error(`语义树重建失败（${failed}/${attempted} 篇）`)
+      ElMessage.error(`语义树重建失败（${failed}/${attempted} 篇）：${firstReason ?? '原因未知'}`)
     } else if (failed > 0) {
-      ElMessage.warning(`已重建 ${rebuilt} 篇，${failed} 篇失败`)
+      ElMessage.warning(`已重建 ${rebuilt} 篇，${failed} 篇失败：${firstReason ?? '原因未知'}`)
     } else if (rebuilt > 0) {
       ElMessage.success(`已重建 ${rebuilt} 篇论文的语义树`)
     } else {

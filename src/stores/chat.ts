@@ -8,6 +8,7 @@ import {
   validateSemanticTree,
   hashTreeSource,
   semanticTreeConfigHash,
+  SemanticTreeBuildError,
   SEMANTIC_TREE_SCHEMA_VERSION,
   SEMANTIC_TREE_PROMPT_VERSION,
   DEFAULT_MAX_INPUT_CHARS,
@@ -74,6 +75,12 @@ const DEFAULT_PROFILE: LLMProfile = {
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 }
 
+/** 单篇建树结果：失败必须带可展示的原因（#13）。 */
+export interface TreeBuildOutcome {
+  ok: boolean
+  reason?: string
+}
+
 /** 强制重建的结果摘要。分开计数是为了不让「全部失败」在 UI 上退化成「没有论文」。 */
 export interface TreeRebuildSummary {
   /** 真正尝试建树的篇数（不含跳过） */
@@ -82,6 +89,8 @@ export interface TreeRebuildSummary {
   failed: number
   /** 总开关关闭，或该篇已在建树中 */
   skipped: number
+  /** 首个失败原因（人类可读），供设置页展示（#13） */
+  firstReason?: string
 }
 
 const NEW_CONVERSATION_TITLE = '新对话'
@@ -231,6 +240,19 @@ async function readOllamaStream(res: Response, onToken: (token: string) => void)
   }
   if (!content.trim()) throw new Error('模型返回了空响应')
   return { content, truncated }
+}
+
+/** 建树失败原因分类（#13）。 */
+function treeFailureReason(error: unknown): string {
+  if (error instanceof SemanticTreeBuildError) {
+    switch (error.reason) {
+      case 'no-evidence': return '没有可用的原文证据块'
+      case 'input-too-large': return '论文过长，超出单次建树输入上限'
+      case 'llm-failed': return `请求失败：${error.message.slice(0, 80)}`
+      default: return `输出不合规：${error.message.slice(0, 80)}`
+    }
+  }
+  return error instanceof Error ? `未知错误：${error.message.slice(0, 80)}` : '未知错误'
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -589,7 +611,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 后台构建单篇论文的轻量语义树（§8.2）。
    *
-   * 每篇论文恰好一次 LLM 调用；任何失败都返回 false 并保持平面路径可用，
+   * 每篇论文恰好一次 LLM 调用；任何失败都带原因返回并保持平面路径可用，
    * 不写入半成品树。原文指纹与构建配置指纹都未变、且记录内容校验通过时
    * 直接复用已存树（§10.3）；`force` 无条件重建。
    */
@@ -597,9 +619,9 @@ export const useChatStore = defineStore('chat', () => {
     paperId: string,
     providedPages?: string[],
     opts: { force?: boolean } = {},
-  ): Promise<boolean> {
-    if (!treeEnabled.value) return false
-    if (treeIndexingPapers.value.has(paperId)) return false
+  ): Promise<TreeBuildOutcome> {
+    if (!treeEnabled.value) return { ok: false, reason: '语义树总开关已关闭' }
+    if (treeIndexingPapers.value.has(paperId)) return { ok: false, reason: '该论文正在建树中' }
     treeIndexingPapers.value.add(paperId)
     // 递增代次：内容变更后旧任务的结果会被丢弃，避免写入过期树
     const token = (treeBuildTokens.get(paperId) ?? 0) + 1
@@ -616,10 +638,12 @@ export const useChatStore = defineStore('chat', () => {
       if (!pages) {
         const stored = await window.db.index.get(paperId)
         // 没有平面索引就没有可靠原文，不做无根据的建树
-        if (!stored) return false
+        if (!stored) return { ok: false, reason: '缺少可用原文（请先建立索引）' }
         pages = JSON.parse(stored.pagesJson)
       }
-      if (!Array.isArray(pages) || pages.length === 0) return false
+      if (!Array.isArray(pages) || pages.length === 0) {
+        return { ok: false, reason: '缺少可用原文（请先建立索引）' }
+      }
 
       const sourceHash = hashTreeSource(JSON.stringify(pages))
       // 缓存键必须同时覆盖原文与构建配置：只比内容指纹会让提示词/模型/分块的
@@ -629,8 +653,13 @@ export const useChatStore = defineStore('chat', () => {
         // 键相同不等于内容可用：损坏的记录当作没有树，走重建（§13 不猜测修复）
         if (parseTreeRecord(existing, configHash)) {
           markTreeReady(paperId, configHash)
-          return false
+          return { ok: false, reason: '已有可复用的语义树' }
         }
+      }
+
+      // 没配模型就不必发这一次注定失败的请求：直接给出可执行的原因（#13）
+      if (buildProfile.provider !== 'ollama' && !buildProfile.apiKey.trim()) {
+        return { ok: false, reason: '未配置模型（请在设置中填写 API Key）' }
       }
 
       const blocks = buildEvidenceBlocks(pages, TREE_BUILD_CONFIG.evidence)
@@ -641,7 +670,9 @@ export const useChatStore = defineStore('chat', () => {
       })
 
       // 期间发生了重新建树，本次结果已过期
-      if (treeBuildTokens.get(paperId) !== token) return false
+      if (treeBuildTokens.get(paperId) !== token) {
+        return { ok: false, reason: '建树任务已被更新的任务取代' }
+      }
 
       await window.db.tree.set(paperId, {
         treeJson: JSON.stringify(tree),
@@ -656,10 +687,10 @@ export const useChatStore = defineStore('chat', () => {
         buildLatencyMs: meta.latencyMs,
       })
       markTreeReady(paperId, configHash)
-      return true
-    } catch {
+      return { ok: true }
+    } catch (error) {
       // 建树是可选的增强：失败即降级，不向导入/提问路径抛错
-      return false
+      return { ok: false, reason: treeFailureReason(error) }
     } finally {
       treeIndexingPapers.value.delete(paperId)
     }
@@ -685,6 +716,7 @@ export const useChatStore = defineStore('chat', () => {
    * 强制重建所有已索引论文的语义树（设置页的显式路径）。
    * 缓存键已覆盖构建配置，这里服务的是「配置没变但就是想换一棵树」：
    * 只重建树（每篇一次调用），不必连带重跑成本更高的平面索引。逐篇串行，避免同时打出 N 个请求。
+   * 失败篇数之外还回收首个可展示的原因，否则设置页只能报「失败」而说不出为什么（#13）。
    */
   async function rebuildAllTrees(): Promise<TreeRebuildSummary> {
     const summary: TreeRebuildSummary = { attempted: 0, rebuilt: 0, failed: 0, skipped: 0 }
@@ -694,8 +726,12 @@ export const useChatStore = defineStore('chat', () => {
         continue
       }
       summary.attempted++
-      if (await buildPaperTree(paperId, undefined, { force: true })) summary.rebuilt++
-      else summary.failed++
+      const outcome = await buildPaperTree(paperId, undefined, { force: true })
+      if (outcome.ok) summary.rebuilt++
+      else {
+        summary.failed++
+        if (!summary.firstReason && outcome.reason) summary.firstReason = outcome.reason
+      }
     }
     return summary
   }
