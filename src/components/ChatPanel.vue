@@ -17,7 +17,14 @@
         <div class="msg-avatar" :class="{ 'font-display': msg.role === 'assistant' }" aria-hidden="true">{{ msg.role === 'user' ? '你' : 'P' }}</div>
         <div class="msg-body">
           <div v-if="msg.role === 'assistant'" class="msg-author">PaperMind</div>
-          <div class="msg-content" v-html="renderMarkdown(msg.content)" />
+          <div v-if="msg.content" class="msg-content" v-html="renderMarkdown(msg.content)" />
+          <div v-if="msg.error" class="msg-error" role="alert">
+            <div class="msg-error-text">{{ msg.error }}</div>
+            <div class="msg-error-actions">
+              <el-button size="small" :loading="retrying === msg.id" @click="retry(msg)">重试</el-button>
+              <el-button size="small" text @click="router.push('/settings')">打开设置</el-button>
+            </div>
+          </div>
           <div v-if="msg.sources?.length" class="msg-sources">
             <span class="sources-label"><el-icon aria-hidden="true"><Link /></el-icon> 参考来源</span>
             <span v-for="(s, i) in msg.sources" :key="i" class="source-chip">{{ s }}</span>
@@ -72,6 +79,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, Reading, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
@@ -80,6 +88,8 @@ import { renderMarkdown } from '../utils/markdown'
 const props = defineProps<{ conversation: Conversation | null }>()
 defineEmits<{ (e: 'create'): void }>()
 const chatStore = useChatStore()
+const router = useRouter()
+const retrying = ref('')
 
 const input = ref('')
 const inputRef = ref<{ focus: () => void }>()
@@ -121,6 +131,16 @@ function handleEnter(event: KeyboardEvent) {
   send()
 }
 
+async function retry(msg: { id: string }) {
+  if (retrying.value || !props.conversation) return
+  retrying.value = msg.id
+  try {
+    await chatStore.retryMessage(props.conversation.id, msg.id)
+  } finally {
+    retrying.value = ''
+  }
+}
+
 async function send() {
   if (loading.value) return
   if (!input.value.trim() || !props.conversation) {
@@ -137,8 +157,8 @@ async function send() {
   try {
     await chatStore.sendMessage(props.conversation.id, message, context || undefined)
     void chatStore.autoTitleConversation(props.conversation.id)
-  } catch (e: any) {
-    ElMessage.error(`请求失败：${e.message}。请检查设置中的 API 配置。`)
+  } catch {
+    // 失败已由 store 落成气泡级失败态（msg.error）；这里只负责 loading 收尾
   } finally {
     loading.value = false
     await scrollToBottom()
@@ -166,6 +186,9 @@ async function send() {
 .message.user .msg-body { flex: 0 1 auto; max-width: 85%; }
 .msg-author { font-size: 11px; font-weight: 600; color: var(--accent); margin: 5px 0 10px; }
 .msg-content { font-size: 14px; line-height: 1.9; color: var(--text-primary); overflow-wrap: anywhere; }
+.msg-error { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--danger-dim); border-radius: 8px; background: var(--danger-dim); }
+.msg-error-text { font-size: 12px; line-height: 1.7; color: var(--danger); overflow-wrap: anywhere; }
+.msg-error-actions { display: flex; gap: 8px; margin-top: 8px; }
 .message.user .msg-content { background: var(--bg-elevated); border: 1px solid var(--border); padding: 11px 15px; border-radius: 10px 3px 10px 10px; font-size: 13px; line-height: 1.8; }
 .msg-content :deep(code) {
   background: var(--bg-elevated);
