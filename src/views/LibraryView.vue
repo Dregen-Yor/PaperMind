@@ -168,6 +168,13 @@
       </div>
     </transition>
 
+    <transition name="slide-up">
+      <div v-if="pendingDelete" class="undo-bar" role="status">
+        <span>已删除《{{ pendingDelete.paper.title || pendingDelete.paper.fileName }}》</span>
+        <button type="button" class="undo-btn" @click="undoDelete">撤销</button>
+      </div>
+    </transition>
+
     <el-dialog v-model="showNewKbDialog" title="新建知识库" width="400px">
       <el-form :model="newKbForm" label-position="top" size="default">
         <el-form-item label="名称">
@@ -358,9 +365,33 @@ async function removeKb(id: string) {
   if (activeKbId.value === id) activeKbId.value = 'default'
 }
 
+interface PendingDelete { paper: Paper; index: number; timer: number }
+const pendingDelete = ref<PendingDelete | null>(null)
+
 async function deletePaper(paper: Paper) {
   await ElMessageBox.confirm(`确认删除《${paper.title || paper.fileName}》？`, '删除', { type: 'warning' })
-  await store.removePaper(paper.id)
+  const index = store.papers.findIndex(p => p.id === paper.id)
+  if (index === -1) return
+  store.papers.splice(index, 1)            // 先从列表移除，5 秒内可撤销
+  if (pendingDelete.value) finalizeDelete() // 上一个未到期的删除立即落库
+  const timer = window.setTimeout(() => finalizeDelete(), 5000)
+  pendingDelete.value = { paper, index, timer }
+}
+
+function undoDelete() {
+  if (!pendingDelete.value) return
+  clearTimeout(pendingDelete.value.timer)
+  const { paper, index } = pendingDelete.value
+  store.papers.splice(Math.min(index, store.papers.length), 0, paper)
+  pendingDelete.value = null
+}
+
+function finalizeDelete() {
+  if (!pendingDelete.value) return
+  clearTimeout(pendingDelete.value.timer)
+  const { paper } = pendingDelete.value
+  pendingDelete.value = null
+  void store.removePaper(paper.id)
 }
 
 function movePaper(paper: any) {
@@ -617,4 +648,8 @@ function movePaper(paper: any) {
   transform: translateY(16px);
   opacity: 0;
 }
+
+/* ── 删除撤销条 ───────────────────────────────────────── */
+.undo-bar { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 10px 16px; background: var(--text-primary); color: var(--bg-surface); border-radius: 8px; font-size: 13px; z-index: 1000; box-shadow: var(--shadow-card); }
+.undo-btn { border: 0; background: transparent; color: var(--gold); font-size: 13px; font-weight: 600; cursor: pointer; }
 </style>
