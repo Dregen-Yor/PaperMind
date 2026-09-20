@@ -53,6 +53,16 @@ const currentPage = ref(1)
 const totalPages = ref(0)
 const scale = ref(1)
 let fitOnNextRender = true
+let fitMode = true
+let resizeTimer: number | undefined
+const resizeObserver = new ResizeObserver(() => {
+  if (!fitMode) return
+  if (resizeTimer) clearTimeout(resizeTimer)
+  resizeTimer = window.setTimeout(() => {
+    fitOnNextRender = true
+    void renderPdf()
+  }, 150)
+})
 const selectedText = ref('')
 
 let pdfDoc: any = null
@@ -248,14 +258,16 @@ async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
 function prevPage() { if (currentPage.value > 1) scrollToPage(--currentPage.value) }
 function nextPage() { if (currentPage.value < totalPages.value) scrollToPage(++currentPage.value) }
 function fitToWidth() {
+  fitMode = true
   fitOnNextRender = true
   renderPdf()
 }
 
-function zoomIn() { scale.value = Math.min(scale.value + 0.2, 3); renderPdf() }
+function zoomIn() { fitMode = false; scale.value = Math.min(scale.value + 0.2, 3); renderPdf() }
 function zoomOut() {
   const nextScale = Math.max(scale.value - 0.2, 0.1)
   if (nextScale >= scale.value) return
+  fitMode = false
   scale.value = nextScale
   renderPdf()
 }
@@ -347,11 +359,14 @@ onMounted(async () => {
     highlightSegments.push(...stored.map((h: any) => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
   } catch { /* highlights unavailable */ }
   renderPdf()
+  if (scrollRef.value) resizeObserver.observe(scrollRef.value)
   scrollRef.value?.addEventListener('scroll', onScroll)
   containerRef.value?.addEventListener('mouseup', onMouseUp)
 })
 
 onBeforeUnmount(() => {
+  resizeObserver.disconnect()
+  if (resizeTimer) clearTimeout(resizeTimer)
   scrollRef.value?.removeEventListener('scroll', onScroll)
   containerRef.value?.removeEventListener('mouseup', onMouseUp)
 })
