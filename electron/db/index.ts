@@ -3,6 +3,7 @@ import { app } from 'electron'
 import { join } from 'path'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
 import { SCHEMA } from './schema'
+import { normalizeSourceList } from '../../src/utils/sourceRef'
 
 let db: Database.Database
 let papersDir: string
@@ -134,7 +135,7 @@ export const chatApi = {
       paperIds: JSON.parse(c.paper_ids),
       createdAt: c.created_at,
       messages: (db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC').all(c.id) as any[])
-        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: JSON.parse(m.sources), timestamp: m.timestamp, error: m.error ?? '', truncated: !!m.truncated, context: m.context ?? '' })),
+        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: normalizeSourceList(JSON.parse(m.sources)), timestamp: m.timestamp, error: m.error ?? '', truncated: !!m.truncated, context: m.context ?? '' })),
     }))
   },
   createConversation: (conv: { id: string; title: string; paperIds: string[]; createdAt: number }) => {

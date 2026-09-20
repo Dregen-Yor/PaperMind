@@ -14,6 +14,7 @@ import {
   type SemanticTreeBuildConfig,
 } from '../utils/semanticTree'
 import type { PaperTreeRecord } from '../types/db'
+import type { SourceRef } from '../utils/sourceRef'
 import {
   ABSTRACT_MODEL,
   summarizeAcademicText,
@@ -36,7 +37,8 @@ export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources?: string[]
+  /** 结构化来源：芯片文案 + 跳转所需的论文与页区间（#1） */
+  sources?: SourceRef[]
   timestamp: number
   /** 非空表示这一轮失败，渲染失败卡（#2） */
   error?: string
@@ -711,7 +713,7 @@ export const useChatStore = defineStore('chat', () => {
     convId: string,
     role: 'user' | 'assistant',
     content: string,
-    sources?: string[],
+    sources?: SourceRef[],
     extra?: { error?: string; truncated?: boolean; context?: string },
   ) {
     const conv = conversations.value.find(c => c.id === convId)
@@ -729,7 +731,7 @@ export const useChatStore = defineStore('chat', () => {
   async function updateMessage(
     convId: string,
     messageId: string,
-    patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean; context?: string },
+    patch: { content?: string; sources?: SourceRef[]; error?: string; truncated?: boolean; context?: string },
   ) {
     const conv = conversations.value.find(c => c.id === convId)
     const msg = conv?.messages.find(m => m.id === messageId)
@@ -790,12 +792,15 @@ export const useChatStore = defineStore('chat', () => {
     return extractPages(base64)
   }
 
-  async function generateAbstract(conv: Conversation): Promise<{ content: string; sources: string[] }> {
+  /**
+   * `/abstract` 的来源只有论文标题与 id（摘要没有页码，芯片不可跳页）。
+   */
+  async function generateAbstract(conv: Conversation): Promise<{ content: string; sources: SourceRef[] }> {
     if (conv.paperIds.length === 0) throw new Error('请先在当前对话中选择至少一篇论文')
     if (!abstractToken.value) throw new Error('请先在设置中填写 Hugging Face Token')
 
     const sections: string[] = []
-    const sources: string[] = []
+    const sources: SourceRef[] = []
     for (const paperId of conv.paperIds) {
       const [paper, pages] = await Promise.all([
         window.db.paper.get(paperId),
@@ -805,7 +810,7 @@ export const useChatStore = defineStore('chat', () => {
       const text = pages.join('\n\n')
       const summary = await summarizeAcademicText(text, abstractToken.value)
       sections.push(conv.paperIds.length > 1 ? `## ${title}\n\n${summary}` : summary)
-      sources.push(title)
+      sources.push({ label: title, paperId })
     }
 
     return {
@@ -856,8 +861,12 @@ export const useChatStore = defineStore('chat', () => {
     opts?: { writeBack?: string },
   ) {
     let papers: IndexedPaper[] = []
+    // 保留 paperIds：来源 refs 需要「第 i 篇检索结果」对应的论文 id（ids 与 papers 一一对齐）
+    let indexedIds: string[] = []
     if (!context && conv.paperIds.length > 0) {
-      papers = (await collectIndexedPapers(conv)).papers
+      const collected = await collectIndexedPapers(conv)
+      papers = collected.papers
+      indexedIds = collected.paperIds
     }
     // 历史不含当前提问：默认排除最后一条（刚追加的用户消息）；重试时由调用方给 historyEnd
     const history = conv.messages.slice(0, historyEnd ?? -1).map(m => ({ role: m.role, content: m.content }))
@@ -896,7 +905,7 @@ export const useChatStore = defineStore('chat', () => {
         clearStreaming()
       }
     }
-    const { answer, sources } = await runRagPipeline(
+    const result = await runRagPipeline(
       papers,
       userMessage,
       history,
@@ -905,16 +914,28 @@ export const useChatStore = defineStore('chat', () => {
       chatProfile.value.systemPrompt,
       { externalContext: context },
     )
+    // 来源只在这里构造一次，首次提问与重试两条写回分支共用。
+    // `retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐
+    // （两条检索路径都是 `sources = selected.map(formatSource)`），缺件时退化为纯标签。
+    const sourceRefs: SourceRef[] = result.sources.length
+      ? result.retrievals.flatMap((r, i) => r.sources.map((label, j) => {
+          const node = r.selected[j]
+          const paperId = indexedIds[i]
+          return node && paperId
+            ? { label, paperId, startPage: node.startPage, endPage: node.endPage }
+            : { label }
+        }))
+      : []
     // 重试是原地更新失败轮；首次提问才追加新消息
     if (opts?.writeBack) {
       await updateMessage(conv.id, opts.writeBack, {
-        content: answer,
-        sources: sources.length ? sources : undefined,
+        content: result.answer,
+        sources: sourceRefs.length ? sourceRefs : undefined,
         error: '',
         truncated: lastTruncated,
       })
     } else {
-      await addMessage(conv.id, 'assistant', answer, sources.length ? sources : undefined, { truncated: lastTruncated })
+      await addMessage(conv.id, 'assistant', result.answer, sourceRefs.length ? sourceRefs : undefined, { truncated: lastTruncated })
     }
   }
 

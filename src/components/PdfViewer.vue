@@ -230,9 +230,23 @@ function onScroll() {
   }
 }
 
-function scrollToPage(num: number) {
-  const el = pagesRef.value?.querySelector(`[data-page="${num}"]`) as HTMLElement
-  el?.scrollIntoView({ behavior: 'smooth' })
+async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
+  const flash = opts.flash ?? true
+  const pages = pagesRef.value
+  if (!pages) return
+  // 目标页可能尚未渲染完成（首次打开、缩放重排、跨论文跳转），轮询等待而不是静默失败
+  const deadline = Date.now() + 5000
+  let el = pages.querySelector<HTMLElement>(`[data-page="${num}"]`)
+  while (!el && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 60))
+    el = pages.querySelector<HTMLElement>(`[data-page="${num}"]`)
+  }
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth' })
+  if (flash) {
+    el.classList.add('page-flash')
+    setTimeout(() => el.classList.remove('page-flash'), 1400)
+  }
 }
 
 function prevPage() { if (currentPage.value > 1) scrollToPage(--currentPage.value) }
@@ -395,6 +409,11 @@ defineExpose({ scrollToPage })
   border-radius: 1px;
 }
 :deep(.pdf-page canvas) { display: block; }
+:deep(.pdf-page.page-flash) { animation: page-flash 1.4s var(--ease-out); }
+@keyframes page-flash {
+  0% { outline: 3px solid var(--accent); outline-offset: 2px; }
+  100% { outline: 3px solid transparent; outline-offset: 2px; }
+}
 :deep(.text-layer) {
   position: absolute;
   inset: 0;

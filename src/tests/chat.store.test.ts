@@ -230,7 +230,7 @@ describe('useChatStore', () => {
 
     expect(reply).toBe('A transformer paper summary.')
     expect(conv.messages.map(message => message.role)).toEqual(['user', 'assistant'])
-    expect(conv.messages[1].sources).toEqual(['Attention Is All You Need'])
+    expect(conv.messages[1].sources).toEqual([{ label: 'Attention Is All You Need', paperId: 'paper-1' }])
     expect(global.fetch).toHaveBeenCalledOnce()
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api-inference.huggingface.co/models/Bashaarat1/t5-small-arxiv-summarizer',

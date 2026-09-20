@@ -509,7 +509,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '这篇论文的核心机制是什么？')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 机制甲'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 机制甲', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('树已就绪时最终上下文来自原文证据块而非节点描述', async () => {
@@ -531,7 +531,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
 
     expect(answer).toEqual(expect.any(String))
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('语义树关闭时即使有树也走平面检索', async () => {
@@ -541,7 +541,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('持久化的树结构非法时视为不可用，回落到平面检索', async () => {
@@ -560,7 +560,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('schema 版本不匹配的树视为不可用', async () => {
@@ -571,7 +571,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('schema v1 的树视为不可用，回落平面检索', async () => {
@@ -585,7 +585,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('pieces 缺失的 schema v2 记录同样回落平面检索', async () => {
@@ -600,7 +600,7 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 
   it('构建配置变过的树不再用于检索（回落平面）', async () => {
@@ -614,6 +614,6 @@ describe('useChatStore — 查询路径接入与降级（§9）', () => {
     await store.sendMessage(conv.id, '问题')
 
     const assistant = store.conversations[0].messages.at(-1)!
-    expect(assistant.sources).toEqual(['Pages 1–1: 平面标题'])
+    expect(assistant.sources).toEqual([{ label: 'Pages 1–1: 平面标题', paperId: 'p1', startPage: 0, endPage: 0 }])
   })
 })

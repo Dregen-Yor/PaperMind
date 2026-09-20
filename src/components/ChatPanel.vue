@@ -31,7 +31,16 @@
           </div>
           <div v-if="msg.sources?.length" class="msg-sources">
             <span class="sources-label"><el-icon aria-hidden="true"><Link /></el-icon> 参考来源</span>
-            <span v-for="(s, i) in msg.sources" :key="i" class="source-chip">{{ s }}</span>
+            <span
+              v-for="(s, i) in msg.sources"
+              :key="i"
+              class="source-chip"
+              :class="{ 'is-jumpable': isJumpable(s) }"
+              :role="isJumpable(s) ? 'button' : undefined"
+              :tabindex="isJumpable(s) ? 0 : undefined"
+              @click="isJumpable(s) && emit('open-source', s)"
+              @keydown.enter="isJumpable(s) && emit('open-source', s)"
+            >{{ s.label }}</span>
           </div>
         </div>
       </div>
@@ -88,9 +97,10 @@ import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, Reading, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
 import { renderMarkdown } from '../utils/markdown'
+import { isJumpable, type SourceRef } from '../utils/sourceRef'
 
 const props = defineProps<{ conversation: Conversation | null }>()
-defineEmits<{ (e: 'create'): void }>()
+const emit = defineEmits<{ (e: 'create'): void; (e: 'open-source', ref: SourceRef): void }>()
 const chatStore = useChatStore()
 const router = useRouter()
 const retrying = ref('')
@@ -319,6 +329,8 @@ async function send() {
 .msg-truncated { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--gold); }
 .sources-label { display: flex; align-items: center; gap: 4px; margin-right: 4px; }
 .source-chip { background: var(--bg-base); padding: 3px 7px; border-radius: 4px; color: var(--text-secondary); border: 1px solid var(--border); overflow-wrap: anywhere; }
+.source-chip.is-jumpable { cursor: pointer; }
+.source-chip.is-jumpable:hover { border-color: var(--accent); color: var(--accent); }
 .typing { padding: 10px 0; display: flex; gap: 5px; width: fit-content; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.45; animation: pulse 1.3s infinite; }
 .typing span:nth-child(2) { animation-delay: 0.2s; }
