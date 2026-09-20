@@ -46,6 +46,7 @@ const mockDb = {
   },
   data: {
     export: vi.fn().mockResolvedValue({}),
+    exportFile: vi.fn().mockResolvedValue({ canceled: false, filePath: '/tmp/papermind-backup-test.json' }),
     clear: vi.fn().mockResolvedValue(undefined),
     import: vi.fn().mockResolvedValue(undefined),
   },

@@ -127,7 +127,7 @@
         <h3>数据管理</h3>
         <p class="card-desc">所有论文与对话数据存储在本地，可随时导出备份。</p>
         <div class="action-row">
-          <el-button @click="exportData">导出数据</el-button>
+          <el-button @click="exportDialogVisible = true">导出数据</el-button>
           <el-button @click="triggerImport">导入数据</el-button>
           <el-button type="danger" plain @click="clearData">清空所有数据</el-button>
         </div>
@@ -139,6 +139,16 @@
           @change="onImportFile"
         />
       </section>
+
+      <!-- ── 导出备份 Dialog ── -->
+      <el-dialog v-model="exportDialogVisible" title="导出备份" width="460px">
+        <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、对话与消息、高亮、索引与语义树、全部设置。</p>
+        <el-checkbox v-model="exportIncludeApiKey">包含 API Key（明文，分享前请谨慎）</el-checkbox>
+        <template #footer>
+          <el-button @click="exportDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="exporting" @click="doExport">导出</el-button>
+        </template>
+      </el-dialog>
 
       <!-- ── 关于 ── -->
       <section class="settings-card about">
@@ -352,14 +362,25 @@ function onProviderChange() {
 }
 
 // ── Data management ──
-async function exportData() {
-  const data = await window.db.data.export()
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `papermind-backup-${Date.now()}.json`
-  a.click()
-  ElMessage.success('已导出')
+const exportDialogVisible = ref(false)
+const exportIncludeApiKey = ref(false)
+const exporting = ref(false)
+
+async function doExport() {
+  exporting.value = true
+  try {
+    const result = await window.db.data.exportFile({ includeApiKey: exportIncludeApiKey.value })
+    if (result.canceled) {
+      ElMessage.info('已取消导出')
+      return
+    }
+    ElMessage.success(`已导出到 ${result.filePath}`)
+    exportDialogVisible.value = false
+  } catch (err) {
+    ElMessage.error(`导出失败：${err instanceof Error ? err.message : '未知错误'}`)
+  } finally {
+    exporting.value = false
+  }
 }
 
 const importInput = ref<HTMLInputElement>()

@@ -35,6 +35,7 @@ const db = {
   },
   data: {
     export: () => ipcRenderer.invoke('data:export'),
+    exportFile: (options: unknown) => ipcRenderer.invoke('data:export-file', options),
     clear: () => ipcRenderer.invoke('data:clear'),
     import: (data: unknown) => ipcRenderer.invoke('data:import', data),
   },

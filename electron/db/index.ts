@@ -4,6 +4,7 @@ import { join } from 'path'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
 import { SCHEMA } from './schema'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
+import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 
 let db: Database.Database
 let papersDir: string
@@ -282,12 +283,14 @@ export const treeApi = {
   remove: (paperId: string) => db.prepare('DELETE FROM paper_trees WHERE paper_id = ?').run(paperId),
 }
 
-export function exportAll() {
+/** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
+export function exportAll(opts: { includeApiKey?: boolean } = {}) {
   const paperRows = db.prepare('SELECT * FROM papers ORDER BY added_at DESC').all() as any[]
   const papers = paperRows.map(row => ({
     ...deserializePaper(row),
     fileData: existsSync(row.file_path) ? readFileSync(row.file_path).toString('base64') : null,
   }))
+  const settingsRows = db.prepare('SELECT * FROM settings').all() as Array<{ key: string; value: string }>
   return {
     version: 1,
     exportedAt: Date.now(),
@@ -297,7 +300,7 @@ export function exportAll() {
     highlights: db.prepare('SELECT * FROM highlights').all(),
     paperIndexes: db.prepare('SELECT paper_id, index_json, pages_json FROM paper_indexes').all(),
     paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
-    settings: db.prepare('SELECT * FROM settings').all(),
+    settings: opts.includeApiKey ? settingsRows : stripApiKeysFromSettings(settingsRows),
   }
 }
 

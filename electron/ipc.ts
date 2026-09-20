@@ -1,5 +1,8 @@
-import { ipcMain } from 'electron'
+import { app, dialog, ipcMain } from 'electron'
+import { writeFileSync } from 'fs'
+import { join } from 'path'
 import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, exportAll, clearAll, importAll } from './db'
+import { backupFileName } from '../src/utils/exportSanitize'
 
 // Register all IPC handlers. Each channel maps to a db api call.
 // Renderer invokes via window.db.* (see preload.ts).
@@ -33,6 +36,16 @@ export function registerIpc() {
     'settings:set': (_e, key, value) => settingsApi.set(key, value),
     // data management
     'data:export': () => exportAll(),
+    'data:export-file': async (_e, opts?: { includeApiKey?: boolean }) => {
+      const { canceled, filePath } = await dialog.showSaveDialog({
+        title: '导出备份',
+        defaultPath: join(app.getPath('downloads'), backupFileName(new Date())),
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      })
+      if (canceled || !filePath) return { canceled: true }
+      writeFileSync(filePath, JSON.stringify(exportAll({ includeApiKey: !!opts?.includeApiKey }), null, 2))
+      return { canceled: false, filePath }
+    },
     'data:clear': () => clearAll(),
     'data:import': (_e, data) => importAll(data),
     // paper indexes (PageIndex RAG)

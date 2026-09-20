@@ -33,6 +33,8 @@ export interface DbApi {
   }
   data: {
     export: () => Promise<any>
+    /** 主进程弹系统保存对话框写盘；默认不含明文 API Key（#5）。 */
+    exportFile: (options: { includeApiKey?: boolean }) => Promise<{ canceled: boolean; filePath?: string }>
     clear: () => Promise<void>
     import: (data: any) => Promise<void>
   }
