@@ -44,6 +44,8 @@ export interface Message {
   truncated?: boolean
   /** 用户划选原文（externalContext）：重试时按原上下文重放，不退回检索（#2） */
   context?: string
+  /** 流式渲染中的占位气泡标记（仅内存态，不落库）（#6） */
+  streaming?: boolean
 }
 
 export interface Conversation {
@@ -135,6 +137,99 @@ const PROMPT_TEMPLATES = [
 ]
 
 export { PROMPT_TEMPLATES }
+
+/** 流式请求整体上限（#6）：流式回答比非流式长，给更宽的预算。 */
+const LLM_STREAM_TIMEOUT_MS = 300_000
+
+/** 解析 OpenAI 兼容 SSE 流：增量回调 + 末尾 finish_reason（#6）。 */
+async function readOpenAiStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+  if (!res.body) throw new Error('流式响应不可用')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      let parsed: any
+      try { parsed = JSON.parse(payload) } catch { continue }
+      const delta = parsed.choices?.[0]?.delta?.content
+      if (typeof delta === 'string' && delta) { content += delta; onToken(delta) }
+      if (parsed.choices?.[0]?.finish_reason === 'length') truncated = true
+    }
+  }
+  if (!content.trim()) throw new Error('模型返回了空响应')
+  return { content, truncated }
+}
+
+/** 解析 Anthropic SSE 流（content_block_delta / message_delta）（#6）。 */
+async function readAnthropicStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+  if (!res.body) throw new Error('流式响应不可用')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      let parsed: any
+      try { parsed = JSON.parse(trimmed.slice(5).trim()) } catch { continue }
+      if (parsed.type === 'content_block_delta' && typeof parsed.delta?.text === 'string') {
+        content += parsed.delta.text
+        onToken(parsed.delta.text)
+      }
+      if (parsed.type === 'message_delta' && parsed.delta?.stop_reason === 'max_tokens') truncated = true
+    }
+  }
+  if (!content.trim()) throw new Error('模型返回了空响应')
+  return { content, truncated }
+}
+
+/** 解析 Ollama NDJSON 流（#6）。 */
+async function readOllamaStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+  if (!res.body) throw new Error('流式响应不可用')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let parsed: any
+      try { parsed = JSON.parse(trimmed) } catch { continue }
+      if (typeof parsed.message?.content === 'string' && parsed.message.content) {
+        content += parsed.message.content
+        onToken(parsed.message.content)
+      }
+      if (parsed.done && parsed.done_reason === 'length') truncated = true
+    }
+  }
+  if (!content.trim()) throw new Error('模型返回了空响应')
+  return { content, truncated }
+}
 
 export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([])
@@ -295,14 +390,15 @@ export const useChatStore = defineStore('chat', () => {
     const profile = resolveLlmProfile(profileOrId)
 
     if (profile.provider === 'ollama') {
-      const body: Record<string, unknown> = { model: profile.model, messages, stream: false }
+      const body: Record<string, unknown> = { model: profile.model, messages, stream: !!opts.onToken }
       if (profile.topK > 0) body.options = { top_k: profile.topK }
       const res = await requestWithTimeout(`${profile.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }, LLM_REQUEST_TIMEOUT_MS)
+      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+      if (opts.onToken) return readOllamaStream(res, opts.onToken)
       const data = await res.json()
       if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
       return { content: data.message.content, truncated: data.done_reason === 'length' }
@@ -323,6 +419,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       if (system) body.system = system
       if (profile.topK > 0) body.top_k = profile.topK
+      if (opts.onToken) body.stream = true
 
       const res = await requestWithTimeout(`${profile.baseUrl}/v1/messages`, {
         method: 'POST',
@@ -332,8 +429,9 @@ export const useChatStore = defineStore('chat', () => {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(body),
-      }, LLM_REQUEST_TIMEOUT_MS)
+      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+      if (opts.onToken) return readAnthropicStream(res, opts.onToken)
       const data = await res.json()
       const content = data.content?.[0]?.text
       if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
@@ -349,14 +447,16 @@ export const useChatStore = defineStore('chat', () => {
       messages,
       temperature: profile.temperature,
       max_tokens: profile.maxTokens,
+      ...(opts.onToken ? { stream: true } : {}),
     }
 
     const res = await requestWithTimeout(`${profile.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-    }, LLM_REQUEST_TIMEOUT_MS)
+    }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+    if (opts.onToken) return readOpenAiStream(res, opts.onToken)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
     if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
@@ -763,10 +863,38 @@ export const useChatStore = defineStore('chat', () => {
     const history = conv.messages.slice(0, historyEnd ?? -1).map(m => ({ role: m.role, content: m.content }))
     // 生成回调负责把 finish_reason 带回来：截断的回答要能提示「已达长度上限」并续写（#3）
     let lastTruncated = false
+    let placeholder: Message | undefined
+    // 重试是原地更新目标消息：直接把它当流式气泡，失败卡先撤下（错误态由外层 catch 兜底写回）
+    const target = opts?.writeBack ? conv.messages.find(m => m.id === opts.writeBack) : undefined
+    const clearStreaming = () => {
+      if (placeholder) {
+        const at = conv.messages.indexOf(placeholder)
+        if (at !== -1) conv.messages.splice(at, 1)
+        placeholder = undefined
+      }
+      if (target) target.streaming = false
+    }
     const generate = async (msgs: { role: string; content: string }[]) => {
-      const outcome = await requestCompletion(msgs)
-      lastTruncated = outcome.truncated
-      return outcome.content
+      let sink: Message
+      if (target) {
+        target.content = ''
+        target.error = ''
+        target.streaming = true
+        sink = target
+      } else {
+        conv.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: '', timestamp: Date.now(), streaming: true })
+        // 从数组读回响应式代理再写入：直接改本地原始对象不经代理，逐 token 不会触发渲染
+        placeholder = conv.messages[conv.messages.length - 1]
+        sink = placeholder
+      }
+      try {
+        // 流式增量直接写进气泡；成功后仍走各自的写回分支一次性落库
+        const outcome = await requestCompletion(msgs, undefined, { onToken: token => { sink.content += token } })
+        lastTruncated = outcome.truncated
+        return outcome.content
+      } finally {
+        clearStreaming()
+      }
     }
     const { answer, sources } = await runRagPipeline(
       papers,

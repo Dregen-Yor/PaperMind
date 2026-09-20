@@ -10,9 +10,33 @@ import ChatPanel from '../components/ChatPanel.vue'
 import { useChatStore, type Conversation } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
+/** 非流式回答（`continueMessage` 仍走非流式请求）。 */
 const llm = (content: string, finishReason = 'stop') => ({
   ok: true,
   json: () => Promise.resolve({ choices: [{ message: { content }, finish_reason: finishReason }] }),
+})
+/** 生成阶段走流式（#6）：OpenAI 兼容 SSE 的分块回答。 */
+const sse = (chunks: string[], finishReason = 'stop') => {
+  const body = chunks.map(c => `data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`).join('')
+    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`
+    + 'data: [DONE]\n\n'
+  return { ok: true, status: 200, body: new Response(body).body }
+}
+const anthropicSse = (text: string, stopReason = 'end_turn') => ({
+  ok: true,
+  status: 200,
+  body: new Response(
+    `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text } })}\n\n`
+    + `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: stopReason } })}\n\n`,
+  ).body,
+})
+const ollamaSse = (text: string, doneReason = 'stop') => ({
+  ok: true,
+  status: 200,
+  body: new Response(
+    `${JSON.stringify({ message: { content: text } })}\n`
+    + `${JSON.stringify({ done: true, done_reason: doneReason })}\n`,
+  ).body,
 })
 
 describe('截断与继续（#3）', () => {
@@ -26,7 +50,7 @@ describe('截断与继续（#3）', () => {
   })
 
   it('finish_reason=length 标记 truncated 并落库', async () => {
-    global.fetch = vi.fn().mockResolvedValue(llm('半截回答', 'length')) as any
+    global.fetch = vi.fn().mockResolvedValue(sse(['半截回答'], 'length')) as any
     const store = useChatStore()
     await store.init()
     const conv = await store.newConversation('t', [])
@@ -65,10 +89,7 @@ describe('截断与继续（#3）', () => {
   })
 
   it('anthropic 的 stop_reason=max_tokens 同样标记截断', async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ content: [{ type: 'text', text: '半截回答' }], stop_reason: 'max_tokens' }),
-    }) as any
+    global.fetch = vi.fn().mockResolvedValue(anthropicSse('半截回答', 'max_tokens')) as any
     const store = useChatStore()
     await store.init()
     await store.updateProfile(store.chatProfile.id, {
@@ -82,10 +103,7 @@ describe('截断与继续（#3）', () => {
   })
 
   it('ollama 的 done_reason=length 同样标记截断', async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ message: { content: '半截回答' }, done_reason: 'length' }),
-    }) as any
+    global.fetch = vi.fn().mockResolvedValue(ollamaSse('半截回答', 'length')) as any
     const store = useChatStore()
     await store.init()
     await store.updateProfile(store.chatProfile.id, {
@@ -109,7 +127,7 @@ describe('截断与继续（#3）', () => {
     await expect(store.sendMessage(conv.id, '问题')).rejects.toThrow('LLM 请求失败 (401)')
     const failed = conv.messages.find(m => m.role === 'assistant')!
 
-    global.fetch = vi.fn().mockResolvedValue(llm('半截回答', 'length')) as any
+    global.fetch = vi.fn().mockResolvedValue(sse(['半截回答'], 'length')) as any
     await store.retryMessage(conv.id, failed.id)
 
     expect(failed.error).toBe('')

@@ -17,7 +17,7 @@
         <div class="msg-avatar" :class="{ 'font-display': msg.role === 'assistant' }" aria-hidden="true">{{ msg.role === 'user' ? '你' : 'P' }}</div>
         <div class="msg-body">
           <div v-if="msg.role === 'assistant'" class="msg-author">PaperMind</div>
-          <div v-if="msg.content" class="msg-content" v-html="renderMarkdown(msg.content)" />
+          <div v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" v-html="renderMarkdown(msg.content)" />
           <div v-if="msg.error" class="msg-error" role="alert">
             <div class="msg-error-text">{{ msg.error }}</div>
             <div class="msg-error-actions">
@@ -36,7 +36,7 @@
         </div>
       </div>
 
-      <div v-if="loading" class="message assistant">
+      <div v-if="loading && !hasStreamingBubble" class="message assistant">
         <div class="msg-avatar font-display" aria-hidden="true">P</div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
@@ -111,6 +111,8 @@ function choosePrompt(question: string) {
 const loading = ref(false)
 const messagesRef = ref<HTMLElement>()
 const pendingContext = ref<string[]>([])
+/** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
+const hasStreamingBubble = computed(() => props.conversation?.messages.some(m => m.streaming) ?? false)
 const showAbstractCommand = computed(() => {
   const value = input.value.trim().toLowerCase()
   return value.startsWith('/') && '/abstract'.startsWith(value) && value !== '/abstract'
@@ -127,6 +129,10 @@ async function scrollToBottom() {
 }
 
 watch(() => props.conversation?.messages.length, scrollToBottom)
+// 流式增量不改变消息条数，按末条消息的内容长度跟随滚动
+watch(() => props.conversation?.messages.at(-1)?.content.length ?? 0, () => {
+  if (loading.value) scrollToBottom()
+})
 
 function handleEnter(event: KeyboardEvent) {
   // Enter confirms the current candidate while an IME is composing. It must
@@ -209,6 +215,8 @@ async function send() {
 .message.user .msg-body { flex: 0 1 auto; max-width: 85%; }
 .msg-author { font-size: 11px; font-weight: 600; color: var(--accent); margin: 5px 0 10px; }
 .msg-content { font-size: 14px; line-height: 1.9; color: var(--text-primary); overflow-wrap: anywhere; }
+.msg-content.is-streaming::after { content: '▍'; margin-left: 2px; color: var(--accent); animation: caret-blink 1s steps(2) infinite; }
+@keyframes caret-blink { 50% { opacity: 0; } }
 .msg-error { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--danger-dim); border-radius: 8px; background: var(--danger-dim); }
 .msg-error-text { font-size: 12px; line-height: 1.7; color: var(--danger); overflow-wrap: anywhere; }
 .msg-error-actions { display: flex; gap: 8px; margin-top: 8px; }

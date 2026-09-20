@@ -10,6 +10,19 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 
 import { useChatStore } from '../stores/chat'
 
+/** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
+const sse = (chunks: string[], finishReason = 'stop') => {
+  const body = chunks.map(c => `data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`).join('')
+    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`
+    + 'data: [DONE]\n\n'
+  return { ok: true, status: 200, body: new Response(body).body }
+}
+/** 检索/改写/索引仍是非流式：body 里带 stream 的请求才是生成（#6）。 */
+const streamingFetch = (jsonBody: unknown) => vi.fn().mockImplementation((_url: string, init: any) => {
+  if (JSON.parse(init.body).stream) return Promise.resolve(sse(['Answer']))
+  return Promise.resolve({ ok: true, json: () => Promise.resolve(jsonBody) })
+})
+
 describe('useChatStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -118,10 +131,7 @@ describe('useChatStore', () => {
   })
 
   it('sendMessage calls LLM and appends both messages', async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ choices: [{ message: { content: 'Answer' } }] }),
-    }) as any
+    global.fetch = vi.fn().mockResolvedValue(sse(['Answer'])) as any
     const store = useChatStore()
     await store.init()
     await store.updateProfile(store.chatProfile.id, { apiKey: 'sk-test' })
@@ -137,10 +147,7 @@ describe('useChatStore', () => {
     let callCount = 0
     global.fetch = vi.fn().mockImplementation(() => {
       callCount++
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ choices: [{ message: { content: 'Answer' } }] }),
-      })
+      return Promise.resolve(sse(['Answer']))
     }) as any
 
     ;(globalThis as any).mockDb.index.get.mockResolvedValue({
@@ -165,14 +172,12 @@ describe('useChatStore', () => {
   it('sendMessage calls query rewriting when conversation has prior history (3 LLM calls total)', async () => {
     // 多节点 index，有历史时应触发改写：改写(1) + 评分(1) + 回答(1) = 3次
     let callCount = 0
-    global.fetch = vi.fn().mockImplementation(() => {
+    const scoreJson = { choices: [{ message: { content: '[{"id":0,"score":9},{"id":1,"score":2}]' } }] }
+    global.fetch = vi.fn().mockImplementation((_url: string, init: any) => {
       callCount++
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: '[{"id":0,"score":9},{"id":1,"score":2}]' } }],
-        }),
-      })
+      // 只有生成请求带 stream；改写与评分仍是 JSON 响应
+      if (JSON.parse(init.body).stream) return Promise.resolve(sse(['Answer']))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(scoreJson) })
     }) as any
 
     ;(globalThis as any).mockDb.index.get.mockResolvedValue({
@@ -273,7 +278,10 @@ describe('useChatStore', () => {
       ok: true,
       status: 200,
       statusText: 'OK',
-      json: () => Promise.resolve({ content: [{ type: 'text', text: 'Bonjour' }] }),
+      body: new Response(
+        `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Bonjour' } })}\n\n`
+        + `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' } })}\n\n`,
+      ).body,
     }) as any
     const store = useChatStore()
     await store.init()

@@ -29,6 +29,14 @@ const llmReply = (content: string) => ({
   json: () => Promise.resolve({ choices: [{ message: { content } }] }),
 })
 
+/** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
+const sseReply = (content: string) => {
+  const body = `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`
+    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`
+    + 'data: [DONE]\n\n'
+  return { ok: true, status: 200, body: new Response(body).body }
+}
+
 const VALID_TREE = JSON.stringify({
   root: {
     id: 'r', label: '核心主张', description: '论文的中心结论', relationToParent: null,
@@ -40,10 +48,12 @@ const VALID_TREE = JSON.stringify({
   },
 })
 
-/** 按 prompt 内容区分「平面索引」与「语义建树」两类 LLM 请求。 */
+/** 按 prompt 内容区分「平面索引」与「语义建树」两类 LLM 请求；带 stream 的是流式生成（#6）。 */
 function fakeFetch() {
   return vi.fn().mockImplementation((_url: string, init: any) => {
-    const prompt: string = JSON.parse(init.body).messages[0].content
+    const payload = JSON.parse(init.body)
+    if (payload.stream) return Promise.resolve(sseReply('Answer'))
+    const prompt: string = payload.messages[0].content
     if (prompt.includes('轻量语义导航树')) return Promise.resolve(llmReply(VALID_TREE))
     // 候选 = 语义节点 [0..n-1] + 平面叶节点，必须全覆盖否则判为 incomplete-score-coverage
     if (prompt.includes('用户问题：')) return Promise.resolve(llmReply('[{"id":0,"score":3},{"id":1,"score":9},{"id":2,"score":1}]'))

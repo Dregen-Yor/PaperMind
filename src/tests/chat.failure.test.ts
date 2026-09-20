@@ -9,14 +9,15 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 import { useChatStore } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
-const llmOk = (content: string) => ({
-  ok: true,
-  json: () => Promise.resolve({ choices: [{ message: { content }, finish_reason: 'stop' }] }),
-})
-const llmEmpty = () => ({
-  ok: true,
-  json: () => Promise.resolve({ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }),
-})
+/** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
+const sse = (chunks: string[], finishReason = 'stop') => {
+  const body = chunks.map(c => `data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`).join('')
+    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`
+    + 'data: [DONE]\n\n'
+  return { ok: true, status: 200, body: new Response(body).body }
+}
+const llmOk = (content: string) => sse([content])
+const llmEmpty = () => sse([])
 const llm401 = () => ({
   ok: false, status: 401, statusText: 'Unauthorized',
   json: () => Promise.resolve({ error: { message: "You didn't provide an API key" } }),
