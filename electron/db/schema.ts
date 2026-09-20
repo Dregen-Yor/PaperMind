@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS messages (
   role            TEXT NOT NULL,
   content         TEXT NOT NULL,
   sources         TEXT DEFAULT '[]',     -- JSON array
+  error       TEXT DEFAULT '',          -- 失败态标记：非空即渲染失败卡（#2）
+  truncated   INTEGER DEFAULT 0,        -- finish_reason=length 截断标记（#3）
   timestamp       INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );

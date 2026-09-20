@@ -19,6 +19,7 @@ export interface DbApi {
     updateConversation: (id: string, patch: any) => Promise<void>
     removeConversation: (id: string) => Promise<void>
     addMessage: (msg: any) => Promise<void>
+    updateMessage: (id: string, patch: any) => Promise<void>
   }
   highlight: {
     listByPaper: (paperId: string) => Promise<any[]>

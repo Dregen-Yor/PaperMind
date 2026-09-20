@@ -21,6 +21,7 @@ const db = {
     updateConversation: (id: string, patch: unknown) => ipcRenderer.invoke('chat:updateConversation', id, patch),
     removeConversation: (id: string) => ipcRenderer.invoke('chat:removeConversation', id),
     addMessage: (msg: unknown) => ipcRenderer.invoke('chat:addMessage', msg),
+    updateMessage: (id: string, patch: unknown) => ipcRenderer.invoke('chat:updateMessage', id, patch),
   },
   highlight: {
     listByPaper: (paperId: string) => ipcRenderer.invoke('highlight:listByPaper', paperId),

@@ -21,6 +21,7 @@ const mockDb = {
     updateConversation: vi.fn().mockResolvedValue(undefined),
     removeConversation: vi.fn().mockResolvedValue(undefined),
     addMessage: vi.fn().mockResolvedValue(undefined),
+    updateMessage: vi.fn().mockResolvedValue(undefined),
   },
   highlight: {
     listByPaper: vi.fn().mockResolvedValue([]),

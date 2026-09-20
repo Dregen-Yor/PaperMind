@@ -28,6 +28,11 @@ export function initDb() {
   const treeCols = (db.prepare('PRAGMA table_info(paper_trees)').all() as Array<{ name: string }>).map(c => c.name)
   if (!treeCols.includes('build_config_hash')) db.exec("ALTER TABLE paper_trees ADD COLUMN build_config_hash TEXT DEFAULT ''")
 
+  // 消息失败/截断标记（#2/#3，2026-09-21）
+  const messageCols = (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).map(c => c.name)
+  if (!messageCols.includes('error')) db.exec("ALTER TABLE messages ADD COLUMN error TEXT DEFAULT ''")
+  if (!messageCols.includes('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER DEFAULT 0')
+
   // Seed default knowledge base
   const count = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
   if (count === 0) {
@@ -128,7 +133,7 @@ export const chatApi = {
       paperIds: JSON.parse(c.paper_ids),
       createdAt: c.created_at,
       messages: (db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC').all(c.id) as any[])
-        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: JSON.parse(m.sources), timestamp: m.timestamp })),
+        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: JSON.parse(m.sources), timestamp: m.timestamp, error: m.error ?? '', truncated: !!m.truncated })),
     }))
   },
   createConversation: (conv: { id: string; title: string; paperIds: string[]; createdAt: number }) => {
@@ -143,9 +148,21 @@ export const chatApi = {
       .run(patch.title ?? cur.title, patch.paperIds ? JSON.stringify(patch.paperIds) : cur.paper_ids, id)
   },
   removeConversation: (id: string) => db.prepare('DELETE FROM conversations WHERE id = ?').run(id),
-  addMessage: (msg: { id: string; conversationId: string; role: string; content: string; sources: string[]; timestamp: number }) => {
-    db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, timestamp) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.timestamp)
+  addMessage: (msg: { id: string; conversationId: string; role: string; content: string; sources: string[]; timestamp: number; error?: string; truncated?: boolean }) => {
+    db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.error ?? '', msg.truncated ? 1 : 0, msg.timestamp)
+  },
+  updateMessage: (id: string, patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean }) => {
+    const cur = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as any
+    if (!cur) return
+    db.prepare('UPDATE messages SET content = ?, sources = ?, error = ?, truncated = ? WHERE id = ?')
+      .run(
+        patch.content ?? cur.content,
+        patch.sources !== undefined ? JSON.stringify(patch.sources) : cur.sources,
+        patch.error !== undefined ? patch.error : (cur.error ?? ''),
+        patch.truncated !== undefined ? (patch.truncated ? 1 : 0) : (cur.truncated ?? 0),
+        id,
+      )
   },
 }
 

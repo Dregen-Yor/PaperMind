@@ -22,6 +22,7 @@ export function registerIpc() {
     'chat:updateConversation': (_e, id, patch) => chatApi.updateConversation(id, patch),
     'chat:removeConversation': (_e, id) => chatApi.removeConversation(id),
     'chat:addMessage': (_e, msg) => chatApi.addMessage(msg),
+    'chat:updateMessage': (_e, id, patch) => chatApi.updateMessage(id, patch),
     // highlights
     'highlight:listByPaper': (_e, paperId) => highlightApi.listByPaper(paperId),
     'highlight:create': (_e, h) => highlightApi.create(h),

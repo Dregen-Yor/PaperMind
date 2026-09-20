@@ -38,6 +38,10 @@ export interface Message {
   content: string
   sources?: string[]
   timestamp: number
+  /** 非空表示这一轮失败，渲染失败卡（#2） */
+  error?: string
+  /** finish_reason=length：回答被截断（#3） */
+  truncated?: boolean
 }
 
 export interface Conversation {
@@ -47,6 +51,9 @@ export interface Conversation {
   messages: Message[]
   createdAt: number
 }
+
+/** 单次 LLM 请求上限：超时即失败，避免无声挂死（#2）。 */
+const LLM_REQUEST_TIMEOUT_MS = 120_000
 
 const DEFAULT_PROFILE: LLMProfile = {
   id: 'default',
@@ -271,10 +278,11 @@ export const useChatStore = defineStore('chat', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
       })
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       const data = await res.json()
-      if (typeof data.message?.content !== 'string') throw new Error('Ollama 未返回有效响应')
+      if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
       return data.message.content
     }
 
@@ -302,11 +310,12 @@ export const useChatStore = defineStore('chat', () => {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
       })
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       const data = await res.json()
       const content = data.content?.[0]?.text
-      if (typeof content !== 'string') throw new Error('Anthropic 未返回有效响应')
+      if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
       return content
     }
 
@@ -325,11 +334,12 @@ export const useChatStore = defineStore('chat', () => {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
     })
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
-    if (typeof content !== 'string') throw new Error('LLM 未返回有效响应')
+    if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
     return content
   }
 
@@ -569,12 +579,35 @@ export const useChatStore = defineStore('chat', () => {
     return conv
   }
 
-  async function addMessage(convId: string, role: 'user' | 'assistant', content: string, sources?: string[]) {
+  async function addMessage(
+    convId: string,
+    role: 'user' | 'assistant',
+    content: string,
+    sources?: string[],
+    extra?: { error?: string; truncated?: boolean },
+  ) {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) return
-    const msg: Message = { id: crypto.randomUUID(), role, content, sources, timestamp: Date.now() }
+    if (role === 'assistant' && !content.trim() && !extra?.error) throw new Error('拒绝写入空回答')
+    const msg: Message = { id: crypto.randomUUID(), role, content, sources, timestamp: Date.now(), ...extra }
     conv.messages.push(msg)
-    await window.db.chat.addMessage({ id: msg.id, conversationId: convId, role, content, sources: sources ?? [], timestamp: msg.timestamp })
+    await window.db.chat.addMessage({
+      id: msg.id, conversationId: convId, role, content,
+      sources: sources ?? [], timestamp: msg.timestamp,
+      error: extra?.error, truncated: extra?.truncated,
+    })
+  }
+
+  async function updateMessage(
+    convId: string,
+    messageId: string,
+    patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean },
+  ) {
+    const conv = conversations.value.find(c => c.id === convId)
+    const msg = conv?.messages.find(m => m.id === messageId)
+    if (!conv || !msg) return
+    Object.assign(msg, patch)
+    await window.db.chat.updateMessage(messageId, patch)
   }
 
   async function removeConversation(id: string) {
@@ -655,44 +688,45 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---------- Send Message (RAG 3-call pipeline) ----------
 
-  async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
-    const conv = conversations.value.find(c => c.id === convId)
-    if (!conv) throw new Error('Conversation not found')
-
-    await addMessage(convId, 'user', userMessage)
-
-    if (userMessage.trim().toLowerCase() === '/abstract') {
-      const result = await generateAbstract(conv)
-      await addMessage(convId, 'assistant', result.content, result.sources)
-      return result.content
-    }
-
-    // 收集已建索引的论文（缺失时兜底即时构建）
+  async function collectIndexedPapers(conv: Conversation): Promise<{ papers: IndexedPaper[]; paperIds: string[] }> {
     const papers: IndexedPaper[] = []
-    if (!context && conv.paperIds.length > 0) {
-      for (const paperId of conv.paperIds) {
-        let stored = await window.db.index.get(paperId)
-        // 兜底：导入时后台预处理未完成（LLM未配置等），首次对话时按需构建
-        if (!stored) {
-          try {
-            await indexPaper(paperId)
-            stored = await window.db.index.get(paperId)
-          } catch { /* ignore — no index available for this paper */ }
-        }
-        if (!stored) continue
-        // 语义树就绪则一并挂上，由 runRagPipeline 单轮路由；否则该篇走平面路径
-        const semantic = await loadSemanticIndex(paperId)
-        papers.push({
-          tree: JSON.parse(stored.indexJson),
-          pages: JSON.parse(stored.pagesJson),
-          ...(semantic ? { semantic } : {}),
-        })
+    const paperIds: string[] = []
+    for (const paperId of conv.paperIds) {
+      let stored = await window.db.index.get(paperId)
+      // 兜底：导入时后台预处理未完成（LLM未配置等），首次对话时按需构建
+      if (!stored) {
+        try {
+          await indexPaper(paperId)
+          stored = await window.db.index.get(paperId)
+        } catch { /* ignore — no index available for this paper */ }
       }
+      if (!stored) continue
+      const semantic = await loadSemanticIndex(paperId)
+      papers.push({
+        tree: JSON.parse(stored.indexJson),
+        pages: JSON.parse(stored.pagesJson),
+        ...(semantic ? { semantic } : {}),
+      })
+      paperIds.push(paperId)
     }
+    return { papers, paperIds }
+  }
 
-    // 历史不含刚追加的当前提问
-    const history = conv.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+  function errorMessageOf(error: unknown): string {
+    return error instanceof Error ? error.message : '未知错误'
+  }
 
+  async function recordFailure(convId: string, error: unknown) {
+    await addMessage(convId, 'assistant', '', undefined, { error: errorMessageOf(error) })
+  }
+
+  async function generateReply(conv: Conversation, userMessage: string, context?: string, historyEnd?: number) {
+    let papers: IndexedPaper[] = []
+    if (!context && conv.paperIds.length > 0) {
+      papers = (await collectIndexedPapers(conv)).papers
+    }
+    // 历史不含当前提问：默认排除最后一条（刚追加的用户消息）；重试时由调用方给 historyEnd
+    const history = conv.messages.slice(0, historyEnd ?? -1).map(m => ({ role: m.role, content: m.content }))
     const { answer, sources } = await runRagPipeline(
       papers,
       userMessage,
@@ -702,9 +736,62 @@ export const useChatStore = defineStore('chat', () => {
       chatProfile.value.systemPrompt,
       { externalContext: context },
     )
+    await addMessage(conv.id, 'assistant', answer, sources.length ? sources : undefined)
+  }
 
-    await addMessage(convId, 'assistant', answer, sources.length ? sources : undefined)
-    return answer
+  async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
+    const conv = conversations.value.find(c => c.id === convId)
+    if (!conv) throw new Error('Conversation not found')
+
+    await addMessage(convId, 'user', userMessage)
+
+    try {
+      if (userMessage.trim().toLowerCase() === '/abstract') {
+        const result = await generateAbstract(conv)
+        await addMessage(convId, 'assistant', result.content, result.sources)
+        return result.content
+      }
+      await generateReply(conv, userMessage, context)
+      return conv.messages[conv.messages.length - 1].content
+    } catch (error) {
+      await recordFailure(convId, error)
+      throw error
+    }
+  }
+
+  async function retryMessage(convId: string, messageId: string): Promise<void> {
+    const conv = conversations.value.find(c => c.id === convId)
+    const index = conv ? conv.messages.findIndex(m => m.id === messageId) : -1
+    if (!conv || index === -1) return
+    const target = conv.messages[index]
+    const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
+    if (!userMessage) return
+
+    await updateMessage(convId, messageId, { error: '' })
+    try {
+      if (userMessage.content.trim().toLowerCase() === '/abstract') {
+        const result = await generateAbstract(conv)
+        await updateMessage(convId, messageId, { content: result.content, sources: result.sources })
+        return
+      }
+      const papers = conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
+      const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
+      const result = await runRagPipeline(
+        papers,
+        userMessage.content,
+        history,
+        (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
+        callLLM,
+        chatProfile.value.systemPrompt,
+      )
+      await updateMessage(convId, messageId, {
+        content: result.answer,
+        sources: result.sources.length ? result.sources : undefined,
+      })
+    } catch (error) {
+      await updateMessage(convId, messageId, { error: errorMessageOf(error) })
+      throw error
+    }
   }
 
   return {
@@ -715,8 +802,8 @@ export const useChatStore = defineStore('chat', () => {
     init,
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
-    newConversation, addMessage, removeConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
+    newConversation, addMessage, updateMessage, removeConversation, syncPaperIds, autoTitleConversation,
+    sendMessage, retryMessage, collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }
 })
