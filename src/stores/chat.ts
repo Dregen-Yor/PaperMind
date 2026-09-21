@@ -242,6 +242,16 @@ async function readOllamaStream(res: Response, onToken: (token: string) => void)
   return { content, truncated }
 }
 
+/** 本地推理端点通常不需要 API Key（LM Studio / vLLM / llama.cpp 等）。 */
+function isLocalEndpoint(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname
+    return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1'
+  } catch {
+    return false
+  }
+}
+
 /** 建树失败原因分类（#13）。 */
 function treeFailureReason(error: unknown): string {
   if (error instanceof SemanticTreeBuildError) {
@@ -663,8 +673,9 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
 
-      // 没配模型就不必发这一次注定失败的请求：直接给出可执行的原因（#13）
-      if (buildProfile.provider !== 'ollama' && !buildProfile.apiKey.trim()) {
+      // 没配模型就不必发这一次注定失败的请求：直接给出可执行的原因（#13）。
+      // 本地端点（LM Studio / vLLM 等）免 Key，照常请求，真失败由 treeFailureReason 归类。
+      if (buildProfile.provider !== 'ollama' && !buildProfile.apiKey.trim() && !isLocalEndpoint(buildProfile.baseUrl)) {
         return { ok: false, reason: '未配置模型（请在设置中填写 API Key）' }
       }
 
@@ -1029,8 +1040,10 @@ export const useChatStore = defineStore('chat', () => {
         await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '' })
         return
       }
-      // 单次写回：成功才落内容，失败由 catch 保持失败态，中途崩溃不留空窗
-      await generateReply(conv, userMessage.content, userMessage.context || undefined, index, { writeBack: messageId })
+      // 单次写回：成功才落内容，失败由 catch 保持失败态，中途崩溃不留空窗。
+      // history 截至失败轮的前一条（index-1 即本次提问）：问题只作为 query 出现一次，
+      // 与首答的 slice(0, -1) 口径一致
+      await generateReply(conv, userMessage.content, userMessage.context || undefined, index - 1, { writeBack: messageId })
     } catch (error) {
       await updateMessage(convId, messageId, { content: '', error: errorMessageOf(error) })
       throw error
@@ -1046,7 +1059,9 @@ export const useChatStore = defineStore('chat', () => {
     const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
     if (!userMessage) return
 
-    const papers = conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
+    // 划选提问的原文已随用户消息持久化：与重试同构，直接重放该上下文并跳过
+    // 论文收集/改写/评分——否则续写会换一个问题继续写，与首答语义分叉（#2）
+    const papers = userMessage.context ? [] : conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
     const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
     // 改写阶段把「已输出的半截回答」也算作上一轮：与正常追问时的上下文一致，
     // 否则续写往往会因历史轮数不足而跳过查询改写（#3）
@@ -1056,6 +1071,7 @@ export const useChatStore = defineStore('chat', () => {
       userMessage.content,
       priorTurns,
       (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
+      userMessage.context ? { externalContext: userMessage.context } : {},
     )
     const messages = buildAnswerMessages(
       retrieval.context,

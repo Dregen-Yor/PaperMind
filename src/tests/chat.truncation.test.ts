@@ -82,6 +82,27 @@ describe('截断与继续（#3）', () => {
     expect(last[1].content).toBe('半截回答，这是续写部分。')
   })
 
+  it('「继续」在带划选 context 的用户消息上跳过检索并重放原文片段', async () => {
+    global.fetch = vi.fn().mockResolvedValue(llm('，这是续写部分。')) as any
+    const store = useChatStore()
+    await store.init()
+    // 带论文才能证明「继续」没有退回检索路径（与重试带 context 的用例同构）
+    const conv = await store.newConversation('t', ['p1'])
+    conv.messages.push(
+      { id: 'u1', role: 'user', content: '这段怎么理解？', timestamp: 1, context: '被选中的原文片段' },
+      { id: 'a1', role: 'assistant', content: '半截回答', timestamp: 2, truncated: true },
+    )
+    mockDb().index.get.mockClear()
+    await store.continueMessage(conv.id, 'a1')
+
+    expect(mockDb().index.get).not.toHaveBeenCalled()
+    // 跳过改写与评分：整场只发生生成调用
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    const body = String((global.fetch as any).mock.calls.at(-1)![1].body)
+    expect(body).toContain('被选中的原文片段')
+    expect(conv.messages[1].content).toBe('半截回答，这是续写部分。')
+  })
+
   it('默认 maxTokens 已提升到 4096', async () => {
     const store = useChatStore()
     await store.init()

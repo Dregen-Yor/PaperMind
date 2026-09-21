@@ -41,6 +41,26 @@ describe('语义树重建失败原因（#13）', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('本地端点即使没填 Key 也不短路，失败按请求失败归类', async () => {
+    const localProfile = [{ ...KEYED_PROFILE[0], apiKey: '', baseUrl: 'http://localhost:1234/v1' }]
+    mockDb().settings.get.mockImplementation((key: string) => {
+      if (key === 'llm_profiles') return Promise.resolve(localProfile)
+      if (key === 'llm_profile_index') return Promise.resolve('p1')
+      return Promise.resolve(null)
+    })
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 500, statusText: 'Server Error',
+      json: () => Promise.resolve({ error: { message: 'boom' } }),
+    }) as any
+    const store = useChatStore()
+    await store.init()
+    const summary = await store.rebuildAllTrees()
+
+    expect(global.fetch).toHaveBeenCalled()
+    expect(summary.failed).toBe(1)
+    expect(summary.firstReason).toContain('请求失败')
+  })
+
   it('服务端错误归类为请求失败并带原始信息', async () => {
     mockDb().settings.get.mockImplementation((key: string) => {
       if (key === 'llm_profiles') return Promise.resolve(KEYED_PROFILE)
