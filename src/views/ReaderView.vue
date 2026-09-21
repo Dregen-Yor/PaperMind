@@ -60,7 +60,7 @@
             </el-select>
             <el-button size="small" text @click="createConv" aria-label="新建论文对话" title="新建对话"><el-icon aria-hidden="true"><Plus /></el-icon></el-button>
           </div>
-          <ChatPanel ref="chatPanelRef" :conversation="activeConv" @create="createConv" />
+          <ChatPanel ref="chatPanelRef" :conversation="activeConv" @create="createConv" @open-source="onOpenSource" />
         </template>
         <NotesPanel v-else :paper-id="paper.id" @jump="jumpToPage" />
       </section>
@@ -75,7 +75,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Plus, Document, ChatLineRound, EditPen } from '@element-plus/icons-vue'
 import PdfViewer from '../components/PdfViewer.vue'
 import ChatPanel from '../components/ChatPanel.vue'
@@ -83,8 +83,10 @@ import NotesPanel from '../components/NotesPanel.vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
 import { base64ToUrl } from '../utils/pdfUtils'
+import type { SourceRef } from '../utils/sourceRef'
 
 const route = useRoute()
+const router = useRouter()
 const paperStore = usePaperStore()
 const chatStore = useChatStore()
 const paper = computed(() => paperStore.getPaper(route.params.id as string))
@@ -104,6 +106,16 @@ async function jumpToPage(page: number) {
   mobilePane.value = 'paper'
   await nextTick()
   pdfViewerRef.value?.scrollToPage(page)
+}
+
+/** 来源芯片跳页：本页内滚动，跨论文带上 `?page=` 跳进对应阅读页（#1）。 */
+function onOpenSource(ref: SourceRef) {
+  if (!ref.paperId || ref.startPage === undefined) return
+  if (ref.paperId === paper.value?.id) {
+    void jumpToPage(ref.startPage + 1)
+    return
+  }
+  void router.push({ path: '/library/' + ref.paperId, query: { page: String(ref.startPage + 1) } })
 }
 
 const paperConversations = computed(() =>
@@ -165,12 +177,19 @@ watch([() => paper.value?.id, () => chatStore.loaded], async ([id, chatReady], _
   fileError.value = ''
   if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
   pdfUrl.value = ''
+  if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   activeConvId.value = ''
   try {
     const base64 = await paperStore.readPaperFile(id)
     if (cancelled) return
     if (base64) pdfUrl.value = base64ToUrl(base64)
     else fileError.value = '找不到论文文件，请返回文献库重新导入。'
+    // 跨论文跳转：`?page=` 定位到目标页（页元素可能尚未渲染完，scrollToPage 内部等待）
+    const targetPage = Number(route.query.page)
+    if (Number.isInteger(targetPage) && targetPage > 0) {
+      await nextTick()
+      pdfViewerRef.value?.scrollToPage(targetPage)
+    }
     if (paper.value?.status === 'unread') await paperStore.updatePaper(id, { status: 'reading' })
     if (cancelled) return
     if (paperConversations.value.length) activeConvId.value = paperConversations.value[0].id
@@ -188,6 +207,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   paperGeneration += 1
+  if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   stopResize()
   if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
   window.removeEventListener('mousemove', onMove)

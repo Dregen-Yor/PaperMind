@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { Paper } from '../stores/paper'
-import { filterLibraryPapers } from '../utils/libraryFilters'
+import { filterLibraryPapers, formatAuthors } from '../utils/libraryFilters'
 
 const papers: Paper[] = [
-  { id: 'attention', title: 'Attention Is All You Need', authors: ['Ashish Vaswani'], abstract: '', year: 2017, tags: ['Transformer'], status: 'reading', fileName: 'attention.pdf', addedAt: 10, knowledgeBaseId: 'default' },
-  { id: 'bert', title: 'BERT: Pre-training of Deep Bidirectional Transformers', authors: ['Jacob Devlin'], abstract: '', year: 2018, tags: ['NLP'], status: 'unread', fileName: 'bert.pdf', addedAt: 30, knowledgeBaseId: 'default' },
-  { id: 'retrieval', title: 'Retrieval-Augmented Generation', authors: ['Patrick Lewis'], abstract: '', year: 2020, tags: ['检索增强'], status: 'done', fileName: 'rag-original.pdf', addedAt: 20, knowledgeBaseId: 'default' },
+  { id: 'attention', title: 'Attention Is All You Need', authors: ['Ashish Vaswani'], abstract: '', year: 2017, tags: ['Transformer'], status: 'reading', fileName: 'attention.pdf', fileHash: 'h-attention', addedAt: 10, knowledgeBaseId: 'default' },
+  { id: 'bert', title: 'BERT: Pre-training of Deep Bidirectional Transformers', authors: ['Jacob Devlin'], abstract: '', year: 2018, tags: ['NLP'], status: 'unread', fileName: 'bert.pdf', fileHash: 'h-bert', addedAt: 30, knowledgeBaseId: 'default' },
+  { id: 'retrieval', title: 'Retrieval-Augmented Generation', authors: ['Patrick Lewis'], abstract: '', year: 2020, tags: ['检索增强'], status: 'done', fileName: 'rag-original.pdf', fileHash: 'h-retrieval', addedAt: 20, knowledgeBaseId: 'default' },
 ]
 
 describe('library search and reading filters', () => {
@@ -32,5 +32,18 @@ describe('library search and reading filters', () => {
     expect(filterLibraryPapers(papers, { query: 'no such paper' })).toEqual([])
     expect(filterLibraryPapers(papers, { query: ' ', status: 'all' })).toHaveLength(3)
     expect(filterLibraryPapers([], { status: 'reading' })).toEqual([])
+  })
+})
+
+describe('作者展示（#9）', () => {
+  it('4 位以内原样展示', () => {
+    expect(formatAuthors(['A', 'B'])).toBe('A, B')
+  })
+  it('超过 4 位截断为「等 N 位作者」', () => {
+    expect(formatAuthors(['A', 'B', 'C', 'D', 'E', 'F'])).toBe('A, B, C, D 等 2 位作者')
+  })
+  it('空/缺省回退占位文案', () => {
+    expect(formatAuthors([])).toBe('作者信息待补充')
+    expect(formatAuthors(undefined)).toBe('作者信息待补充')
   })
 })

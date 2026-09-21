@@ -1,19 +1,21 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { extractPages, buildPageIndex } from '../utils/pageIndex'
-import { runRagPipeline, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
+import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
 import { buildEvidenceBlocks, hasExactPagePartition, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
 import {
   buildSemanticTree,
   validateSemanticTree,
   hashTreeSource,
   semanticTreeConfigHash,
+  SemanticTreeBuildError,
   SEMANTIC_TREE_SCHEMA_VERSION,
   SEMANTIC_TREE_PROMPT_VERSION,
   DEFAULT_MAX_INPUT_CHARS,
   type SemanticTreeBuildConfig,
 } from '../utils/semanticTree'
 import type { PaperTreeRecord } from '../types/db'
+import type { SourceRef } from '../utils/sourceRef'
 import {
   ABSTRACT_MODEL,
   summarizeAcademicText,
@@ -36,8 +38,17 @@ export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources?: string[]
+  /** 结构化来源：芯片文案 + 跳转所需的论文与页区间（#1） */
+  sources?: SourceRef[]
   timestamp: number
+  /** 非空表示这一轮失败，渲染失败卡（#2） */
+  error?: string
+  /** finish_reason=length：回答被截断（#3） */
+  truncated?: boolean
+  /** 用户划选原文（externalContext）：重试时按原上下文重放，不退回检索（#2） */
+  context?: string
+  /** 流式渲染中的占位气泡标记（仅内存态，不落库）（#6） */
+  streaming?: boolean
 }
 
 export interface Conversation {
@@ -48,6 +59,9 @@ export interface Conversation {
   createdAt: number
 }
 
+/** 单次 LLM 请求上限：超时即失败，避免无声挂死（#2）。 */
+const LLM_REQUEST_TIMEOUT_MS = 120_000
+
 const DEFAULT_PROFILE: LLMProfile = {
   id: 'default',
   name: '默认配置',
@@ -56,9 +70,15 @@ const DEFAULT_PROFILE: LLMProfile = {
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 4096,
   topK: 0,
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
+}
+
+/** 单篇建树结果：失败必须带可展示的原因（#13）。 */
+export interface TreeBuildOutcome {
+  ok: boolean
+  reason?: string
 }
 
 /** 强制重建的结果摘要。分开计数是为了不让「全部失败」在 UI 上退化成「没有论文」。 */
@@ -69,6 +89,8 @@ export interface TreeRebuildSummary {
   failed: number
   /** 总开关关闭，或该篇已在建树中 */
   skipped: number
+  /** 首个失败原因（人类可读），供设置页展示（#13） */
+  firstReason?: string
 }
 
 const NEW_CONVERSATION_TITLE = '新对话'
@@ -102,6 +124,21 @@ async function readErrorBody(res: Response): Promise<string> {
   return `${res.status} ${res.statusText}`.trim()
 }
 
+/**
+ * 带超时的 fetch。`AbortSignal.timeout` 触发时抛出的是英文 DOMException，
+ * 原样落进失败轮的 `error` 会中英混杂，这里统一映射为中文提示（#2）。
+ */
+async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      throw new Error('请求超时，请检查网络后重试')
+    }
+    throw error
+  }
+}
+
 const PROMPT_TEMPLATES = [
   { name: '逐段精读', prompt: '请逐段解析以下内容，解释关键概念、方法和结论。' },
   { name: '通俗解释', prompt: '请用通俗易懂的语言解释这段内容，假设我是该领域的初学者。' },
@@ -111,6 +148,122 @@ const PROMPT_TEMPLATES = [
 ]
 
 export { PROMPT_TEMPLATES }
+
+/** 流式请求整体上限（#6）：流式回答比非流式长，给更宽的预算。 */
+const LLM_STREAM_TIMEOUT_MS = 300_000
+
+/** 解析 OpenAI 兼容 SSE 流：增量回调 + 末尾 finish_reason（#6）。 */
+async function readOpenAiStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+  if (!res.body) throw new Error('流式响应不可用')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      let parsed: any
+      try { parsed = JSON.parse(payload) } catch { continue }
+      const delta = parsed.choices?.[0]?.delta?.content
+      if (typeof delta === 'string' && delta) { content += delta; onToken(delta) }
+      if (parsed.choices?.[0]?.finish_reason === 'length') truncated = true
+    }
+  }
+  if (!content.trim()) throw new Error('模型返回了空响应')
+  return { content, truncated }
+}
+
+/** 解析 Anthropic SSE 流（content_block_delta / message_delta）（#6）。 */
+async function readAnthropicStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+  if (!res.body) throw new Error('流式响应不可用')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      let parsed: any
+      try { parsed = JSON.parse(trimmed.slice(5).trim()) } catch { continue }
+      if (parsed.type === 'content_block_delta' && typeof parsed.delta?.text === 'string') {
+        content += parsed.delta.text
+        onToken(parsed.delta.text)
+      }
+      if (parsed.type === 'message_delta' && parsed.delta?.stop_reason === 'max_tokens') truncated = true
+    }
+  }
+  if (!content.trim()) throw new Error('模型返回了空响应')
+  return { content, truncated }
+}
+
+/** 解析 Ollama NDJSON 流（#6）。 */
+async function readOllamaStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+  if (!res.body) throw new Error('流式响应不可用')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let truncated = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let parsed: any
+      try { parsed = JSON.parse(trimmed) } catch { continue }
+      if (typeof parsed.message?.content === 'string' && parsed.message.content) {
+        content += parsed.message.content
+        onToken(parsed.message.content)
+      }
+      if (parsed.done && parsed.done_reason === 'length') truncated = true
+    }
+  }
+  if (!content.trim()) throw new Error('模型返回了空响应')
+  return { content, truncated }
+}
+
+/** 本地推理端点通常不需要 API Key（LM Studio / vLLM / llama.cpp 等）。 */
+function isLocalEndpoint(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname
+    return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1'
+  } catch {
+    return false
+  }
+}
+
+/** 建树失败原因分类（#13）。 */
+function treeFailureReason(error: unknown): string {
+  if (error instanceof SemanticTreeBuildError) {
+    switch (error.reason) {
+      case 'no-evidence': return '没有可用的原文证据块'
+      case 'input-too-large': return '论文过长，超出单次建树输入上限'
+      case 'llm-failed': return `请求失败：${error.message.slice(0, 80)}`
+      default: return `输出不合规：${error.message.slice(0, 80)}`
+    }
+  }
+  return error instanceof Error ? `未知错误：${error.message.slice(0, 80)}` : '未知错误'
+}
 
 export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([])
@@ -152,6 +305,12 @@ export const useChatStore = defineStore('chat', () => {
   async function init() {
     if (loaded.value) return
     conversations.value = await window.db.chat.listConversations()
+    // 清理历史遗留的 0 消息对话（#15）：启动时不会有正在进行的空会话
+    const emptyConversations = conversations.value.filter(c => c.messages.length === 0)
+    for (const conv of emptyConversations) {
+      await window.db.chat.removeConversation(conv.id)
+    }
+    conversations.value = conversations.value.filter(c => c.messages.length > 0)
 
     // 加载配置列表
     const savedProfiles = await window.db.settings.get('llm_profiles')
@@ -258,24 +417,31 @@ export const useChatStore = defineStore('chat', () => {
     return (target ? profiles.value.find(p => p.id === target) : undefined) ?? chatProfile.value
   }
 
-  async function callLLM(
+  /**
+   * 单次对话补全的底层请求：记录 finish_reason 供截断提示使用（#3）。
+   *
+   * `opts` 供后续流式输出使用（#6），本任务先保留形参。
+   */
+  async function requestCompletion(
     messages: { role: string; content: string }[],
     profileOrId?: string | LLMProfile,
-  ): Promise<string> {
+    opts: { onToken?: (token: string) => void } = {},
+  ): Promise<{ content: string; truncated: boolean }> {
     const profile = resolveLlmProfile(profileOrId)
 
     if (profile.provider === 'ollama') {
-      const body: Record<string, unknown> = { model: profile.model, messages, stream: false }
+      const body: Record<string, unknown> = { model: profile.model, messages, stream: !!opts.onToken }
       if (profile.topK > 0) body.options = { top_k: profile.topK }
-      const res = await fetch(`${profile.baseUrl}/api/chat`, {
+      const res = await requestWithTimeout(`${profile.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      })
+      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+      if (opts.onToken) return readOllamaStream(res, opts.onToken)
       const data = await res.json()
-      if (typeof data.message?.content !== 'string') throw new Error('Ollama 未返回有效响应')
-      return data.message.content
+      if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
+      return { content: data.message.content, truncated: data.done_reason === 'length' }
     }
 
     if (profile.provider === 'anthropic') {
@@ -293,8 +459,9 @@ export const useChatStore = defineStore('chat', () => {
       }
       if (system) body.system = system
       if (profile.topK > 0) body.top_k = profile.topK
+      if (opts.onToken) body.stream = true
 
-      const res = await fetch(`${profile.baseUrl}/v1/messages`, {
+      const res = await requestWithTimeout(`${profile.baseUrl}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -302,12 +469,13 @@ export const useChatStore = defineStore('chat', () => {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(body),
-      })
+      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+      if (opts.onToken) return readAnthropicStream(res, opts.onToken)
       const data = await res.json()
       const content = data.content?.[0]?.text
-      if (typeof content !== 'string') throw new Error('Anthropic 未返回有效响应')
-      return content
+      if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
+      return { content, truncated: data.stop_reason === 'max_tokens' }
     }
 
     const headers: Record<string, string> = {
@@ -319,18 +487,28 @@ export const useChatStore = defineStore('chat', () => {
       messages,
       temperature: profile.temperature,
       max_tokens: profile.maxTokens,
+      ...(opts.onToken ? { stream: true } : {}),
     }
 
-    const res = await fetch(`${profile.baseUrl}/chat/completions`, {
+    const res = await requestWithTimeout(`${profile.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-    })
+    }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+    if (opts.onToken) return readOpenAiStream(res, opts.onToken)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
-    if (typeof content !== 'string') throw new Error('LLM 未返回有效响应')
-    return content
+    if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
+    return { content, truncated: data.choices?.[0]?.finish_reason === 'length' }
+  }
+
+  /** 只要文本的调用路径（索引、标题、查询改写等）继续走这个薄包装。 */
+  async function callLLM(
+    messages: { role: string; content: string }[],
+    profileOrId?: string | LLMProfile,
+  ): Promise<string> {
+    return (await requestCompletion(messages, profileOrId)).content
   }
 
   // ---------- Index Paper ----------
@@ -449,7 +627,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 后台构建单篇论文的轻量语义树（§8.2）。
    *
-   * 每篇论文恰好一次 LLM 调用；任何失败都返回 false 并保持平面路径可用，
+   * 每篇论文恰好一次 LLM 调用；任何失败都带原因返回并保持平面路径可用，
    * 不写入半成品树。原文指纹与构建配置指纹都未变、且记录内容校验通过时
    * 直接复用已存树（§10.3）；`force` 无条件重建。
    */
@@ -457,9 +635,9 @@ export const useChatStore = defineStore('chat', () => {
     paperId: string,
     providedPages?: string[],
     opts: { force?: boolean } = {},
-  ): Promise<boolean> {
-    if (!treeEnabled.value) return false
-    if (treeIndexingPapers.value.has(paperId)) return false
+  ): Promise<TreeBuildOutcome> {
+    if (!treeEnabled.value) return { ok: false, reason: '语义树总开关已关闭' }
+    if (treeIndexingPapers.value.has(paperId)) return { ok: false, reason: '该论文正在建树中' }
     treeIndexingPapers.value.add(paperId)
     // 递增代次：内容变更后旧任务的结果会被丢弃，避免写入过期树
     const token = (treeBuildTokens.get(paperId) ?? 0) + 1
@@ -476,10 +654,12 @@ export const useChatStore = defineStore('chat', () => {
       if (!pages) {
         const stored = await window.db.index.get(paperId)
         // 没有平面索引就没有可靠原文，不做无根据的建树
-        if (!stored) return false
+        if (!stored) return { ok: false, reason: '缺少可用原文（请先建立索引）' }
         pages = JSON.parse(stored.pagesJson)
       }
-      if (!Array.isArray(pages) || pages.length === 0) return false
+      if (!Array.isArray(pages) || pages.length === 0) {
+        return { ok: false, reason: '缺少可用原文（请先建立索引）' }
+      }
 
       const sourceHash = hashTreeSource(JSON.stringify(pages))
       // 缓存键必须同时覆盖原文与构建配置：只比内容指纹会让提示词/模型/分块的
@@ -489,8 +669,14 @@ export const useChatStore = defineStore('chat', () => {
         // 键相同不等于内容可用：损坏的记录当作没有树，走重建（§13 不猜测修复）
         if (parseTreeRecord(existing, configHash)) {
           markTreeReady(paperId, configHash)
-          return false
+          return { ok: false, reason: '已有可复用的语义树' }
         }
+      }
+
+      // 没配模型就不必发这一次注定失败的请求：直接给出可执行的原因（#13）。
+      // 本地端点（LM Studio / vLLM 等）免 Key，照常请求，真失败由 treeFailureReason 归类。
+      if (buildProfile.provider !== 'ollama' && !buildProfile.apiKey.trim() && !isLocalEndpoint(buildProfile.baseUrl)) {
+        return { ok: false, reason: '未配置模型（请在设置中填写 API Key）' }
       }
 
       const blocks = buildEvidenceBlocks(pages, TREE_BUILD_CONFIG.evidence)
@@ -501,7 +687,9 @@ export const useChatStore = defineStore('chat', () => {
       })
 
       // 期间发生了重新建树，本次结果已过期
-      if (treeBuildTokens.get(paperId) !== token) return false
+      if (treeBuildTokens.get(paperId) !== token) {
+        return { ok: false, reason: '建树任务已被更新的任务取代' }
+      }
 
       await window.db.tree.set(paperId, {
         treeJson: JSON.stringify(tree),
@@ -516,10 +704,10 @@ export const useChatStore = defineStore('chat', () => {
         buildLatencyMs: meta.latencyMs,
       })
       markTreeReady(paperId, configHash)
-      return true
-    } catch {
+      return { ok: true }
+    } catch (error) {
       // 建树是可选的增强：失败即降级，不向导入/提问路径抛错
-      return false
+      return { ok: false, reason: treeFailureReason(error) }
     } finally {
       treeIndexingPapers.value.delete(paperId)
     }
@@ -545,6 +733,7 @@ export const useChatStore = defineStore('chat', () => {
    * 强制重建所有已索引论文的语义树（设置页的显式路径）。
    * 缓存键已覆盖构建配置，这里服务的是「配置没变但就是想换一棵树」：
    * 只重建树（每篇一次调用），不必连带重跑成本更高的平面索引。逐篇串行，避免同时打出 N 个请求。
+   * 失败篇数之外还回收首个可展示的原因，否则设置页只能报「失败」而说不出为什么（#13）。
    */
   async function rebuildAllTrees(): Promise<TreeRebuildSummary> {
     const summary: TreeRebuildSummary = { attempted: 0, rebuilt: 0, failed: 0, skipped: 0 }
@@ -554,8 +743,12 @@ export const useChatStore = defineStore('chat', () => {
         continue
       }
       summary.attempted++
-      if (await buildPaperTree(paperId, undefined, { force: true })) summary.rebuilt++
-      else summary.failed++
+      const outcome = await buildPaperTree(paperId, undefined, { force: true })
+      if (outcome.ok) summary.rebuilt++
+      else {
+        summary.failed++
+        if (!summary.firstReason && outcome.reason) summary.firstReason = outcome.reason
+      }
     }
     return summary
   }
@@ -569,17 +762,47 @@ export const useChatStore = defineStore('chat', () => {
     return conv
   }
 
-  async function addMessage(convId: string, role: 'user' | 'assistant', content: string, sources?: string[]) {
+  async function addMessage(
+    convId: string,
+    role: 'user' | 'assistant',
+    content: string,
+    sources?: SourceRef[],
+    extra?: { error?: string; truncated?: boolean; context?: string },
+  ) {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) return
-    const msg: Message = { id: crypto.randomUUID(), role, content, sources, timestamp: Date.now() }
+    if (role === 'assistant' && !content.trim() && !extra?.error) throw new Error('拒绝写入空回答')
+    const msg: Message = { id: crypto.randomUUID(), role, content, sources, timestamp: Date.now(), ...extra }
     conv.messages.push(msg)
-    await window.db.chat.addMessage({ id: msg.id, conversationId: convId, role, content, sources: sources ?? [], timestamp: msg.timestamp })
+    await window.db.chat.addMessage({
+      id: msg.id, conversationId: convId, role, content,
+      sources: sources ?? [], timestamp: msg.timestamp,
+      error: extra?.error, truncated: extra?.truncated, context: extra?.context,
+    })
+  }
+
+  async function updateMessage(
+    convId: string,
+    messageId: string,
+    patch: { content?: string; sources?: SourceRef[]; error?: string; truncated?: boolean; context?: string },
+  ) {
+    const conv = conversations.value.find(c => c.id === convId)
+    const msg = conv?.messages.find(m => m.id === messageId)
+    if (!conv || !msg) return
+    Object.assign(msg, patch)
+    await window.db.chat.updateMessage(messageId, patch)
   }
 
   async function removeConversation(id: string) {
     await window.db.chat.removeConversation(id)
     conversations.value = conversations.value.filter(c => c.id !== id)
+  }
+
+  /** 丢弃「已创建但从未发问」的空会话（#15）。 */
+  async function discardEmptyConversation(id: string) {
+    const conv = conversations.value.find(c => c.id === id)
+    if (!conv || conv.messages.length > 0) return
+    await removeConversation(id)
   }
 
   async function syncPaperIds(convId: string, paperIds: string[]) {
@@ -629,12 +852,15 @@ export const useChatStore = defineStore('chat', () => {
     return extractPages(base64)
   }
 
-  async function generateAbstract(conv: Conversation): Promise<{ content: string; sources: string[] }> {
+  /**
+   * `/abstract` 的来源只有论文标题与 id（摘要没有页码，芯片不可跳页）。
+   */
+  async function generateAbstract(conv: Conversation): Promise<{ content: string; sources: SourceRef[] }> {
     if (conv.paperIds.length === 0) throw new Error('请先在当前对话中选择至少一篇论文')
     if (!abstractToken.value) throw new Error('请先在设置中填写 Hugging Face Token')
 
     const sections: string[] = []
-    const sources: string[] = []
+    const sources: SourceRef[] = []
     for (const paperId of conv.paperIds) {
       const [paper, pages] = await Promise.all([
         window.db.paper.get(paperId),
@@ -644,7 +870,7 @@ export const useChatStore = defineStore('chat', () => {
       const text = pages.join('\n\n')
       const summary = await summarizeAcademicText(text, abstractToken.value)
       sections.push(conv.paperIds.length > 1 ? `## ${title}\n\n${summary}` : summary)
-      sources.push(title)
+      sources.push({ label: title, paperId })
     }
 
     return {
@@ -655,56 +881,209 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---------- Send Message (RAG 3-call pipeline) ----------
 
-  async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
-    const conv = conversations.value.find(c => c.id === convId)
-    if (!conv) throw new Error('Conversation not found')
-
-    await addMessage(convId, 'user', userMessage)
-
-    if (userMessage.trim().toLowerCase() === '/abstract') {
-      const result = await generateAbstract(conv)
-      await addMessage(convId, 'assistant', result.content, result.sources)
-      return result.content
-    }
-
-    // 收集已建索引的论文（缺失时兜底即时构建）
+  async function collectIndexedPapers(conv: Conversation): Promise<{ papers: IndexedPaper[]; paperIds: string[] }> {
     const papers: IndexedPaper[] = []
+    const paperIds: string[] = []
+    for (const paperId of conv.paperIds) {
+      let stored = await window.db.index.get(paperId)
+      // 兜底：导入时后台预处理未完成（LLM未配置等），首次对话时按需构建
+      if (!stored) {
+        try {
+          await indexPaper(paperId)
+          stored = await window.db.index.get(paperId)
+        } catch { /* ignore — no index available for this paper */ }
+      }
+      if (!stored) continue
+      const semantic = await loadSemanticIndex(paperId)
+      papers.push({
+        tree: JSON.parse(stored.indexJson),
+        pages: JSON.parse(stored.pagesJson),
+        ...(semantic ? { semantic } : {}),
+      })
+      paperIds.push(paperId)
+    }
+    return { papers, paperIds }
+  }
+
+  function errorMessageOf(error: unknown): string {
+    return error instanceof Error ? error.message : '未知错误'
+  }
+
+  async function recordFailure(convId: string, error: unknown) {
+    await addMessage(convId, 'assistant', '', undefined, { error: errorMessageOf(error) })
+  }
+
+  async function generateReply(
+    conv: Conversation,
+    userMessage: string,
+    context?: string,
+    historyEnd?: number,
+    opts?: { writeBack?: string },
+  ) {
+    let papers: IndexedPaper[] = []
+    // 保留 paperIds：来源 refs 需要「第 i 篇检索结果」对应的论文 id（ids 与 papers 一一对齐）
+    let indexedIds: string[] = []
     if (!context && conv.paperIds.length > 0) {
-      for (const paperId of conv.paperIds) {
-        let stored = await window.db.index.get(paperId)
-        // 兜底：导入时后台预处理未完成（LLM未配置等），首次对话时按需构建
-        if (!stored) {
-          try {
-            await indexPaper(paperId)
-            stored = await window.db.index.get(paperId)
-          } catch { /* ignore — no index available for this paper */ }
-        }
-        if (!stored) continue
-        // 语义树就绪则一并挂上，由 runRagPipeline 单轮路由；否则该篇走平面路径
-        const semantic = await loadSemanticIndex(paperId)
-        papers.push({
-          tree: JSON.parse(stored.indexJson),
-          pages: JSON.parse(stored.pagesJson),
-          ...(semantic ? { semantic } : {}),
-        })
+      const collected = await collectIndexedPapers(conv)
+      papers = collected.papers
+      indexedIds = collected.paperIds
+    }
+    // 历史不含当前提问：默认排除最后一条（刚追加的用户消息）；重试时由调用方给 historyEnd
+    const history = conv.messages.slice(0, historyEnd ?? -1).map(m => ({ role: m.role, content: m.content }))
+    // 生成回调负责把 finish_reason 带回来：截断的回答要能提示「已达长度上限」并续写（#3）
+    let lastTruncated = false
+    let placeholder: Message | undefined
+    // 重试是原地更新目标消息：直接把它当流式气泡，失败卡先撤下（错误态由外层 catch 兜底写回）
+    const target = opts?.writeBack ? conv.messages.find(m => m.id === opts.writeBack) : undefined
+    const clearStreaming = () => {
+      if (placeholder) {
+        const at = conv.messages.indexOf(placeholder)
+        if (at !== -1) conv.messages.splice(at, 1)
+        placeholder = undefined
+      }
+      if (target) target.streaming = false
+    }
+    const generate = async (msgs: { role: string; content: string }[]) => {
+      let sink: Message
+      if (target) {
+        target.content = ''
+        target.error = ''
+        target.streaming = true
+        sink = target
+      } else {
+        conv.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: '', timestamp: Date.now(), streaming: true })
+        // 从数组读回响应式代理再写入：直接改本地原始对象不经代理，逐 token 不会触发渲染
+        placeholder = conv.messages[conv.messages.length - 1]
+        sink = placeholder
+      }
+      try {
+        // 流式增量直接写进气泡；成功后仍走各自的写回分支一次性落库
+        const outcome = await requestCompletion(msgs, undefined, { onToken: token => { sink.content += token } })
+        lastTruncated = outcome.truncated
+        return outcome.content
+      } finally {
+        clearStreaming()
       }
     }
-
-    // 历史不含刚追加的当前提问
-    const history = conv.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
-
-    const { answer, sources } = await runRagPipeline(
+    const result = await runRagPipeline(
       papers,
       userMessage,
       history,
       (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
-      callLLM,
+      generate,
       chatProfile.value.systemPrompt,
       { externalContext: context },
     )
+    // 来源只在这里构造一次，首次提问与重试两条写回分支共用。
+    // `retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐
+    // （两条检索路径都是 `sources = selected.map(formatSource)`），缺件时退化为纯标签。
+    const sourceRefs: SourceRef[] = result.sources.length
+      ? result.retrievals.flatMap((r, i) => r.sources.map((label, j) => {
+          const node = r.selected[j]
+          const paperId = indexedIds[i]
+          return node && paperId
+            ? { label, paperId, startPage: node.startPage, endPage: node.endPage }
+            : { label }
+        }))
+      : []
+    // 重试是原地更新失败轮；首次提问才追加新消息
+    if (opts?.writeBack) {
+      await updateMessage(conv.id, opts.writeBack, {
+        content: result.answer,
+        sources: sourceRefs.length ? sourceRefs : undefined,
+        error: '',
+        truncated: lastTruncated,
+      })
+    } else {
+      await addMessage(conv.id, 'assistant', result.answer, sourceRefs.length ? sourceRefs : undefined, { truncated: lastTruncated })
+    }
+  }
 
-    await addMessage(convId, 'assistant', answer, sources.length ? sources : undefined)
-    return answer
+  async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
+    const conv = conversations.value.find(c => c.id === convId)
+    if (!conv) throw new Error('Conversation not found')
+
+    // 划选原文随用户消息持久化：失败轮重试时才能重放同一上下文（#2）
+    await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
+
+    try {
+      // 命令只在本地识别一次：未知的 `/xxx` 直接回提示，不发模型（#8）
+      const normalized = userMessage.trim().toLowerCase()
+      if (normalized.startsWith('/') && normalized !== '/abstract') {
+        await addMessage(convId, 'assistant', `未识别的命令：${userMessage.trim()}。当前可用命令：/abstract（总结当前所选论文）。`)
+        return userMessage
+      }
+      if (normalized === '/abstract') {
+        const result = await generateAbstract(conv)
+        await addMessage(convId, 'assistant', result.content, result.sources)
+        return result.content
+      }
+      await generateReply(conv, userMessage, context)
+      return conv.messages[conv.messages.length - 1].content
+    } catch (error) {
+      await recordFailure(convId, error)
+      throw error
+    }
+  }
+
+  async function retryMessage(convId: string, messageId: string): Promise<void> {
+    const conv = conversations.value.find(c => c.id === convId)
+    const index = conv ? conv.messages.findIndex(m => m.id === messageId) : -1
+    if (!conv || index === -1) return
+    const target = conv.messages[index]
+    const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
+    if (!target || !userMessage) return
+
+    try {
+      if (userMessage.content.trim().toLowerCase() === '/abstract') {
+        const result = await generateAbstract(conv)
+        await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '' })
+        return
+      }
+      // 单次写回：成功才落内容，失败由 catch 保持失败态，中途崩溃不留空窗。
+      // history 截至失败轮的前一条（index-1 即本次提问）：问题只作为 query 出现一次，
+      // 与首答的 slice(0, -1) 口径一致
+      await generateReply(conv, userMessage.content, userMessage.context || undefined, index - 1, { writeBack: messageId })
+    } catch (error) {
+      await updateMessage(convId, messageId, { content: '', error: errorMessageOf(error) })
+      throw error
+    }
+  }
+
+  /** 「继续」：对截断的回答就地续写（#3）。检索按原问题重跑，生成时把已输出部分作为上文。 */
+  async function continueMessage(convId: string, messageId: string): Promise<void> {
+    const conv = conversations.value.find(c => c.id === convId)
+    const index = conv ? conv.messages.findIndex(m => m.id === messageId) : -1
+    if (!conv || index === -1) return
+    const target = conv.messages[index]
+    const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
+    if (!userMessage) return
+
+    // 划选提问的原文已随用户消息持久化：与重试同构，直接重放该上下文并跳过
+    // 论文收集/改写/评分——否则续写会换一个问题继续写，与首答语义分叉（#2）
+    const papers = userMessage.context ? [] : conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
+    const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
+    // 改写阶段把「已输出的半截回答」也算作上一轮：与正常追问时的上下文一致，
+    // 否则续写往往会因历史轮数不足而跳过查询改写（#3）
+    const priorTurns = [...history, { role: 'assistant' as const, content: target.content }]
+    const retrieval = await retrieveRagContext(
+      papers,
+      userMessage.content,
+      priorTurns,
+      (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
+      userMessage.context ? { externalContext: userMessage.context } : {},
+    )
+    const messages = buildAnswerMessages(
+      retrieval.context,
+      '请接着上一条回答继续输出，从中断处直接续写，不要重复已经输出过的内容。',
+      priorTurns,
+      chatProfile.value.systemPrompt,
+    )
+    const outcome = await requestCompletion(messages)
+    await updateMessage(convId, messageId, {
+      content: target.content + outcome.content,
+      truncated: outcome.truncated,
+    })
   }
 
   return {
@@ -715,8 +1094,9 @@ export const useChatStore = defineStore('chat', () => {
     init,
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
-    newConversation, addMessage, removeConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
+    newConversation, addMessage, updateMessage, removeConversation, discardEmptyConversation, syncPaperIds, autoTitleConversation,
+    sendMessage, retryMessage, continueMessage, requestCompletion,
+    collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }
 })

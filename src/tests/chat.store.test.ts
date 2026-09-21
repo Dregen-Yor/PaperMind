@@ -10,6 +10,13 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 
 import { useChatStore } from '../stores/chat'
 
+/** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
+const sse = (chunks: string[], finishReason = 'stop') => {
+  const body = chunks.map(c => `data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`).join('')
+    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`
+    + 'data: [DONE]\n\n'
+  return { ok: true, status: 200, body: new Response(body).body }
+}
 describe('useChatStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -118,10 +125,7 @@ describe('useChatStore', () => {
   })
 
   it('sendMessage calls LLM and appends both messages', async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ choices: [{ message: { content: 'Answer' } }] }),
-    }) as any
+    global.fetch = vi.fn().mockResolvedValue(sse(['Answer'])) as any
     const store = useChatStore()
     await store.init()
     await store.updateProfile(store.chatProfile.id, { apiKey: 'sk-test' })
@@ -137,10 +141,7 @@ describe('useChatStore', () => {
     let callCount = 0
     global.fetch = vi.fn().mockImplementation(() => {
       callCount++
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ choices: [{ message: { content: 'Answer' } }] }),
-      })
+      return Promise.resolve(sse(['Answer']))
     }) as any
 
     ;(globalThis as any).mockDb.index.get.mockResolvedValue({
@@ -165,14 +166,12 @@ describe('useChatStore', () => {
   it('sendMessage calls query rewriting when conversation has prior history (3 LLM calls total)', async () => {
     // 多节点 index，有历史时应触发改写：改写(1) + 评分(1) + 回答(1) = 3次
     let callCount = 0
-    global.fetch = vi.fn().mockImplementation(() => {
+    const scoreJson = { choices: [{ message: { content: '[{"id":0,"score":9},{"id":1,"score":2}]' } }] }
+    global.fetch = vi.fn().mockImplementation((_url: string, init: any) => {
       callCount++
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: '[{"id":0,"score":9},{"id":1,"score":2}]' } }],
-        }),
-      })
+      // 只有生成请求带 stream；改写与评分仍是 JSON 响应
+      if (JSON.parse(init.body).stream) return Promise.resolve(sse(['Answer']))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(scoreJson) })
     }) as any
 
     ;(globalThis as any).mockDb.index.get.mockResolvedValue({
@@ -231,7 +230,7 @@ describe('useChatStore', () => {
 
     expect(reply).toBe('A transformer paper summary.')
     expect(conv.messages.map(message => message.role)).toEqual(['user', 'assistant'])
-    expect(conv.messages[1].sources).toEqual(['Attention Is All You Need'])
+    expect(conv.messages[1].sources).toEqual([{ label: 'Attention Is All You Need', paperId: 'paper-1' }])
     expect(global.fetch).toHaveBeenCalledOnce()
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api-inference.huggingface.co/models/Bashaarat1/t5-small-arxiv-summarizer',
@@ -273,7 +272,10 @@ describe('useChatStore', () => {
       ok: true,
       status: 200,
       statusText: 'OK',
-      json: () => Promise.resolve({ content: [{ type: 'text', text: 'Bonjour' }] }),
+      body: new Response(
+        `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Bonjour' } })}\n\n`
+        + `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' } })}\n\n`,
+      ).body,
     }) as any
     const store = useChatStore()
     await store.init()
@@ -292,7 +294,7 @@ describe('useChatStore', () => {
     expect(init.headers).toMatchObject({ 'x-api-key': 'sk-ant-1', 'anthropic-version': '2023-06-01' })
     const body = JSON.parse(init.body)
     expect(body.model).toBe('claude-3-5-sonnet')
-    expect(body.max_tokens).toBe(2048)
+    expect(body.max_tokens).toBe(4096)
     expect(body.messages.every((m: any) => m.role !== 'system')).toBe(true)
     expect(body.system).toContain('学术论文阅读助手')
   })

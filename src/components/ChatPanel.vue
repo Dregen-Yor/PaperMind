@@ -17,15 +17,35 @@
         <div class="msg-avatar" :class="{ 'font-display': msg.role === 'assistant' }" aria-hidden="true">{{ msg.role === 'user' ? '你' : 'P' }}</div>
         <div class="msg-body">
           <div v-if="msg.role === 'assistant'" class="msg-author">PaperMind</div>
-          <div class="msg-content" v-html="renderMarkdown(msg.content)" />
+          <div v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" v-html="renderMarkdown(msg.content)" />
+          <div v-if="msg.error" class="msg-error" role="alert">
+            <div class="msg-error-text">{{ msg.error }}</div>
+            <div class="msg-error-actions">
+              <el-button size="small" :loading="retrying === msg.id" @click="retry(msg)">重试</el-button>
+              <el-button size="small" text @click="router.push('/settings')">打开设置</el-button>
+            </div>
+          </div>
+          <div v-if="msg.truncated && !msg.error" class="msg-truncated">
+            <span>回答已达长度上限</span>
+            <el-button size="small" text :loading="continuing === msg.id" @click="continueMsg(msg)">继续</el-button>
+          </div>
           <div v-if="msg.sources?.length" class="msg-sources">
             <span class="sources-label"><el-icon aria-hidden="true"><Link /></el-icon> 参考来源</span>
-            <span v-for="(s, i) in msg.sources" :key="i" class="source-chip">{{ s }}</span>
+            <span
+              v-for="(s, i) in msg.sources"
+              :key="i"
+              class="source-chip"
+              :class="{ 'is-jumpable': isJumpable(s) }"
+              :role="isJumpable(s) ? 'button' : undefined"
+              :tabindex="isJumpable(s) ? 0 : undefined"
+              @click="isJumpable(s) && emit('open-source', s)"
+              @keydown.enter="isJumpable(s) && emit('open-source', s)"
+            >{{ s.label }}</span>
           </div>
         </div>
       </div>
 
-      <div v-if="loading" class="message assistant">
+      <div v-if="loading && !hasStreamingBubble" class="message assistant">
         <div class="msg-avatar font-display" aria-hidden="true">P</div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
@@ -72,14 +92,19 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, Reading, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
 import { renderMarkdown } from '../utils/markdown'
+import { isJumpable, type SourceRef } from '../utils/sourceRef'
 
 const props = defineProps<{ conversation: Conversation | null }>()
-defineEmits<{ (e: 'create'): void }>()
+const emit = defineEmits<{ (e: 'create'): void; (e: 'open-source', ref: SourceRef): void }>()
 const chatStore = useChatStore()
+const router = useRouter()
+const retrying = ref('')
+const continuing = ref('')
 
 const input = ref('')
 const inputRef = ref<{ focus: () => void }>()
@@ -96,6 +121,8 @@ function choosePrompt(question: string) {
 const loading = ref(false)
 const messagesRef = ref<HTMLElement>()
 const pendingContext = ref<string[]>([])
+/** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
+const hasStreamingBubble = computed(() => props.conversation?.messages.some(m => m.streaming) ?? false)
 const showAbstractCommand = computed(() => {
   const value = input.value.trim().toLowerCase()
   return value.startsWith('/') && '/abstract'.startsWith(value) && value !== '/abstract'
@@ -112,6 +139,10 @@ async function scrollToBottom() {
 }
 
 watch(() => props.conversation?.messages.length, scrollToBottom)
+// 流式增量不改变消息条数，按末条消息的内容长度跟随滚动
+watch(() => props.conversation?.messages.at(-1)?.content.length ?? 0, () => {
+  if (loading.value) scrollToBottom()
+})
 
 function handleEnter(event: KeyboardEvent) {
   // Enter confirms the current candidate while an IME is composing. It must
@@ -119,6 +150,31 @@ function handleEnter(event: KeyboardEvent) {
   if (event.isComposing || event.keyCode === 229) return
   event.preventDefault()
   send()
+}
+
+async function retry(msg: { id: string }) {
+  if (retrying.value || !props.conversation) return
+  retrying.value = msg.id
+  try {
+    await chatStore.retryMessage(props.conversation.id, msg.id)
+  } catch {
+    // 失败已由 store 就地改写失败卡（msg.error）；这里只负责收尾
+  } finally {
+    retrying.value = ''
+  }
+}
+
+async function continueMsg(msg: { id: string }) {
+  if (continuing.value || !props.conversation) return
+  continuing.value = msg.id
+  try {
+    await chatStore.continueMessage(props.conversation.id, msg.id)
+  } catch (error) {
+    // 续写失败不动原回答，截断条仍在可再点；这里只兜底提示，避免静默失败
+    ElMessage.error(error instanceof Error ? error.message : '继续失败，请稍后重试')
+  } finally {
+    continuing.value = ''
+  }
 }
 
 async function send() {
@@ -137,8 +193,11 @@ async function send() {
   try {
     await chatStore.sendMessage(props.conversation.id, message, context || undefined)
     void chatStore.autoTitleConversation(props.conversation.id)
-  } catch (e: any) {
-    ElMessage.error(`请求失败：${e.message}。请检查设置中的 API 配置。`)
+  } catch (error) {
+    // 正常失败由 store 落成气泡级失败态（msg.error），卡即反馈；
+    // 未落卡（会话不存在 / 用户消息落库失败 / 失败卡自身写库失败）时用 toast 兜底
+    const recorded = props.conversation?.messages.some(m => m.role === 'assistant' && m.error)
+    if (!recorded) ElMessage.error(error instanceof Error ? error.message : '请求失败，请稍后重试')
   } finally {
     loading.value = false
     await scrollToBottom()
@@ -166,6 +225,11 @@ async function send() {
 .message.user .msg-body { flex: 0 1 auto; max-width: 85%; }
 .msg-author { font-size: 11px; font-weight: 600; color: var(--accent); margin: 5px 0 10px; }
 .msg-content { font-size: 14px; line-height: 1.9; color: var(--text-primary); overflow-wrap: anywhere; }
+.msg-content.is-streaming::after { content: '▍'; margin-left: 2px; color: var(--accent); animation: caret-blink 1s steps(2) infinite; }
+@keyframes caret-blink { 50% { opacity: 0; } }
+.msg-error { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--danger-dim); border-radius: 8px; background: var(--danger-dim); }
+.msg-error-text { font-size: 12px; line-height: 1.7; color: var(--danger); overflow-wrap: anywhere; }
+.msg-error-actions { display: flex; gap: 8px; margin-top: 8px; }
 .message.user .msg-content { background: var(--bg-elevated); border: 1px solid var(--border); padding: 11px 15px; border-radius: 10px 3px 10px 10px; font-size: 13px; line-height: 1.8; }
 .msg-content :deep(code) {
   background: var(--bg-elevated);
@@ -262,8 +326,11 @@ async function send() {
 
 .msg-content :deep(img) { max-width: 100%; height: auto; }
 .msg-sources { font-size: 11px; color: var(--text-muted); margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.msg-truncated { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--gold); }
 .sources-label { display: flex; align-items: center; gap: 4px; margin-right: 4px; }
 .source-chip { background: var(--bg-base); padding: 3px 7px; border-radius: 4px; color: var(--text-secondary); border: 1px solid var(--border); overflow-wrap: anywhere; }
+.source-chip.is-jumpable { cursor: pointer; }
+.source-chip.is-jumpable:hover { border-color: var(--accent); color: var(--accent); }
 .typing { padding: 10px 0; display: flex; gap: 5px; width: fit-content; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.45; animation: pulse 1.3s infinite; }
 .typing span:nth-child(2) { animation-delay: 0.2s; }

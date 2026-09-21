@@ -36,12 +36,16 @@
             </div>
             <div class="profile-actions">
               <el-button size="small" plain @click="openEdit(p)">编辑</el-button>
-              <el-button
-                size="small"
-                plain
-                :disabled="profiles.length <= 1"
-                @click="doRemove(p.id)"
-              >删除</el-button>
+              <el-tooltip content="至少保留一个配置" placement="top" :disabled="profiles.length > 1">
+                <span class="tooltip-wrap">
+                  <el-button
+                    size="small"
+                    plain
+                    :disabled="profiles.length <= 1"
+                    @click="doRemove(p.id)"
+                  >删除</el-button>
+                </span>
+              </el-tooltip>
             </div>
           </div>
         </div>
@@ -127,7 +131,7 @@
         <h3>数据管理</h3>
         <p class="card-desc">所有论文与对话数据存储在本地，可随时导出备份。</p>
         <div class="action-row">
-          <el-button @click="exportData">导出数据</el-button>
+          <el-button @click="exportDialogVisible = true">导出数据</el-button>
           <el-button @click="triggerImport">导入数据</el-button>
           <el-button type="danger" plain @click="clearData">清空所有数据</el-button>
         </div>
@@ -139,6 +143,16 @@
           @change="onImportFile"
         />
       </section>
+
+      <!-- ── 导出备份 Dialog ── -->
+      <el-dialog v-model="exportDialogVisible" title="导出备份" width="460px">
+        <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、对话与消息、高亮、索引与语义树、全部设置。</p>
+        <el-checkbox v-model="exportIncludeApiKey">包含 API Key / Token（明文，分享前请谨慎）</el-checkbox>
+        <template #footer>
+          <el-button @click="exportDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="exporting" @click="doExport">导出</el-button>
+        </template>
+      </el-dialog>
 
       <!-- ── 关于 ── -->
       <section class="settings-card about">
@@ -265,7 +279,7 @@ const EMPTY_FORM = (): Omit<LLMProfile, 'id'> => ({
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 4096,
   topK: 0,
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 })
@@ -296,7 +310,8 @@ async function saveProfile() {
 }
 
 async function doRemove(id: string) {
-  await ElMessageBox.confirm('确认删除该配置？', '删除配置', { type: 'warning' })
+  const profile = profiles.value.find(p => p.id === id)
+  await ElMessageBox.confirm(`确认删除配置《${profile?.name ?? '未命名'}》？`, '删除配置', { type: 'warning' })
   await chatStore.removeProfile(id)
   // 同步本地选择器
   chatProfileIdLocal.value = chatProfileId.value
@@ -326,13 +341,14 @@ async function onRebuildTrees() {
   }
   rebuildingTrees.value = true
   try {
-    const { attempted, rebuilt, failed, skipped } = await chatStore.rebuildAllTrees()
+    const { attempted, rebuilt, failed, skipped, firstReason } = await chatStore.rebuildAllTrees()
     // 「重建成 0 篇」有两种截然不同的原因，不能合并成一句话：
-    // 没有候选（跳过）与真的失败（网络/输出非法/输入超限）必须分开报
+    // 没有候选（跳过）与真的失败（网络/输出非法/输入超限）必须分开报，
+    // 失败还要带上首个原因，用户才知道该去改配置还是换论文（#13）
     if (attempted > 0 && rebuilt === 0) {
-      ElMessage.error(`语义树重建失败（${failed}/${attempted} 篇）`)
+      ElMessage.error(`语义树重建失败（${failed}/${attempted} 篇）：${firstReason ?? '原因未知'}`)
     } else if (failed > 0) {
-      ElMessage.warning(`已重建 ${rebuilt} 篇，${failed} 篇失败`)
+      ElMessage.warning(`已重建 ${rebuilt} 篇，${failed} 篇失败：${firstReason ?? '原因未知'}`)
     } else if (rebuilt > 0) {
       ElMessage.success(`已重建 ${rebuilt} 篇论文的语义树`)
     } else {
@@ -351,14 +367,25 @@ function onProviderChange() {
 }
 
 // ── Data management ──
-async function exportData() {
-  const data = await window.db.data.export()
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `papermind-backup-${Date.now()}.json`
-  a.click()
-  ElMessage.success('已导出')
+const exportDialogVisible = ref(false)
+const exportIncludeApiKey = ref(false)
+const exporting = ref(false)
+
+async function doExport() {
+  exporting.value = true
+  try {
+    const result = await window.db.data.exportFile({ includeApiKey: exportIncludeApiKey.value })
+    if (result.canceled) {
+      ElMessage.info('已取消导出')
+      return
+    }
+    ElMessage.success(`已导出到 ${result.filePath}`)
+    exportDialogVisible.value = false
+  } catch (err) {
+    ElMessage.error(`导出失败：${err instanceof Error ? err.message : '未知错误'}`)
+  } finally {
+    exporting.value = false
+  }
 }
 
 const importInput = ref<HTMLInputElement>()
@@ -472,6 +499,7 @@ async function clearData() {
 .badge-chat { background: var(--accent-dim); color: var(--accent); }
 .badge-index { background: var(--gold-dim); color: var(--gold); }
 .profile-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.tooltip-wrap { display: inline-flex; }
 
 /* Settings rows */
 .setting-row {

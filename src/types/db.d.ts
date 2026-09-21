@@ -19,6 +19,7 @@ export interface DbApi {
     updateConversation: (id: string, patch: any) => Promise<void>
     removeConversation: (id: string) => Promise<void>
     addMessage: (msg: any) => Promise<void>
+    updateMessage: (id: string, patch: any) => Promise<void>
   }
   highlight: {
     listByPaper: (paperId: string) => Promise<any[]>
@@ -32,6 +33,8 @@ export interface DbApi {
   }
   data: {
     export: () => Promise<any>
+    /** 主进程弹系统保存对话框写盘；默认不含明文 API Key（#5）。 */
+    exportFile: (options: { includeApiKey?: boolean }) => Promise<{ canceled: boolean; filePath?: string }>
     clear: () => Promise<void>
     import: (data: any) => Promise<void>
   }

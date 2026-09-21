@@ -87,7 +87,7 @@
               </div>
               <div class="card-content">
                 <h3 class="card-title font-display">{{ paper.title || paper.fileName }}</h3>
-                <p class="card-authors">{{ paper.authors?.join(', ') || '作者信息待补充' }}<span v-if="paper.year" class="card-year tabular-nums">{{ paper.year }}</span></p>
+                <p class="card-authors">{{ formatAuthors(paper.authors) }}<span v-if="paper.year" class="card-year tabular-nums">{{ paper.year }}</span></p>
                 <p v-if="paper.abstract" class="card-abstract">{{ paper.abstract }}</p>
                 <p v-else class="card-abstract no-abstract">打开论文，开始阅读与批注。</p>
                 <div class="card-footer">
@@ -106,7 +106,7 @@
                   <el-dropdown-menu>
                     <el-dropdown-item @click="movePaper(paper)">移动到知识库</el-dropdown-item>
                     <el-dropdown-item @click="store.updatePaper(paper.id, { status: 'done' })">标记完成</el-dropdown-item>
-                    <el-dropdown-item divided @click="deletePaper(paper.id)"><span class="danger-text">删除</span></el-dropdown-item>
+                    <el-dropdown-item divided @click="deletePaper(paper)"><span class="danger-text">删除</span></el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -157,6 +157,7 @@
             <span class="import-item-icon" aria-hidden="true">
               <span v-if="item.status === 'done'">✓</span>
               <span v-else-if="item.status === 'error'">✕</span>
+              <span v-else-if="item.status === 'skipped'">–</span>
               <span v-else class="spin">⟳</span>
             </span>
             <span class="import-item-name">{{ item.name }}</span>
@@ -164,6 +165,13 @@
             <span v-if="item.error" class="import-item-error" :title="item.error">{{ item.error }}</span>
           </li>
         </ul>
+      </div>
+    </transition>
+
+    <transition name="slide-up">
+      <div v-if="pendingDelete" class="undo-bar" role="status">
+        <span>已删除《{{ pendingDelete.paper.title || pendingDelete.paper.fileName }}》</span>
+        <button type="button" class="undo-btn" @click="undoDelete">撤销</button>
       </div>
     </transition>
 
@@ -201,16 +209,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from '@element-plus/icons-vue'
-import { usePaperStore } from '../stores/paper'
+import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
 import { parsePdfMeta } from '../utils/pdfUtils'
-import { filterLibraryPapers, type LibraryFilters } from '../utils/libraryFilters'
+import { filterLibraryPapers, formatAuthors, type LibraryFilters } from '../utils/libraryFilters'
 
 const store = usePaperStore()
 const chatStore = useChatStore()
+const router = useRouter()
 const fileInput = ref<HTMLInputElement>()
 const activeKbId = ref(store.knowledgeBases[0]?.id ?? 'default')
 const showNewKbDialog = ref(false)
@@ -244,7 +254,7 @@ function clearFilters() {
 }
 
 // ── 导入进度状态 ──────────────────────────────────────────
-type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error'
+type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error' | 'skipped'
 
 interface ImportItem {
   name: string
@@ -258,13 +268,15 @@ const stageLabel: Record<ImportStatus, string> = {
   saving:  '写入中…',
   done:    '完成',
   error:   '失败',
+  skipped: '已跳过',
 }
 
 const importItems = ref<ImportItem[]>([])
 const showImportPanel = ref(false)
 
+// 跳过重复导入也是终态：计入完成数，进度条才能走完并自动收起
 const doneCount = computed(() =>
-  importItems.value.filter(i => i.status === 'done' || i.status === 'error').length,
+  importItems.value.filter(i => i.status === 'done' || i.status === 'error' || i.status === 'skipped').length,
 )
 const allDone = computed(() => doneCount.value === importItems.value.length && importItems.value.length > 0)
 const importHasError = computed(() => importItems.value.some(i => i.status === 'error'))
@@ -272,15 +284,27 @@ const importPercent = computed(() =>
   importItems.value.length === 0 ? 0 : Math.round((doneCount.value / importItems.value.length) * 100),
 )
 
+let importPanelTimer: number | undefined
+watch(allDone, done => {
+  if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
+  if (done && !importHasError.value) {
+    importPanelTimer = window.setTimeout(() => { showImportPanel.value = false }, 2500)
+  }
+})
+
 function triggerUpload() { fileInput.value?.click() }
 
 async function onFilesSelected(e: Event) {
   const files = (e.target as HTMLInputElement).files
   if (!files || files.length === 0) return
 
+  if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
+
   // 初始化进度列表
   importItems.value = Array.from(files).map(f => ({ name: f.name, status: 'pending' as ImportStatus }))
   showImportPanel.value = true
+
+  let openPaperIdAfterImport = ''
 
   for (let i = 0; i < importItems.value.length; i++) {
     const file = files[i]
@@ -288,6 +312,22 @@ async function onFilesSelected(e: Event) {
     try {
       item.status = 'parsing'
       const meta = await parsePdfMeta(file)
+
+      const existing = store.papers.find(p => p.fileHash && p.fileHash === meta.fileHash)
+      if (existing) {
+        try {
+          await ElMessageBox.confirm(
+            `《${existing.title || existing.fileName}》已在库中，是否打开现有条目？`,
+            '重复导入',
+            { type: 'info', confirmButtonText: '打开现有条目', cancelButtonText: '跳过' },
+          )
+          openPaperIdAfterImport = existing.id
+          item.status = 'done'
+        } catch {
+          item.status = 'skipped'
+        }
+        continue
+      }
 
       item.status = 'saving'
       const id = await store.addPaper({
@@ -307,6 +347,8 @@ async function onFilesSelected(e: Event) {
     }
   }
 
+  if (openPaperIdAfterImport) void router.push('/library/' + openPaperIdAfterImport)
+
   ;(e.target as HTMLInputElement).value = ''
 }
 
@@ -317,14 +359,39 @@ function createKb() {
 }
 
 async function removeKb(id: string) {
-  await ElMessageBox.confirm('删除知识库会同时删除其中所有论文，确认继续？', '删除知识库', { type: 'warning' })
+  const kb = store.knowledgeBases.find(k => k.id === id)
+  await ElMessageBox.confirm(`删除知识库《${kb?.name ?? '未命名'}》会同时删除其中所有论文，确认继续？`, '删除知识库', { type: 'warning' })
   await store.removeKnowledgeBase(id)
   if (activeKbId.value === id) activeKbId.value = 'default'
 }
 
-async function deletePaper(id: string) {
-  await ElMessageBox.confirm('确认删除该论文？', '删除', { type: 'warning' })
-  await store.removePaper(id)
+interface PendingDelete { paper: Paper; index: number; timer: number }
+const pendingDelete = ref<PendingDelete | null>(null)
+
+async function deletePaper(paper: Paper) {
+  await ElMessageBox.confirm(`确认删除《${paper.title || paper.fileName}》？`, '删除', { type: 'warning' })
+  const index = store.papers.findIndex(p => p.id === paper.id)
+  if (index === -1) return
+  store.papers.splice(index, 1)            // 先从列表移除，5 秒内可撤销
+  if (pendingDelete.value) finalizeDelete() // 上一个未到期的删除立即落库
+  const timer = window.setTimeout(() => finalizeDelete(), 5000)
+  pendingDelete.value = { paper, index, timer }
+}
+
+function undoDelete() {
+  if (!pendingDelete.value) return
+  clearTimeout(pendingDelete.value.timer)
+  const { paper, index } = pendingDelete.value
+  store.papers.splice(Math.min(index, store.papers.length), 0, paper)
+  pendingDelete.value = null
+}
+
+function finalizeDelete() {
+  if (!pendingDelete.value) return
+  clearTimeout(pendingDelete.value.timer)
+  const { paper } = pendingDelete.value
+  pendingDelete.value = null
+  void store.removePaper(paper.id)
 }
 
 function movePaper(paper: any) {
@@ -549,6 +616,7 @@ function movePaper(paper: any) {
 }
 .import-item[data-status='done'] .import-item-stage   { color: var(--success); }
 .import-item[data-status='error'] .import-item-stage  { color: var(--danger); }
+.import-item[data-status='skipped'] .import-item-stage { color: var(--text-muted); }
 .import-item[data-status='parsing'] .import-item-stage,
 .import-item[data-status='saving']  .import-item-stage { color: var(--accent); }
 
@@ -580,4 +648,8 @@ function movePaper(paper: any) {
   transform: translateY(16px);
   opacity: 0;
 }
+
+/* ── 删除撤销条 ───────────────────────────────────────── */
+.undo-bar { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 10px 16px; background: var(--text-primary); color: var(--bg-surface); border-radius: 8px; font-size: 13px; z-index: 1000; box-shadow: var(--shadow-card); }
+.undo-btn { border: 0; background: transparent; color: var(--gold); font-size: 13px; font-weight: 600; cursor: pointer; }
 </style>

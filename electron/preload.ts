@@ -21,6 +21,7 @@ const db = {
     updateConversation: (id: string, patch: unknown) => ipcRenderer.invoke('chat:updateConversation', id, patch),
     removeConversation: (id: string) => ipcRenderer.invoke('chat:removeConversation', id),
     addMessage: (msg: unknown) => ipcRenderer.invoke('chat:addMessage', msg),
+    updateMessage: (id: string, patch: unknown) => ipcRenderer.invoke('chat:updateMessage', id, patch),
   },
   highlight: {
     listByPaper: (paperId: string) => ipcRenderer.invoke('highlight:listByPaper', paperId),
@@ -34,6 +35,7 @@ const db = {
   },
   data: {
     export: () => ipcRenderer.invoke('data:export'),
+    exportFile: (options: unknown) => ipcRenderer.invoke('data:export-file', options),
     clear: () => ipcRenderer.invoke('data:clear'),
     import: (data: unknown) => ipcRenderer.invoke('data:import', data),
   },

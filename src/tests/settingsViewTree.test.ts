@@ -9,6 +9,19 @@ import { useChatStore } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
 
+/**
+ * 填好 API Key 的索引配置：没 Key 时建树会在发请求前短路成「未配置模型」（#13），
+ * 而重建用例要验证的是真实请求路径（成功/失败）。每次返回副本，避免用例间互相污染。
+ */
+const KEYED_PROFILE = [{
+  id: 'default', name: '默认配置', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-test',
+  baseUrl: 'https://api.openai.com/v1', temperature: 0.7, maxTokens: 4096, topK: 0,
+  systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
+}]
+
+const keyedSettings = (key: string) =>
+  Promise.resolve(key === 'llm_profiles' ? KEYED_PROFILE.map(profile => ({ ...profile })) : null)
+
 const VALID_TREE = JSON.stringify({
   root: {
     id: 'r', label: '核心主张', description: '论文的中心结论', relationToParent: null,
@@ -81,6 +94,7 @@ describe('SettingsView — 语义树开关（§8.2）', () => {
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ value: '', action: 'confirm' } as any)
     const error = vi.spyOn(ElMessage, 'error')
     const success = vi.spyOn(ElMessage, 'success')
+    mockDb().settings.get.mockImplementation(keyedSettings)
     mockDb().index.list.mockResolvedValue(['p1'])
     mockDb().index.get.mockResolvedValue({
       indexJson: '{}', pagesJson: JSON.stringify(['Attention is all you need.']),
@@ -92,12 +106,15 @@ describe('SettingsView — 语义树开关（§8.2）', () => {
     await wrapper.find('[data-test="rebuild-trees"]').trigger('click')
     await vi.waitFor(() => expect(error).toHaveBeenCalled())
     expect(error.mock.calls[0][0]).toContain('失败')
+    // 失败文案还要带上原因，用户才知道该改配置还是重试（#13）
+    expect(error.mock.calls[0][0]).toContain('请求失败')
     expect(success).not.toHaveBeenCalled()
   })
 
   it('确认后可强制重建全部语义树（缓存键覆盖不到的场景）', async () => {
     // element-plus 的 resolve 类型与实际返回值对不上，测试只关心「点了确认」
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ value: '', action: 'confirm' } as any)
+    mockDb().settings.get.mockImplementation(keyedSettings)
     mockDb().index.list.mockResolvedValue(['p1', 'p2'])
     mockDb().index.get.mockResolvedValue({
       indexJson: '{}', pagesJson: JSON.stringify(['Attention is all you need.']),

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS papers (
   status            TEXT DEFAULT 'unread',
   file_name         TEXT NOT NULL,
   file_path         TEXT NOT NULL,       -- absolute path on disk
+  file_hash         TEXT DEFAULT '',    -- 文件内容 SHA-256，重复导入检测（#10）
   added_at          INTEGER NOT NULL,
   FOREIGN KEY (knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
 );
@@ -35,6 +36,9 @@ CREATE TABLE IF NOT EXISTS messages (
   role            TEXT NOT NULL,
   content         TEXT NOT NULL,
   sources         TEXT DEFAULT '[]',     -- JSON array
+  error       TEXT DEFAULT '',          -- 失败态标记：非空即渲染失败卡（#2）
+  truncated   INTEGER DEFAULT 0,        -- finish_reason=length 截断标记（#3）
+  context     TEXT DEFAULT '',          -- 用户划选原文：重试时按原上下文重放（#2）
   timestamp       INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );

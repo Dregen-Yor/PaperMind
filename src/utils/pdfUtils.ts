@@ -3,10 +3,19 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 // Relative URL works with both the Vite dev server and packaged Electron file:// pages.
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
 
+/** 文件内容 SHA-256（十六进制），用于重复导入检测（#10）。 */
+export async function sha256Hex(data: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
 export async function parsePdfMeta(file: File): Promise<{
-  title: string; authors: string[]; abstract: string; year: number; fileData: string
+  title: string; authors: string[]; abstract: string; year: number; fileData: string; fileHash: string
 }> {
   const arrayBuffer = await file.arrayBuffer()
+  // pdf.js 把 data.buffer transfer 给 worker，调用方的 ArrayBuffer 随之 detach，
+  // 所以内容哈希必须在 getDocument 之前算（#10）。
+  const fileHash = await sha256Hex(arrayBuffer)
   // Chunked base64 — avoids "Maximum call stack size exceeded" for large PDFs
   const bytes = new Uint8Array(arrayBuffer)
   let binary = ''
@@ -42,6 +51,7 @@ export async function parsePdfMeta(file: File): Promise<{
     abstract,
     year,
     fileData: base64,
+    fileHash,
   }
 }
 

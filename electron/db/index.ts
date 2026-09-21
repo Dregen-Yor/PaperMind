@@ -3,6 +3,9 @@ import { app } from 'electron'
 import { join } from 'path'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
 import { SCHEMA } from './schema'
+import { normalizeSourceList } from '../../src/utils/sourceRef'
+import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
+import { planFragmentMerge } from '../../src/utils/highlightMerge'
 
 let db: Database.Database
 let papersDir: string
@@ -28,11 +31,48 @@ export function initDb() {
   const treeCols = (db.prepare('PRAGMA table_info(paper_trees)').all() as Array<{ name: string }>).map(c => c.name)
   if (!treeCols.includes('build_config_hash')) db.exec("ALTER TABLE paper_trees ADD COLUMN build_config_hash TEXT DEFAULT ''")
 
+  // 消息失败/截断标记（#2/#3，2026-09-21）
+  const messageCols = (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).map(c => c.name)
+  if (!messageCols.includes('error')) db.exec("ALTER TABLE messages ADD COLUMN error TEXT DEFAULT ''")
+  if (!messageCols.includes('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER DEFAULT 0')
+  if (!messageCols.includes('context')) db.exec("ALTER TABLE messages ADD COLUMN context TEXT DEFAULT ''")
+
+  // 论文文件内容哈希（#10，2026-09-21）。旧行留空串：空值不参与重复导入查重。
+  const paperCols = (db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>).map(c => c.name)
+  if (!paperCols.includes('file_hash')) db.exec("ALTER TABLE papers ADD COLUMN file_hash TEXT DEFAULT ''")
+
   // Seed default knowledge base
   const count = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
   if (count === 0) {
     db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
       .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
+  }
+
+  // 历史碎片合并（#7，2026-09-21）：一次划选被按文本节点拆成的多行，合并为一条
+  const fragmentRows = db.prepare(
+    'SELECT id, paper_id, page_num, text, start_offset, end_offset, created_at, note FROM highlights',
+  ).all() as Array<{
+    id: string
+    paper_id: string
+    page_num: number
+    text: string
+    start_offset: number
+    end_offset: number
+    created_at: number
+    note: string
+  }>
+  const mergePlan = planFragmentMerge(fragmentRows.map(r => ({
+    id: r.id, paperId: r.paper_id, pageNum: r.page_num, text: r.text,
+    startOffset: r.start_offset, endOffset: r.end_offset, createdAt: r.created_at,
+    note: r.note ?? '',
+  })))
+  if (mergePlan.removals.length > 0) {
+    const updateFragment = db.prepare('UPDATE highlights SET end_offset = ? WHERE id = ?')
+    const removeFragment = db.prepare('DELETE FROM highlights WHERE id = ?')
+    db.transaction(() => {
+      for (const item of mergePlan.updates) updateFragment.run(item.endOffset, item.id)
+      for (const id of mergePlan.removals) removeFragment.run(id)
+    })()
   }
 }
 
@@ -67,11 +107,11 @@ export const paperApi = {
     const filePath = join(papersDir, `${paper.id}.pdf`)
     writeFileSync(filePath, Buffer.from(paper.fileData, 'base64'))
     db.prepare(`INSERT INTO papers
-      (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, added_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, file_hash, added_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       paper.id, paper.knowledgeBaseId, paper.title, JSON.stringify(paper.authors ?? []),
       paper.abstract, paper.year, JSON.stringify(paper.tags ?? []), paper.status,
-      paper.fileName, filePath, paper.addedAt,
+      paper.fileName, filePath, paper.fileHash ?? '', paper.addedAt,
     )
     return { ...paper, filePath }
   },
@@ -114,6 +154,7 @@ function deserializePaper(row: any) {
     tags: JSON.parse(row.tags),
     status: row.status,
     fileName: row.file_name,
+    fileHash: row.file_hash ?? '',
     addedAt: row.added_at,
   }
 }
@@ -128,7 +169,7 @@ export const chatApi = {
       paperIds: JSON.parse(c.paper_ids),
       createdAt: c.created_at,
       messages: (db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC').all(c.id) as any[])
-        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: JSON.parse(m.sources), timestamp: m.timestamp })),
+        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: normalizeSourceList(JSON.parse(m.sources)), timestamp: m.timestamp, error: m.error ?? '', truncated: !!m.truncated, context: m.context ?? '' })),
     }))
   },
   createConversation: (conv: { id: string; title: string; paperIds: string[]; createdAt: number }) => {
@@ -143,9 +184,22 @@ export const chatApi = {
       .run(patch.title ?? cur.title, patch.paperIds ? JSON.stringify(patch.paperIds) : cur.paper_ids, id)
   },
   removeConversation: (id: string) => db.prepare('DELETE FROM conversations WHERE id = ?').run(id),
-  addMessage: (msg: { id: string; conversationId: string; role: string; content: string; sources: string[]; timestamp: number }) => {
-    db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, timestamp) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.timestamp)
+  addMessage: (msg: { id: string; conversationId: string; role: string; content: string; sources: string[]; timestamp: number; error?: string; truncated?: boolean; context?: string }) => {
+    db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.error ?? '', msg.truncated ? 1 : 0, msg.context ?? '', msg.timestamp)
+  },
+  updateMessage: (id: string, patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean; context?: string }) => {
+    const cur = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as any
+    if (!cur) return
+    db.prepare('UPDATE messages SET content = ?, sources = ?, error = ?, truncated = ?, context = ? WHERE id = ?')
+      .run(
+        patch.content ?? cur.content,
+        patch.sources !== undefined ? JSON.stringify(patch.sources) : cur.sources,
+        patch.error !== undefined ? patch.error : (cur.error ?? ''),
+        patch.truncated !== undefined ? (patch.truncated ? 1 : 0) : (cur.truncated ?? 0),
+        patch.context !== undefined ? patch.context : (cur.context ?? ''),
+        id,
+      )
   },
 }
 
@@ -262,12 +316,14 @@ export const treeApi = {
   remove: (paperId: string) => db.prepare('DELETE FROM paper_trees WHERE paper_id = ?').run(paperId),
 }
 
-export function exportAll() {
+/** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
+export function exportAll(opts: { includeApiKey?: boolean } = {}) {
   const paperRows = db.prepare('SELECT * FROM papers ORDER BY added_at DESC').all() as any[]
   const papers = paperRows.map(row => ({
     ...deserializePaper(row),
     fileData: existsSync(row.file_path) ? readFileSync(row.file_path).toString('base64') : null,
   }))
+  const settingsRows = db.prepare('SELECT * FROM settings').all() as Array<{ key: string; value: string }>
   return {
     version: 1,
     exportedAt: Date.now(),
@@ -277,7 +333,7 @@ export function exportAll() {
     highlights: db.prepare('SELECT * FROM highlights').all(),
     paperIndexes: db.prepare('SELECT paper_id, index_json, pages_json FROM paper_indexes').all(),
     paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
-    settings: db.prepare('SELECT * FROM settings').all(),
+    settings: opts.includeApiKey ? settingsRows : stripApiKeysFromSettings(settingsRows),
   }
 }
 
@@ -318,19 +374,20 @@ export function importAll(data: any) {
 
     for (const p of papers) {
       db.prepare(`INSERT INTO papers
-        (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, added_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, file_hash, added_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(p.id, p.knowledgeBaseId, p.title ?? '', JSON.stringify(p.authors ?? []),
           p.abstract ?? '', p.year ?? 0, JSON.stringify(p.tags ?? []), p.status ?? 'unread',
-          p.fileName ?? '', join(papersDir, `${p.id}.pdf`), p.addedAt ?? Date.now())
+          p.fileName ?? '', join(papersDir, `${p.id}.pdf`), p.fileHash ?? '', p.addedAt ?? Date.now())
     }
 
     for (const c of conversations) {
       db.prepare('INSERT INTO conversations (id, title, paper_ids, created_at) VALUES (?, ?, ?, ?)')
         .run(c.id, c.title, JSON.stringify(c.paperIds ?? []), c.createdAt ?? Date.now())
       for (const m of (c.messages ?? [])) {
-        db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, timestamp) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(m.id, c.id, m.role, m.content, JSON.stringify(m.sources ?? []), m.timestamp ?? Date.now())
+        db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(m.id, c.id, m.role, m.content, JSON.stringify(m.sources ?? []),
+            m.error ?? '', m.truncated ? 1 : 0, m.context ?? '', m.timestamp ?? Date.now())
       }
     }
 

@@ -21,6 +21,7 @@ const mockDb = {
     updateConversation: vi.fn().mockResolvedValue(undefined),
     removeConversation: vi.fn().mockResolvedValue(undefined),
     addMessage: vi.fn().mockResolvedValue(undefined),
+    updateMessage: vi.fn().mockResolvedValue(undefined),
   },
   highlight: {
     listByPaper: vi.fn().mockResolvedValue([]),
@@ -45,6 +46,7 @@ const mockDb = {
   },
   data: {
     export: vi.fn().mockResolvedValue({}),
+    exportFile: vi.fn().mockResolvedValue({ canceled: false, filePath: '/tmp/papermind-backup-test.json' }),
     clear: vi.fn().mockResolvedValue(undefined),
     import: vi.fn().mockResolvedValue(undefined),
   },
