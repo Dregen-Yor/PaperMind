@@ -39,6 +39,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen } from '@element-plus/icons-vue'
 import { usePaperStore } from '../stores/paper'
 import { mergeSegments, type HighlightSegment } from '../utils/highlightMerge'
+import { getHighlightRanges, getTextNodes } from '../utils/pdfHighlight'
 
 const props = defineProps<{ src: string; paperId: string }>()
 const paperStore = usePaperStore()
@@ -83,17 +84,6 @@ const highlightSegments: HighlightSegment[] = []
 
 const popupStyle = computed(() => ({ left: `${selectionPopup.value.x}px`, top: `${selectionPopup.value.y}px` }))
 
-function getTextNodes(root: HTMLElement): Text[] {
-  const nodes: Text[] = []
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  let node = walker.nextNode()
-  while (node) {
-    if (node.textContent) nodes.push(node as Text)
-    node = walker.nextNode()
-  }
-  return nodes
-}
-
 function subtractExisting(segment: HighlightSegment): HighlightSegment[] {
   const existing = highlightSegments
     .filter(item => item.page === segment.page)
@@ -112,59 +102,29 @@ function subtractExisting(segment: HighlightSegment): HighlightSegment[] {
   return uncovered
 }
 
-function caretRect(node: Text, offset: number): DOMRect {
-  const range = document.createRange()
-  range.setStart(node, offset)
-  range.collapse(true)
-  const rect = range.getBoundingClientRect()
-  range.detach()
-  return rect
-}
-
 function drawSegment(pageDiv: HTMLElement, segment: HighlightSegment) {
-  const nodes = getTextNodes(pageDiv.querySelector<HTMLElement>('.text-layer')!)
-  let offset = 0
-
-  for (const node of nodes) {
-    const length = node.data.length
-    const nodeStart = offset
-    const nodeEnd = offset + length
-    const start = Math.max(segment.start, nodeStart)
-    const end = Math.min(segment.end, nodeEnd)
-    if (end > start) {
-      const localStart = start - nodeStart
-      const localEnd = end - nodeStart
-      const startRect = caretRect(node, localStart)
-      const endRect = caretRect(node, localEnd)
-
-      const textRange = document.createRange()
-      textRange.setStart(node, localStart)
-      textRange.setEnd(node, localEnd)
-      const textRect = textRange.getBoundingClientRect()
-      textRange.detach()
-
-      const left = Math.min(startRect.left, endRect.left)
-      const right = Math.max(startRect.left, endRect.left)
-      if (right > left && textRect.height > 0) {
-        const pageRect = pageDiv.getBoundingClientRect()
-        const verticalInset = Math.min(1.5, textRect.height * 0.09)
-        const overlay = document.createElement('div')
-        overlay.className = 'pdf-highlight-overlay'
-        overlay.style.left = `${left - pageRect.left}px`
-        overlay.style.top = `${textRect.top - pageRect.top + verticalInset}px`
-        overlay.style.width = `${right - left}px`
-        overlay.style.height = `${textRect.height - verticalInset * 2}px`
-        pageDiv.appendChild(overlay)
-      }
+  const textLayer = pageDiv.querySelector<HTMLElement>('.text-layer')!
+  const highlightLayer = pageDiv.querySelector<HTMLElement>('.pdf-highlight-layer')!
+  const pageRect = pageDiv.getBoundingClientRect()
+  for (const range of getHighlightRanges(textLayer, segment.start, segment.end)) {
+    for (const rect of Array.from(range.getClientRects())) {
+      if (rect.width <= 0 || rect.height <= 0) continue
+      const verticalInset = Math.min(1.5, rect.height * 0.09)
+      const overlay = document.createElement('div')
+      overlay.className = 'pdf-highlight-overlay'
+      overlay.style.left = `${rect.left - pageRect.left}px`
+      overlay.style.top = `${rect.top - pageRect.top + verticalInset}px`
+      overlay.style.width = `${rect.width}px`
+      overlay.style.height = `${rect.height - verticalInset * 2}px`
+      highlightLayer.appendChild(overlay)
     }
-    offset = nodeEnd
   }
 }
 
 function restorePageHighlights(pageDiv: HTMLElement, page: number) {
-  const segments = highlightSegments
-    .filter(segment => segment.page === page)
-    .sort((a, b) => b.start - a.start)
+  // Repaint the union so extending an existing mark also fills its internal spaces.
+  pageDiv.querySelector('.pdf-highlight-layer')!.replaceChildren()
+  const segments = mergeSegments(highlightSegments.filter(segment => segment.page === page))
   for (const segment of segments) drawSegment(pageDiv, segment)
 }
 
@@ -215,10 +175,16 @@ async function renderPage(num: number, generation: number) {
   const ctx = canvas.getContext('2d')!
   pageDiv.appendChild(canvas)
 
+  // Blend all saved marks as one layer: overlapping rectangles keep the same yellow.
+  const highlightLayerDiv = document.createElement('div')
+  highlightLayerDiv.className = 'pdf-highlight-layer'
+  highlightLayerDiv.setAttribute('aria-hidden', 'true')
+  pageDiv.appendChild(highlightLayerDiv)
+
   // Text layer for selection
   const textLayerDiv = document.createElement('div')
   textLayerDiv.className = 'text-layer'
-  textLayerDiv.style.setProperty('--scale-factor', String(viewport.scale))
+  textLayerDiv.style.setProperty('--total-scale-factor', String(viewport.scale))
   pageDiv.appendChild(textLayerDiv)
 
   pagesRef.value!.appendChild(pageDiv)
@@ -231,7 +197,6 @@ async function renderPage(num: number, generation: number) {
 
   const textContent = await page.getTextContent()
   if (generation !== renderGeneration) return
-  // @ts-ignore - renderTextLayer available in pdfjs
   const textLayer = new pdfjsLib.TextLayer({
     textContentSource: textContent,
     container: textLayerDiv,
@@ -357,16 +322,14 @@ function highlightSelection() {
           paperId: props.paperId,
           text: selectedText.value,
           pageNum: segment.page,
-          color: '#c9a84c',
+          color: '#ffe66a',
           note: '',
           startOffset: segment.start,
           endOffset: segment.end,
         }).catch(() => {})
       }
     }
-    for (const segment of added.sort((a, b) => b.start - a.start)) {
-      drawSegment(pageDiv, segment)
-    }
+    if (added.length > 0) restorePageHighlights(pageDiv, Number(pageDiv.dataset.page))
   }
 
   selectedRange = null
@@ -440,6 +403,7 @@ defineExpose({ scrollToPage })
 
 :deep(.pdf-page) {
   position: relative;
+  isolation: isolate;
   background: white;
   box-shadow: 0 2px 8px rgb(53 45 38 / 12%), 0 0 0 1px rgb(53 45 38 / 6%);
   border-radius: 1px;
@@ -451,27 +415,56 @@ defineExpose({ scrollToPage })
   100% { outline: 3px solid transparent; outline-offset: 2px; }
 }
 :deep(.text-layer) {
+  /* PDF.js 6 writes --font-height / --scale-x instead of inline font-size / transform.
+     Keep this layout contract in sync with pdfjs-dist/web/pdf_viewer.css. */
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
   position: absolute;
   inset: 0;
   z-index: 2;
   overflow: hidden;
   line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  mix-blend-mode: multiply;
 }
-:deep(.text-layer span) {
+:deep(.text-layer :is(span, br)) {
   color: transparent;
   position: absolute;
   white-space: pre;
   cursor: text;
   transform-origin: 0 0;
+  user-select: text;
 }
-:deep(.text-layer ::selection) { background: rgba(155, 121, 68, 0.28); }
-:deep(.pdf-highlight-overlay) {
+:deep(.text-layer > :not(.markedContent)),
+:deep(.text-layer .markedContent span:not(.markedContent)) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+:deep(.text-layer .markedContent) { display: contents; }
+/* Keep the selectable text invisible, including when global ::selection sets a color. */
+:deep(.text-layer ::selection) { background: #fff4bf; color: transparent; }
+:deep(.text-layer br::selection) { background: transparent; }
+:deep(.pdf-highlight-layer) {
   position: absolute;
+  inset: 0;
   z-index: 1;
   pointer-events: none;
-  background: rgba(230, 193, 104, 0.38);
-  border-radius: 1px;
   mix-blend-mode: multiply;
+}
+:deep(.pdf-highlight-overlay) {
+  position: absolute;
+  background: #ffe66a;
 }
 
 .selection-popup {
