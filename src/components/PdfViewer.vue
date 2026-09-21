@@ -464,12 +464,14 @@ defineExpose({ scrollToPage })
   cursor: text;
   transform-origin: 0 0;
 }
-:deep(.text-layer ::selection) { background: rgba(155, 121, 68, 0.28); }
+/* 划选：只显示淡黄色底；color 必须显式保持 transparent —— 全局 ::selection 的 color
+   会让透明的文本层字形在划选瞬间显形，与画布正文叠成重影 */
+:deep(.text-layer ::selection) { background: rgb(255 235 130 / 60%); color: transparent; }
 :deep(.pdf-highlight-overlay) {
   position: absolute;
   z-index: 1;
   pointer-events: none;
-  background: rgba(230, 193, 104, 0.38);
+  background: rgb(255 213 0 / 55%);
   border-radius: 1px;
   mix-blend-mode: multiply;
 }
