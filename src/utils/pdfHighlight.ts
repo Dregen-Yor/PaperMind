@@ -30,3 +30,20 @@ export function getHighlightRanges(root: HTMLElement, start: number, end: number
   }
   return ranges
 }
+
+export interface HighlightRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/** Page-relative rectangles shared by painting, hit testing and the active outline. */
+export function getHighlightRects(root: HTMLElement, start: number, end: number, pageRect: DOMRect): HighlightRect[] {
+  return getHighlightRanges(root, start, end).flatMap(range =>
+    Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0).map(rect => {
+      const inset = Math.min(1.5, rect.height * 0.09)
+      return { left: rect.left - pageRect.left, top: rect.top - pageRect.top + inset, width: rect.width, height: rect.height - inset * 2 }
+    }),
+  )
+}

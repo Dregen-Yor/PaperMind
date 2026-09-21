@@ -22,24 +22,34 @@
     </div>
 
     <!-- Selection popup -->
-    <div v-if="selectionPopup.visible" class="selection-popup" :style="popupStyle">
-      <button class="popup-btn" @click="sendSelectionToChat">
+    <div v-if="selectionPopup.visible" ref="popupRef" class="selection-popup" :style="popupStyle" role="toolbar" :aria-label="activeHighlight ? '高亮操作' : '选中文字操作'" @pointerdown.stop @mousedown.prevent @mouseup.stop>
+      <button type="button" class="popup-btn" @click="sendSelectionToChat">
         <el-icon><ChatLineSquare /></el-icon> 发送到对话
       </button>
-      <button class="popup-btn" @click="highlightSelection">
+      <button v-if="activeHighlight" type="button" class="popup-btn popup-btn-remove" :disabled="highlightBusy" @click="cancelHighlight">
+        <el-icon><Delete /></el-icon> 取消高亮
+      </button>
+      <button v-else type="button" class="popup-btn" :disabled="highlightBusy" @click="highlightSelection">
         <el-icon><EditPen /></el-icon> 高亮
       </button>
+    </div>
+
+    <div v-if="undoHighlight || highlightError" class="highlight-feedback" role="status" @pointerdown.stop @mouseup.stop>
+      <span v-if="highlightError" role="alert">{{ highlightError }}</span>
+      <span v-else>已取消高亮</span>
+      <button v-if="undoHighlight" type="button" class="undo-btn" :disabled="highlightBusy" @click="restoreLastHighlight">撤销</button>
+      <button type="button" class="feedback-close" aria-label="关闭提示" :disabled="highlightBusy" @click="dismissFeedback">×</button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, nextTick, watch } from 'vue'
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
-import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen } from '@element-plus/icons-vue'
-import { usePaperStore } from '../stores/paper'
+import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen, Delete } from '@element-plus/icons-vue'
+import { usePaperStore, type Highlight } from '../stores/paper'
 import { mergeSegments, type HighlightSegment } from '../utils/highlightMerge'
-import { getHighlightRanges, getTextNodes } from '../utils/pdfHighlight'
+import { getHighlightRects, getTextNodes, type HighlightRect } from '../utils/pdfHighlight'
 
 const props = defineProps<{ src: string; paperId: string }>()
 const paperStore = usePaperStore()
@@ -50,6 +60,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
 const containerRef = ref<HTMLElement>()
 const scrollRef = ref<HTMLElement>()
 const pagesRef = ref<HTMLElement>()
+const popupRef = ref<HTMLElement>()
 const currentPage = ref(1)
 const totalPages = ref(0)
 const scale = ref(1)
@@ -80,12 +91,23 @@ const selectedText = ref('')
 let pdfDoc: any = null
 let selectedRange: Range | null = null
 const selectionPopup = ref({ visible: false, x: 0, y: 0 })
-const highlightSegments: HighlightSegment[] = []
+const highlights = ref<Highlight[]>([])
+const activeHighlight = ref<Highlight | null>(null)
+const undoHighlight = ref<Highlight | null>(null)
+const highlightBusy = ref(false)
+const highlightError = ref('')
+const hitRegions = new Map<number, Array<{ id: string; rects: HighlightRect[] }>>()
+let undoTimer: ReturnType<typeof setTimeout> | undefined
+let documentGeneration = 0
+let popupGeneration = 0
+let pointerStart: { x: number; y: number; moved: boolean } | null = null
+
+const highlightSegments = computed<HighlightSegment[]>(() => highlights.value.map(h => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
 
 const popupStyle = computed(() => ({ left: `${selectionPopup.value.x}px`, top: `${selectionPopup.value.y}px` }))
 
 function subtractExisting(segment: HighlightSegment): HighlightSegment[] {
-  const existing = highlightSegments
+  const existing = highlightSegments.value
     .filter(item => item.page === segment.page)
     .sort((a, b) => a.start - b.start)
 
@@ -102,38 +124,48 @@ function subtractExisting(segment: HighlightSegment): HighlightSegment[] {
   return uncovered
 }
 
-function drawSegment(pageDiv: HTMLElement, segment: HighlightSegment) {
-  const textLayer = pageDiv.querySelector<HTMLElement>('.text-layer')!
-  const highlightLayer = pageDiv.querySelector<HTMLElement>('.pdf-highlight-layer')!
-  const pageRect = pageDiv.getBoundingClientRect()
-  for (const range of getHighlightRanges(textLayer, segment.start, segment.end)) {
-    for (const rect of Array.from(range.getClientRects())) {
-      if (rect.width <= 0 || rect.height <= 0) continue
-      const verticalInset = Math.min(1.5, rect.height * 0.09)
-      const overlay = document.createElement('div')
-      overlay.className = 'pdf-highlight-overlay'
-      overlay.style.left = `${rect.left - pageRect.left}px`
-      overlay.style.top = `${rect.top - pageRect.top + verticalInset}px`
-      overlay.style.width = `${rect.width}px`
-      overlay.style.height = `${rect.height - verticalInset * 2}px`
-      highlightLayer.appendChild(overlay)
-    }
+function drawRects(parent: HTMLElement, rects: HighlightRect[], className: string) {
+  for (const rect of rects) {
+    const overlay = document.createElement('div')
+    overlay.className = className
+    overlay.style.left = `${rect.left}px`
+    overlay.style.top = `${rect.top}px`
+    overlay.style.width = `${rect.width}px`
+    overlay.style.height = `${rect.height}px`
+    parent.appendChild(overlay)
   }
 }
 
 function restorePageHighlights(pageDiv: HTMLElement, page: number) {
   // Repaint the union so extending an existing mark also fills its internal spaces.
-  pageDiv.querySelector('.pdf-highlight-layer')!.replaceChildren()
-  const segments = mergeSegments(highlightSegments.filter(segment => segment.page === page))
-  for (const segment of segments) drawSegment(pageDiv, segment)
+  const layer = pageDiv.querySelector<HTMLElement>('.pdf-highlight-layer')!
+  const textLayer = pageDiv.querySelector<HTMLElement>('.text-layer')!
+  const pageRect = pageDiv.getBoundingClientRect()
+  layer.replaceChildren()
+  const segments = mergeSegments(highlightSegments.value.filter(segment => segment.page === page))
+  for (const segment of segments) {
+    drawRects(layer, getHighlightRects(textLayer, segment.start, segment.end, pageRect), 'pdf-highlight-overlay')
+  }
+  // Keep identity separate from the painted union. The newest mark wins in an overlap.
+  hitRegions.set(page, highlights.value.filter(h => h.pageNum === page).sort((a, b) => b.createdAt - a.createdAt).map(h => ({
+    id: h.id, rects: getHighlightRects(textLayer, h.startOffset, h.endOffset, pageRect),
+  })))
+}
+
+function repaintHighlights(page: number) {
+  const pageDiv = pagesRef.value?.querySelector<HTMLElement>(`[data-page="${page}"]`)
+  if (pageDiv?.querySelector('.text-layer span')) restorePageHighlights(pageDiv, page)
 }
 
 async function renderPdf() {
   const generation = ++renderGeneration
+  closePopup()
+  hitRegions.clear()
   if (!pagesRef.value) return
   pagesRef.value.innerHTML = ''
-  pdfDoc = await pdfjsLib.getDocument({ url: props.src }).promise
+  const loadedPdf = await pdfjsLib.getDocument({ url: props.src }).promise
   if (generation !== renderGeneration) return
+  pdfDoc = loadedPdf
   totalPages.value = pdfDoc.numPages
   if (fitOnNextRender && scrollRef.value?.clientWidth) {
     const firstPage = await pdfDoc.getPage(1)
@@ -209,6 +241,7 @@ async function renderPage(num: number, generation: number) {
 }
 
 function onScroll() {
+  closePopup()
   if (!scrollRef.value) return
   const pages = pagesRef.value?.querySelectorAll('.pdf-page')
   if (!pages) return
@@ -258,36 +291,160 @@ function zoomOut() {
   renderPdf()
 }
 
-function onMouseUp() {
+function closePopup() {
+  popupGeneration++
+  selectionPopup.value.visible = false
+  activeHighlight.value = null
+  selectedRange = null
+  pagesRef.value?.querySelectorAll('.pdf-highlight-focus').forEach(el => el.remove())
+}
+
+async function showPopup(rect: DOMRect | HighlightRect) {
+  const generation = ++popupGeneration
+  selectionPopup.value.visible = true
+  await nextTick()
+  if (generation !== popupGeneration || !popupRef.value || !containerRef.value || !scrollRef.value) return
+  const container = containerRef.value.getBoundingClientRect()
+  const viewport = scrollRef.value.getBoundingClientRect()
+  const { width, height } = popupRef.value.getBoundingClientRect()
+  const minY = viewport.top - container.top + 8
+  const maxY = Math.max(minY, viewport.bottom - container.top - height - 8)
+  const above = rect.top - container.top - height - 8
+  selectionPopup.value.x = Math.max(8, Math.min(rect.left - container.left + rect.width / 2 - width / 2, container.width - width - 8))
+  selectionPopup.value.y = Math.min(maxY, Math.max(minY, above >= minY ? above : rect.top + rect.height - container.top + 8))
+}
+
+function onPointerDown(event: PointerEvent) {
+  pointerStart = null
+  const target = event.target as Element | null
+  if (target?.closest('.selection-popup, .highlight-feedback')) return
+  closePopup()
+  if (event.button === 0 && target?.closest('.text-layer') && pagesRef.value?.contains(target)) {
+    pointerStart = { x: event.clientX, y: event.clientY, moved: false }
+  }
+}
+
+function onPointerMove(event: PointerEvent) {
+  if (pointerStart && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 4) pointerStart.moved = true
+}
+
+function onPointerCancel() { pointerStart = null }
+
+function onKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closePopup()
+}
+
+function onMouseUp(event: MouseEvent) {
+  if (event.button !== 0 || (event.target as Element)?.closest('.selection-popup, .highlight-feedback')) return
+  const click = pointerStart
+  pointerStart = null
   const sel = window.getSelection()
   const text = sel?.toString().trim() ?? ''
   if (text.length > 0 && sel && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0)
+    if (!pagesRef.value?.contains(range.startContainer) || !pagesRef.value.contains(range.endContainer)) return
+    closePopup()
     selectedText.value = text
-    selectedRange = sel.getRangeAt(0).cloneRange()
-    const rect = selectedRange.getBoundingClientRect()
-    const containerRect = containerRef.value!.getBoundingClientRect()
-    selectionPopup.value = {
-      visible: true,
-      x: rect.left - containerRect.left + rect.width / 2 - 70,
-      y: rect.top - containerRect.top - 44,
-    }
-  } else {
-    selectedRange = null
-    selectionPopup.value.visible = false
+    selectedRange = range.cloneRange()
+    void showPopup(range.getBoundingClientRect())
+    return
+  }
+  closePopup()
+  if (!click || click.moved || Math.hypot(event.clientX - click.x, event.clientY - click.y) > 4) return
+  const pageDiv = (event.target as Element)?.closest<HTMLElement>('.pdf-page')
+  if (!pageDiv || !pagesRef.value?.contains(pageDiv)) return
+  const pageRect = pageDiv.getBoundingClientRect()
+  const x = event.clientX - pageRect.left
+  const y = event.clientY - pageRect.top
+  for (const region of hitRegions.get(Number(pageDiv.dataset.page)) ?? []) {
+    const rect = region.rects.find(r => x >= r.left && x <= r.left + r.width && y >= r.top && y <= r.top + r.height)
+    if (!rect) continue
+    activeHighlight.value = highlights.value.find(h => h.id === region.id) ?? null
+    if (!activeHighlight.value) continue
+    drawRects(pageDiv, region.rects, 'pdf-highlight-focus')
+    const left = Math.min(...region.rects.map(r => r.left))
+    const top = Math.min(...region.rects.map(r => r.top))
+    const right = Math.max(...region.rects.map(r => r.left + r.width))
+    const bottom = Math.max(...region.rects.map(r => r.top + r.height))
+    void showPopup({ left: left + pageRect.left, top: top + pageRect.top, width: right - left, height: bottom - top })
+    break
   }
 }
 
 function sendSelectionToChat() {
-  emit('select-text', selectedText.value)
-  selectedRange = null
-  selectionPopup.value.visible = false
+  emit('select-text', activeHighlight.value?.text ?? selectedText.value)
+  closePopup()
   window.getSelection()?.removeAllRanges()
 }
 
-function highlightSelection() {
-  if (!selectedRange) return
-  const pages = Array.from(pagesRef.value?.querySelectorAll<HTMLElement>('.pdf-page') ?? [])
+function clearUndoTimer() {
+  if (undoTimer !== undefined) clearTimeout(undoTimer)
+  undoTimer = undefined
+}
 
+function startUndoTimer() {
+  clearUndoTimer()
+  undoTimer = setTimeout(() => { undoHighlight.value = null; undoTimer = undefined }, 8000)
+}
+
+function dismissFeedback() {
+  clearUndoTimer()
+  undoHighlight.value = null
+  highlightError.value = ''
+}
+
+async function cancelHighlight() {
+  if (!activeHighlight.value || highlightBusy.value) return
+  const snapshot = { ...activeHighlight.value }
+  const generation = documentGeneration
+  highlightBusy.value = true
+  highlightError.value = ''
+  try {
+    await paperStore.removeHighlight(snapshot.id)
+    if (generation !== documentGeneration) return
+    highlights.value = highlights.value.filter(h => h.id !== snapshot.id)
+    closePopup()
+    repaintHighlights(snapshot.pageNum)
+    undoHighlight.value = snapshot
+    startUndoTimer()
+  } catch {
+    if (generation === documentGeneration) highlightError.value = '取消高亮失败，请重试'
+  } finally {
+    if (generation === documentGeneration) highlightBusy.value = false
+  }
+}
+
+async function restoreLastHighlight() {
+  if (!undoHighlight.value || highlightBusy.value) return
+  const snapshot = { ...undoHighlight.value }
+  const generation = documentGeneration
+  clearUndoTimer()
+  highlightBusy.value = true
+  highlightError.value = ''
+  try {
+    await paperStore.restoreHighlight(snapshot)
+    if (generation !== documentGeneration) return
+    highlights.value.push(snapshot)
+    closePopup()
+    repaintHighlights(snapshot.pageNum)
+    undoHighlight.value = null
+  } catch {
+    if (generation === documentGeneration) {
+      highlightError.value = '恢复高亮失败，请重试'
+      startUndoTimer()
+    }
+  } finally {
+    if (generation === documentGeneration) highlightBusy.value = false
+  }
+}
+
+async function highlightSelection() {
+  if (!selectedRange || highlightBusy.value) return
+  const generation = documentGeneration
+  const paperId = props.paperId
+  const text = selectedText.value
+  const pages = Array.from(pagesRef.value?.querySelectorAll<HTMLElement>('.pdf-page') ?? [])
+  const additions: HighlightSegment[] = []
   for (const pageDiv of pages) {
     const textLayer = pageDiv.querySelector<HTMLElement>('.text-layer')
     if (!textLayer || !selectedRange.intersectsNode(textLayer)) continue
@@ -313,50 +470,88 @@ function highlightSelection() {
       offset += length
     }
 
-    const added: HighlightSegment[] = []
     for (const candidate of mergeSegments(candidates)) {
-      for (const segment of subtractExisting(candidate)) {
-        highlightSegments.push(segment)
-        added.push(segment)
-        paperStore.addHighlight({
-          paperId: props.paperId,
-          text: selectedText.value,
-          pageNum: segment.page,
-          color: '#ffe66a',
-          note: '',
-          startOffset: segment.start,
-          endOffset: segment.end,
-        }).catch(() => {})
-      }
+      additions.push(...subtractExisting(candidate))
     }
-    if (added.length > 0) restorePageHighlights(pageDiv, Number(pageDiv.dataset.page))
   }
 
-  selectedRange = null
-  selectionPopup.value.visible = false
+  closePopup()
   window.getSelection()?.removeAllRanges()
+  highlightBusy.value = true
+  highlightError.value = ''
+  try {
+    for (const segment of additions) {
+      if (generation !== documentGeneration) return
+      const record = await paperStore.addHighlight({
+        paperId,
+        text,
+        pageNum: segment.page,
+        color: '#ffe66a',
+        note: '',
+        startOffset: segment.start,
+        endOffset: segment.end,
+      })
+      if (generation !== documentGeneration) return
+      highlights.value.push(record)
+      repaintHighlights(segment.page)
+    }
+  } catch {
+    if (generation === documentGeneration) highlightError.value = '保存高亮失败，请重试'
+  } finally {
+    if (generation === documentGeneration) highlightBusy.value = false
+  }
 }
 
-onMounted(async () => {
+async function loadDocument() {
+  const generation = ++documentGeneration
+  renderGeneration++
+  closePopup()
+  dismissFeedback()
+  highlightBusy.value = true
+  highlights.value = []
+  hitRegions.clear()
+  fitOnNextRender = fitMode
   try {
     const stored = await paperStore.getHighlights(props.paperId)
-    highlightSegments.push(...stored.map((h: any) => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
-  } catch { /* highlights unavailable */ }
-  renderPdf()
+    if (generation !== documentGeneration) return
+    highlights.value = stored
+  } catch {
+    if (generation !== documentGeneration) return
+    highlightError.value = '加载高亮失败，请重新打开论文'
+  }
+  if (generation !== documentGeneration) return
+  highlightBusy.value = false
+  await renderPdf()
+}
+
+watch(() => [props.src, props.paperId], () => { void loadDocument() })
+
+onMounted(() => {
+  void loadDocument()
   if (containerRef.value) {
     lastFitWidth = containerRef.value.clientWidth
     resizeObserver.observe(containerRef.value)
   }
   scrollRef.value?.addEventListener('scroll', onScroll)
   containerRef.value?.addEventListener('mouseup', onMouseUp)
+  document.addEventListener('pointerdown', onPointerDown)
+  document.addEventListener('pointermove', onPointerMove)
+  document.addEventListener('pointercancel', onPointerCancel)
+  document.addEventListener('keydown', onKeyDown)
 })
 
 onBeforeUnmount(() => {
+  documentGeneration++
   renderGeneration++
+  clearUndoTimer()
   resizeObserver.disconnect()
   if (resizeTimer) clearTimeout(resizeTimer)
   scrollRef.value?.removeEventListener('scroll', onScroll)
   containerRef.value?.removeEventListener('mouseup', onMouseUp)
+  document.removeEventListener('pointerdown', onPointerDown)
+  document.removeEventListener('pointermove', onPointerMove)
+  document.removeEventListener('pointercancel', onPointerCancel)
+  document.removeEventListener('keydown', onKeyDown)
 })
 
 defineExpose({ scrollToPage })
@@ -466,6 +661,14 @@ defineExpose({ scrollToPage })
   position: absolute;
   background: #ffe66a;
 }
+:deep(.pdf-highlight-focus) {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  outline: 1px solid #a98524;
+  outline-offset: 1px;
+  border-radius: 1px;
+}
 
 .selection-popup {
   position: absolute;
@@ -493,6 +696,31 @@ defineExpose({ scrollToPage })
   transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
 }
 .popup-btn:hover { background: var(--accent-dim); color: var(--accent); }
+.popup-btn-remove:hover { color: var(--danger); background: var(--danger-dim); }
+.popup-btn:disabled, .undo-btn:disabled, .feedback-close:disabled { opacity: 0.5; cursor: wait; }
+.popup-btn:focus-visible, .undo-btn:focus-visible, .feedback-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.highlight-feedback {
+  position: absolute;
+  z-index: 101;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100% - 32px);
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-card);
+  font-size: 12px;
+}
+.undo-btn, .feedback-close { flex-shrink: 0; border: 0; padding: 4px; background: transparent; font: inherit; cursor: pointer; border-radius: 3px; }
+.undo-btn { color: var(--accent); font-weight: 600; }
+.undo-btn:hover { text-decoration: underline; }
+.feedback-close { color: var(--text-muted); font-size: 18px; line-height: 1; }
 @media (max-width: 520px) {
   .pdf-toolbar { padding-left: 12px; padding-right: 12px; }
   .pdf-scroll { padding: 18px 24px; }

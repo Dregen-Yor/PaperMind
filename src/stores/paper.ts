@@ -131,11 +131,18 @@ export const usePaperStore = defineStore('paper', () => {
     highlights.value = highlights.value.filter(h => h.id !== id)
   }
 
+  async function restoreHighlight(highlight: Highlight) {
+    await window.db.highlight.create(highlight)
+    if (!highlights.value.some(h => h.id === highlight.id)) {
+      highlights.value = [...highlights.value, highlight].sort((a, b) => a.createdAt - b.createdAt)
+    }
+  }
+
   return {
     papers, knowledgeBases, loaded, init,
     addKnowledgeBase, removeKnowledgeBase,
     addPaper, removePaper, updatePaper, readPaperFile,
     getPapersByKb, getPaper, highlights,
-    addHighlight, getHighlights, loadHighlights, updateHighlight, removeHighlight,
+    addHighlight, getHighlights, loadHighlights, updateHighlight, removeHighlight, restoreHighlight,
   }
 })
