@@ -3,6 +3,7 @@
 # src/stores/ — 状态管理模块
 
 **变更记录**
+- 2026-09-21: 问答链路补失败轮/重试/继续/流式/未知命令——`Message.error/truncated/context/streaming`、`retryMessage`（`externalContext` 重放划选原文、history 截到提问前一条）、`continueMessage`（带 context 时跳过论文收集与改写/评分）、`requestCompletion`（finish_reason、流式 `onToken`、120s/300s 超时）、`/` 未知命令本地提示；来源改为结构化 `SourceRef`；`buildPaperTree` 返回 `TreeBuildOutcome`、`TreeRebuildSummary` 增加 `firstReason`（「未配置模型」短路豁免本地端点）
 - 2026-09-15: `useChatStore` 增加轻量语义树状态与后台建树——`treeEnabled`（默认开启，设置页可关）、`treeReadyPapers` / `treeIndexingPapers`、`buildPaperTree` / `rebuildAllTrees` / `loadSemanticIndex` / `setTreeEnabled`；`indexPaper` 完成后在后台触发建树，`sendMessage` 按篇挂载 `semantic` 交给 RAG 管线。建树缓存身份同时覆盖原文指纹与**构建配置指纹**（schema / 提示词 / 模型端点 / 分块与输入上限），复用前还要过一遍 `validateSemanticTree`
 - 2026-08-02T15:49:42: 重写以反映多 LLM 配置（profiles）、`indexPaper`/`indexedPapers`、`/abstract` 摘要（`generateAbstract`）、旧 `llm_config` 迁移、反 Proxy 持久化
 - 2026-07-18T00:00:00: 更新 sendMessage RAG 管线文档（3-call 流程）
@@ -56,14 +57,15 @@ Pinia 全局状态管理，封装所有与主进程的 IPC 通信、LLM API 请�
 - `persistProfiles()` 将 `profiles` **深拷贝为普通对象**再 `settings.set('llm_profiles', ...)`——因 Electron 结构化克隆无法序列化 Vue 响应式 Proxy（`chat.store.test.ts` 有 `isProxy` 校验）
 - `init()`：加载 `llm_profiles`；**旧版迁移**——无 profiles 但存在旧 `llm_config` 时，包装为单条 profile 并落盘；再恢复 `llm_profile_chat/index` 选择、`index.list()` 已建索引集合、`huggingface_token`、语义树开关与 `tree.list({ schemaVersion, buildConfigHash })` 过滤后的已建树集合
 
-### LLM 调用（`callLLM`）
+### LLM 调用（`requestCompletion` / `callLLM`）
 
-直接从渲染进程 `fetch`，按 provider 适配：
-- **ollama**：`POST {baseUrl}/api/chat`，`stream:false`，`topK>0` 时附 `options.top_k`
+`requestCompletion(messages, profileOrId?, opts)` 是底层请求：直接从渲染进程 `fetch`，按 provider 适配，并**记录 finish_reason 以标记截断**（`{ content, truncated }`）；`opts.onToken` 提供时改用流式（OpenAI SSE / Anthropic SSE / Ollama NDJSON 三个解析器），逐 token 回调并把增量交给调用方。超时：非流式 120s、流式 300s（`AbortSignal.timeout`，英文 DOMException 统一映射为中文提示）。`callLLM` 只是取 `content` 的薄包装，索引、标题、查询改写等文本调用继续走它。
+
+- **ollama**：`POST {baseUrl}/api/chat`，`stream` 随 `opts.onToken`，`topK>0` 时附 `options.top_k`
 - **openai / anthropic**：`POST {baseUrl}/chat/completions`（OpenAI 兼容）
   - openai：`Authorization: Bearer {apiKey}`
   - anthropic：`x-api-key` + `anthropic-version: 2023-06-01`，`topK>0` 时附 `top_k`
-- 可传 `profileId` 指定配置（默认用 `chatProfile`）
+- 可传 `profileId` 指定配置（默认用 `chatProfile`）；空回答一律抛「模型返回了空响应」
 
 ### 索引构建（`indexPaper`）
 
@@ -75,28 +77,37 @@ Pinia 全局状态管理，封装所有与主进程的 IPC 通信、LLM API 请�
 
 | 行为 | 说明 |
 |------|------|
+| 返回值 | `buildPaperTree` 返回 `TreeBuildOutcome { ok, reason? }`：`ok:false` 既覆盖良性跳过（总开关关闭 / 该篇在建树 / 已有可复用树 / 任务被取代），也覆盖真失败，任何分支都必须给出可展示的中文 `reason`（#13） |
 | 触发条件 | 总开关开启、该篇未在 `treeIndexingPapers` 中、平面索引已存在 |
 | 复用 | 用 `semanticTreeConfigHash` 折出的**构建配置指纹**（schema / 提示词 / 模型端点 / 分块参数 / `maxInputChars`）与 `hashTreeSource(pages)` 原文指纹共同作缓存键；两者都命中**且**记录能通过 `parseTreeRecord` 的完整校验时才直接标记就绪，**不调模型**（§10.3）。缓存键只覆盖原文会让提示词或模型更新后永远复用旧树 |
-| 强制重建 | `buildPaperTree(id, pages, { force: true })` 跳过复用判断；`rebuildAllTrees()` 逐篇强制重建已索引论文（设置页「重建全部语义树」按钮），只重跑建树、不重跑平面索引。返回 `TreeRebuildSummary { attempted, rebuilt, failed, skipped }`——只回一个成功数会让「全部失败」在 UI 上退化成「没有可重建的论文」 |
+| 强制重建 | `buildPaperTree(id, pages, { force: true })` 跳过复用判断；`rebuildAllTrees()` 逐篇强制重建已索引论文（设置页「重建全部语义树」按钮），只重跑建树、不重跑平面索引。返回 `TreeRebuildSummary { attempted, rebuilt, failed, skipped, firstReason? }`——只回一个成功数会让「全部失败」在 UI 上退化成「没有可重建的论文」，而 `firstReason` 让设置页能说出失败原因（#13） |
 | 配置快照 | 建树是含 await 的长流程，开始时就快照 `indexProfile`，**指纹、LLM 调用参数与落库 `buildModel` 全部取自这一份**。否则中途切换索引配置会「用模型 B 建树、按模型 A 的指纹保存」，切回 A 时会错误复用这棵树。`callLLM` 因此同时接受 profileId 与 profile 对象 |
 | 就绪集合刷新 | `refreshTreeReadyPapers()` 按当前构建配置重查 `tree.list(filter)`；`init` / `setIndexProfileId` / `updateProfile`（改的是当前索引配置时）都会调用。刷新是异步的而配置可被连续切换，因此用**代次 + 返回后复核当前指纹**双重把关：只有「最后一次发起」且「配置至今未再变」的结果才落地，乱序响应不会覆盖新配置的统计 |
 | 就绪标记 | `markTreeReady(paperId, configHash)` 只在**这棵树所属的配置仍等于当前配置**时才计入集合。旧配置的建树任务在切换配置之后才完成时，不会把一篇用不上的树重新算成可用 |
 | 建树 | `buildEvidenceBlocks` → `buildSemanticTree`（**整篇恰好一次 LLM 调用**）→ `window.db.tree.set` 落库树 / 证据块 / schema 与提示版本 / 建树模型 / 原文指纹 / token / 时延 |
-| 失败降级 | 捕获一切异常返回 `false`，不写半成品树、不抛出——只是「这篇没有树」，问答照常（§8.2） |
+| 未配置模型短路 | 非 ollama、`apiKey` 为空且 `baseUrl` 不是本地端点（`isLocalEndpoint`：localhost / 127.0.0.1 / 0.0.0.0 / ::1）时**不发**这一次注定失败的请求，直接返回「未配置模型（请在设置中填写 API Key）」；本地端点（LM Studio / vLLM / llama.cpp 等）免 Key 照常请求，真失败由 `treeFailureReason` 归为「请求失败：…」（#13） |
+| 失败降级 | 捕获一切异常返回 `{ ok: false, reason: treeFailureReason(error) }`（按 `SemanticTreeBuildError.reason` 分档：无证据 / 输入过长 / 请求失败 / 输出不合规），不写半成品树、不抛出——只是「这篇没有树」，问答照常（§8.2 / #13） |
 | 代次保护 | 每篇持有一个 `treeBuildTokens` 代次，写盘前比对；期间重新建树或内容变更则丢弃本次结果，避免写入过期树 |
 | 载入 | `loadSemanticIndex` 与复用判断共用 `parseTreeRecord(record, expectedConfigHash)`：记录缺失、schema 过期、配置指纹不匹配、证据块为空、结构非法都返回 `undefined`，由调用方回落平面检索（§9 / §13）。**期望指纹由调用方给出**——载入路径传当前配置，复用路径传本次建树的快照；若函数内部统一读实时 profile，`tree.get` 等待期间切换配置会让一份对快照完全匹配的有效缓存被误判失效、白白重建 |
 
-### 对话主流程（`sendMessage`）
+### 对话主流程（`sendMessage` / `retryMessage` / `continueMessage`）
 
 ```
-addMessage(user)
-├─ 若 == "/abstract" → generateAbstract(conv) → addMessage(assistant, sources) ── return
-└─ 否则 RAG（无外部 context 且 conv.paperIds 非空时）：
+addMessage(user, ..., { context })        // 划选原文随用户消息持久化（#2）
+├─ 形如 "/xxx" 且非 "/abstract" → 本地回「未识别的命令…」，不发模型（#8）
+├─ == "/abstract" → generateAbstract(conv) → addMessage(assistant, sources)
+└─ 否则 generateReply：检索（无外部 context 且 conv.paperIds 非空时）→ 流式生成
    Call 1（有历史时，slice(-4,-1) ≥ 2 条）rewriteQuery → retrievalQuery
    对每篇 paper：window.db.index.get（缺失则兜底 indexPaper）→ Call 2 scoreAndSelect
    合并各篇 context / sources
-   Call 3 callLLM（system=systemPrompt + 数学格式指令 + 参考内容；带最近 20 条历史）
+   Call 3 requestCompletion(onToken)：占位气泡逐 token 渲染，成功后才一次性落库
+失败 → recordFailure 落一条带 error 的空助手消息（失败卡）并 rethrow（#2）
 ```
+
+- **失败轮**：`Message.error` 非空即失败，无半截内容入库；`error`/`truncated` 为消息级字段，随 `addMessage`/`updateMessage` 落库
+- **重试** `retryMessage(convId, messageId)`：原地重放失败轮——`generateReply(..., index - 1, { writeBack })` 单次写回（成功才落内容，失败保持原失败态）；提问取失败轮之前的最近一条用户消息，带 `context` 时按 `externalContext` 重放（跳过论文收集与改写/评分），否则重跑检索；`historyEnd = index - 1` 使问题只作为 query 出现一次（与首答 `slice(0, -1)` 同口径）
+- **继续** `continueMessage(convId, messageId)`：对截断回答就地续写（非流式），追加到原回答并刷新 `truncated`；带 `context` 时与重试同构，否则把已输出的半截回答并入改写历史后按原问题重跑检索
+- **来源构造**：`retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐，产出结构化 `SourceRef { label, paperId?, startPage?, endPage? }`（缺件退化为纯标签；芯片能否跳页由 `isJumpable` 判断）
 
 每篇论文经 `loadSemanticIndex` 取树：取到则挂 `semantic` 字段交给 `runRagPipeline` 走**单轮树路由**（同样一次 LLM 调用，上下文仍来自原文证据块）；取不到或总开关关闭则该篇走平面 `scoreAndSelect`。两种路径的查询阶段调用次数一致。
 
@@ -107,12 +118,12 @@ addMessage(user)
 
 - 前置校验：conv 需选 ≥1 篇论文、需已配置 `abstractToken`
 - 逐篇：`readPaperPages`（优先读 `paper_indexes.pages_json` 缓存，否则 `extractPages`）→ `summarizeAcademicText`（见 [utils](../utils/CLAUDE.md)）
-- 多篇时以 `## 标题` 分段，段间 `\n\n---\n\n`；`sources` 为论文标题列表
+- 多篇时以 `## 标题` 分段，段间 `\n\n---\n\n`；`sources` 为结构化 `SourceRef[]`（摘要没有页码，只有 `label` + `paperId`，`isJumpable` 为 false，芯片渲染为不可点标签）
 - 导出 `ABSTRACT_MODEL` 常量供设置页展示
 
 ### 其它导出
 
-`newConversation / addMessage / removeConversation / syncPaperIds`；`buildPaperTree` / `loadSemanticIndex`；`PROMPT_TEMPLATES`（5 个系统提示词模板）；接口 `LLMProfile` / `Message` / `Conversation`。
+`newConversation / addMessage / updateMessage / removeConversation / discardEmptyConversation / syncPaperIds`；`sendMessage / retryMessage / continueMessage / requestCompletion`；`collectIndexedPapers / indexPaper / buildPaperTree / rebuildAllTrees / loadSemanticIndex`；`PROMPT_TEMPLATES`（5 个系统提示词模板）；接口 `LLMProfile` / `Message` / `Conversation` / `TreeBuildOutcome` / `TreeRebuildSummary`。
 
 ## 常见问题
 
@@ -133,6 +144,8 @@ addMessage(user)
 - `src/stores/paper.ts` — usePaperStore
 - `src/stores/chat.ts` — useChatStore（LLM/RAG/索引/摘要）
 - `src/utils/pageIndex.ts` — `extractPages`/`buildPageIndex`/`scoreAndSelect`
+- `src/utils/ragPipeline.ts` — `runRagPipeline` / `retrieveRagContext` / `buildAnswerMessages`
+- `src/utils/sourceRef.ts` — `SourceRef` / `isJumpable`（消息来源的结构化定义）
 - `src/utils/semanticTree.ts` / `src/utils/evidenceBlock.ts` — 建树与证据块
 - `src/utils/semanticRoute.ts` — 单轮树路由
 - `src/utils/abstractSummarizer.ts` — `summarizeAcademicText`/`ABSTRACT_MODEL`

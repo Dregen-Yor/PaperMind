@@ -3,13 +3,14 @@
 # src/utils/ — 工具函数与 RAG 检索
 
 **变更记录**
+- 2026-09-21: 新增三个纯函数模块——`sourceRef.ts`（消息来源结构化归一）、`highlightMerge.ts`（划选片段/page 合并与历史碎片合并计划）、`exportSanitize.ts`（导出默认脱敏 + 备份文件名）
 - 2026-09-15: 新增语义树检索链路——`evidenceBlock.ts`（原文证据块）、`semanticTree.ts`（单次调用建树 + 校验 + 诊断 + `semanticTreeConfigHash` 建树配置指纹）、`semanticRoute.ts`（单轮树路由 + 原文取证 + 统一上下文预算 + 平面就地回落）；`ragPipeline.ts` 的 `IndexedPaper` 增加可选 `semantic` 字段，提供时把平面叶节点与树节点放进**同一次**打分判断，因此既满足 §9 的回落要求又不增加查询阶段串行 LLM 调用
 - 2026-08-02T15:49:42: 修正面包屑；新增 `markdown.ts`（Markdown+KaTeX 渲染）与 `abstractSummarizer.ts`（Hugging Face 摘要）文档
 - 2026-07-18T00:00:00: pageIndex 语义分块 + 评分多选
 
 ## 模块职责
 
-无状态工具集合：PDF 元数据解析、PageIndex RAG 检索、轻量语义树（证据块 / 建树 / 树路由）、消息 Markdown/数学渲染、学术长文摘要分块。均为纯函数，便于单测。
+无状态工具集合：PDF 元数据解析、PageIndex RAG 检索、轻量语义树（证据块 / 建树 / 树路由）、消息 Markdown/数学渲染、学术长文摘要分块，以及消息来源/高亮/导出三类归一化纯函数（`sourceRef` / `highlightMerge` / `exportSanitize`）。均为纯函数，便于单测。
 
 ---
 
@@ -155,6 +156,41 @@ const CONTEXT_GROUP_SEPARATOR = '\n\n---\n\n'
 
 ---
 
+## sourceRef.ts — 消息来源结构化（#1）
+
+```ts
+interface SourceRef { label: string; paperId?: string; startPage?: number; endPage?: number }  // page 0-based
+```
+
+| 导出 | 作用 |
+|------|------|
+| `normalizeSourceList(raw: unknown)` | 把持久化的 `messages.sources` 归一为 `SourceRef[]`：兼容升级前的**字符串数组**（降级为不可跳转的纯标签），并丢弃/降级脏输入（非数组、空串、缺 label、页号非数字），绝不抛错；读取侧由 `electron/db` 的 `listConversations` 调用 |
+| `isJumpable(ref)` | 芯片是否可跳页：`paperId` 为字符串且 `startPage` 为数字 |
+
+---
+
+## highlightMerge.ts — 划选按页合并（#7）
+
+```ts
+interface HighlightSegment { page: number; start: number; end: number }  // 页内字符区间
+```
+
+| 导出 | 作用 |
+|------|------|
+| `mergeSegments(segments)` | 同一页相邻/重叠的候选片段合并为一段（乱序输入先排序）：一次划选在页内只留一条记录；中间有缺口则保持两条（不同划选不误并）。PdfViewer 的划选路径用它，之后才逐段去重叠与绘制 |
+| `planFragmentMerge(rows)` | 历史碎片清理的**纯计划**（不碰数据库）：同论文 + 同页 + 同文本，且按创建时间**链式时间窗 ≤2000ms** 并满足**偏移连通**（`next.startOffset <= clusterMaxEnd + 2`）的相邻行合并为一簇——保留最早一行、`updates` 把它扩到簇内最大 `endOffset`，其余进 `removals`；单行簇与含非空 `note` 的行所在簇整簇跳过（破坏性删除取最保守口径）。由 `initDb()` 在启动时执行 |
+
+---
+
+## exportSanitize.ts — 导出脱敏（#5）
+
+| 导出 | 作用 |
+|------|------|
+| `stripApiKeysFromSettings(rows)` | 默认导出前的脱敏：`llm_profiles[*].apiKey` 与遗留 `llm_config.apiKey` 清空、`huggingface_token` 置为空字符串的 JSON 形式；非 JSON / 非对象 / 数组内非对象元素一律原样保留，不抛错 |
+| `backupFileName(date)` | 可读备份文件名 `papermind-backup-<YYYY-MM-DD>-<HHmm>.json`（`electron/ipc.ts` 的 `data:export-file` 用作对话框默认名） |
+
+---
+
 ## markdown.ts — 消息渲染
 
 单一导出 `renderMarkdown(content: string): string`：
@@ -188,5 +224,8 @@ const CONTEXT_GROUP_SEPARATOR = '\n\n---\n\n'
 - `semanticTree.test.ts` — 提示词约束、规模上限天花板、引用校验、通用章节名拒绝、诊断指标、单次调用、`semanticTreeConfigHash` 覆盖配置各项与键序无关（54 用例）
 - `semanticRoute.test.ts` — 整树单轮打分、阈值与 topK、相邻扩张、短路与降级、上下文预算、平面就地回落、非连续证据拆区间（35 用例）
 - `ragPipelineSemantic.test.ts` — 树路由接入管线后的调用次数不变量、就地回落与预算裁剪（11 用例）
+- `sourceRef.test.ts` — 旧字符串数组降级、结构化对象保留页区间、脏输入丢弃/降级（3 用例）
+- `highlightMerge.test.ts` — 同页合并与缺口保持、乱序输入、碎片计划的时间窗 + 偏移连通 + note 保护 + 仅删不更 + 双簇互不串簇（12 用例）
+- `exportSanitize.test.ts` — `llm_profiles`/`llm_config`/`huggingface_token` 三类凭据脱敏、非 JSON 与非对象原样保留、文件名格式（7 用例）
 
 > 依赖 `pageIndex.ts` 的测试需 `vi.mock('pdfjs-dist/legacy/build/pdf.mjs')`（Node 无 DOMMatrix）。
