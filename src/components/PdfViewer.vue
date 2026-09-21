@@ -57,12 +57,19 @@ let fitMode = true
 let lastFitWidth = 0
 let renderGeneration = 0
 let resizeTimer: number | undefined
+// 观察 containerRef（父级面板宽度），不要观察 scrollRef：scrollRef 的 clientWidth 会被
+// 自身渲染改变（innerHTML 清空/重建 → 竖向滚动条消失/出现），那会构成自持的
+// ResizeObserver 反馈环（整页反复重渲染 → 闪烁/OOM）。
 const resizeObserver = new ResizeObserver(() => {
   if (!fitMode) return
-  const width = scrollRef.value?.clientWidth ?? 0
+  const width = containerRef.value?.clientWidth ?? 0
   if (Math.abs(width - lastFitWidth) < 1) return
   if (resizeTimer) clearTimeout(resizeTimer)
   resizeTimer = window.setTimeout(() => {
+    resizeTimer = undefined
+    // 复核：防抖窗口内宽度已回稳（自身渲染引起的抖动）就不再重排
+    const settled = containerRef.value?.clientWidth ?? 0
+    if (!fitMode || Math.abs(settled - lastFitWidth) < 1) return
     fitOnNextRender = true
     void renderPdf()
   }, 150)
@@ -174,7 +181,8 @@ async function renderPdf() {
     const pageWidth = firstPage.getViewport({ scale: 1 }).width
     const availableWidth = Math.max(scrollRef.value.clientWidth - 48, 160)
     scale.value = Math.min(availableWidth / pageWidth, 2)
-    lastFitWidth = scrollRef.value.clientWidth
+    // 基线取自 containerRef（稳定面宽），与 observer 的判定同源
+    lastFitWidth = containerRef.value?.clientWidth ?? lastFitWidth
     fitOnNextRender = false
   }
 
@@ -372,9 +380,9 @@ onMounted(async () => {
     highlightSegments.push(...stored.map((h: any) => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
   } catch { /* highlights unavailable */ }
   renderPdf()
-  if (scrollRef.value) {
-    lastFitWidth = scrollRef.value.clientWidth
-    resizeObserver.observe(scrollRef.value)
+  if (containerRef.value) {
+    lastFitWidth = containerRef.value.clientWidth
+    resizeObserver.observe(containerRef.value)
   }
   scrollRef.value?.addEventListener('scroll', onScroll)
   containerRef.value?.addEventListener('mouseup', onMouseUp)
