@@ -9,7 +9,7 @@ import { checkIcons, encodeIcns, encodeIco, generateIcons, renderIcon } from '..
 const svg = await readFile(new URL('../../assets/papermind-icon.svg', import.meta.url))
 
 test('mac icon has transparent padding and a centered opaque body', async () => {
-  const png = await renderIcon(svg, 1024, 0.82)
+  const png = await renderIcon(svg, 1024, 0.92)
   const { data, info } = await sharp(png).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const alpha = (x, y) => data[(y * info.width + x) * 4 + 3]
   assert.equal(info.width, 1024)
@@ -19,7 +19,7 @@ test('mac icon has transparent padding and a centered opaque body', async () => 
   assert.equal(alpha(512, 512), 255)
   const body = []
   for (let x = 0; x < 1024; x++) if (alpha(x, 512) > 0) body.push(x)
-  assert.ok(body[0] >= 91 && body[0] <= 93)
+  assert.ok(body[0] >= 97 && body[0] <= 99)
   assert.ok(Math.abs(body[0] - (1023 - body.at(-1))) <= 1)
 })
 
@@ -42,7 +42,7 @@ test('ICO stores every requested resolution with valid PNG offsets', async () =>
 
 test('ICNS contains full-size PNG representations', async () => {
   const sizes = [16, 32, 64, 128, 256, 512, 1024]
-  const images = await Promise.all(sizes.map(async size => ({ size, png: await renderIcon(svg, size, 0.82) })))
+  const images = await Promise.all(sizes.map(async size => ({ size, png: await renderIcon(svg, size, 0.92) })))
   const icns = encodeIcns(images)
   assert.equal(icns.toString('ascii', 0, 4), 'icns')
   assert.equal(icns.readUInt32BE(4), icns.length)

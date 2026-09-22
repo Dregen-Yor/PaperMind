@@ -1,20 +1,5 @@
-<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <title>PaperMind</title>
-  <desc>An open research paper with a connected knowledge graph</desc>
-  <rect width="512" height="512" rx="112" fill="#061A33"/>
-  <path d="M72 132C72 109.909 89.909 92 112 92H232C255.196 92 276 104.524 288 124L306 153V406C278.928 378.751 242.106 363.44 203.667 363.44H112C89.909 363.44 72 345.531 72 323.44V132Z" fill="#F8F6F0"/>
-  <path d="M440 132C440 109.909 422.091 92 400 92H328C304.804 92 283.999 104.524 272 124L256 150V406C283.072 378.751 319.894 363.44 358.333 363.44H400C422.091 363.44 440 345.531 440 323.44V132Z" fill="#0A3865"/>
-  <path d="M256 406C226.621 376.436 189.217 359.842 149.667 359.842H112C89.909 359.842 72 341.933 72 319.842V366C72 388.091 89.909 406 112 406H191.333C216.673 406 240.98 416.066 256 434V406Z" fill="#03B8C8"/>
-  <path d="M256 406C285.379 376.436 322.783 359.842 362.333 359.842H400C422.091 359.842 440 341.933 440 319.842V366C440 388.091 422.091 406 400 406H320.667C295.327 406 271.02 416.066 256 434V406Z" fill="#028AAB"/>
-  <path d="M256 151V406" stroke="#DCE5E9" stroke-width="8" stroke-linecap="round"/>
-  <path d="M111 161H205" stroke="#092A4B" stroke-width="14" stroke-linecap="round"/>
-  <path d="M111 196H184" stroke="#092A4B" stroke-width="14" stroke-linecap="round"/>
-  <path d="M111 231H164" stroke="#092A4B" stroke-width="14" stroke-linecap="round"/>
-  <path d="M318 269L361 224M318 269L375 318" stroke="#F8F6F0" stroke-width="8" stroke-linecap="round"/>
-  <circle cx="306" cy="278" r="31" fill="#03B8C8" stroke="#7BE6EA" stroke-width="4"/>
-  <circle cx="374" cy="214" r="21" fill="#03B8C8" stroke="#7BE6EA" stroke-width="4"/>
-  <circle cx="387" cy="327" r="21" fill="#03B8C8" stroke="#7BE6EA" stroke-width="4"/>
-  <circle cx="306" cy="278" r="10" fill="#F8F6F0"/>
-  <circle cx="374" cy="214" r="7" fill="#F8F6F0"/>
-  <circle cx="387" cy="327" r="7" fill="#F8F6F0"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">PaperMind 应用图标</title>
+  <desc id="logo-desc">米白色圆角底板上的胡桃棕问页标志。</desc>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#FFFDF8" stroke="#E2D7C8" stroke-width="2"/><g transform="translate(96 96) scale(6.5)" fill="#73543C"><path d="M24 16H72C96 16 112 31 112 52C112 73 96 88 72 88H50V110H24V89L50 68H70C80 68 88 62 88 52C88 42 80 36 70 36H50V50L24 71Z" transform="translate(-4 1)"/></g>
 </svg>

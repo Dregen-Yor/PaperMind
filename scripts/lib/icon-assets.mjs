@@ -3,7 +3,9 @@ import { join } from 'node:path'
 import sharp from 'sharp'
 
 const MAC_SIZES = [16, 32, 64, 128, 256, 512, 1024]
-const MAC_SCALE = 0.82
+// 母版自身已留边距（新母版的圆角底板占画布 87.7%），这里把主体归一到约 80.9%，
+// 以贴近 macOS 图标的 824/1024 网格；母版换成满画布图形时需重新对照 Apple 网格取值
+const MAC_SCALE = 0.92
 const WIN_SIZES = [16, 24, 32, 48, 64, 128, 256]
 const LINUX_SIZES = [16, 32, 48, 64, 128, 256, 512]
 const ICNS_TYPES = new Map([[16, 'icp4'], [32, 'icp5'], [64, 'icp6'], [128, 'ic07'], [256, 'ic08'], [512, 'ic09'], [1024, 'ic10']])
