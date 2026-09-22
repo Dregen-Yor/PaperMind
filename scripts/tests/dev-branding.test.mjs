@@ -105,10 +105,15 @@ test('nested code is re-signed before the outer bundle', () => {
   const calls = []
   try {
     prepareDevBranding({ root, platform: 'darwin', arch: 'arm64', run: (...call) => calls.push(call) })
-    const signed = calls.filter(([command, argv]) => command === 'codesign' && argv[0] === '--force').map(([, argv]) => argv.at(-1))
+    const signs = calls.filter(([command, argv]) => command === 'codesign' && argv[0] === '--force').map(([, argv]) => argv)
+    const signed = signs.map(argv => argv.at(-1))
     const bundle = signed.at(-1)
     assert.equal(signed.length, 2, 'the helper and the outer bundle are both signed')
     assert.equal(signed[0], join(bundle, 'Contents/Frameworks/Electron Helper.app'))
+    // 嵌套代码请求保留标识符与 entitlements；外层 bundle 只保留 entitlements（标识符来自它的 plist）
+    // 注意：官方 dist 的嵌套项是 linker-signed，真实 codesign 会忽略 --preserve-metadata（见 fix report）
+    assert.deepEqual(signs[0].slice(0, 4), ['--force', '--sign', '-', '--preserve-metadata=entitlements,identifier'])
+    assert.deepEqual(signs[1].slice(0, 4), ['--force', '--sign', '-', '--preserve-metadata=entitlements'])
     assert.deepEqual(calls.at(-1), ['codesign', ['--verify', '--deep', '--strict', bundle]])
     // 相对软链必须按原样复制：改写成绝对路径会破坏 bundle 的封印
     const copiedLink = join(cacheOf(root), 'PaperMind.app/Contents/Frameworks/Electron Helper.app/Contents/Resources/Helpers')

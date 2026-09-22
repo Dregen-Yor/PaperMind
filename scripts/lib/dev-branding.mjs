@@ -8,7 +8,7 @@ import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSyn
 import { join } from 'node:path'
 
 // 品牌逻辑（plist 键、签名参数、缓存布局）变更时必须递增，让旧副本失效
-const REVISION = 1
+const REVISION = 2
 const CACHE_DIR = 'node_modules/.papermind-electron'
 const APP_DIR = 'PaperMind.app'
 const LAUNCHER = 'launcher.mjs'
@@ -107,13 +107,16 @@ function sha256(value) {
 }
 
 // 官方 dist 的嵌套代码（helper、framework）是 linker-signed、没有资源封印，`--verify --deep
-// --strict` 因此必然失败；这里由内向外用同一条命令重签，entitlements 原样保留，最后签外层
-// bundle，让资源封印覆盖重签后的嵌套代码。不递归删除签名，也不改动 helper 的 entitlements。
+// --strict` 因此必然失败；这里由内向外用同一条命令重签，最后签外层 bundle，让资源封印覆盖重签
+// 后的嵌套代码。嵌套项额外请求保留出厂标识符，但实测官方 dist 的嵌套项都是 linker-signed，
+// codesign 文档明确「previous binary 带 linker-signed 标记时 --preserve-metadata 整个选项被忽略」，
+// 因此其实际标识符仍来自各自的 Info.plist（com.github.Electron.helper 等），与未加 identifier 时一致。
+// 不递归删除签名，也不改动 helper 的 entitlements。
 function signAdHoc(stagedApp, run) {
   const frameworks = join(stagedApp, 'Contents/Frameworks')
   if (existsSync(frameworks)) {
     for (const nested of readdirSync(frameworks)) {
-      run('codesign', ['--force', '--sign', '-', '--preserve-metadata=entitlements', join(frameworks, nested)])
+      run('codesign', ['--force', '--sign', '-', '--preserve-metadata=entitlements,identifier', join(frameworks, nested)])
     }
   }
   run('codesign', ['--force', '--sign', '-', '--preserve-metadata=entitlements', stagedApp])
