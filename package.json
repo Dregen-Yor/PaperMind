@@ -11,7 +11,7 @@
   },
   "scripts": {
     "dev": "node scripts/ensure-electron.mjs && node scripts/dev.mjs",
-    "build": "vue-tsc --noEmit && vite build && electron-builder",
+    "build": "npm run icons:check && vue-tsc --noEmit && vite build && electron-builder",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run && npm run test:branding",
@@ -68,18 +68,33 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "assets/icons",
+        "to": "icons",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**"
     ],
     "linux": {
-      "target": "AppImage"
+      "target": "AppImage",
+      "icon": "assets/icons/linux",
+      "executableName": "com.papermind.app",
+      "desktop": {
+        "StartupWMClass": "com.papermind.app"
+      }
     },
     "mac": {
       "target": "dmg",
-      "icon": "assets/papermind-icon.png"
+      "icon": "assets/icons/mac.icns"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/icons/win.ico"
     }
   }
 }
