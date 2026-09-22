@@ -27,7 +27,10 @@ export default defineConfig({
       {
         entry: 'electron/main.ts',
         onstart(options) {
-          options.startup()
+          const launcher = process.platform === 'darwin'
+            ? process.env.PAPERMIND_ELECTRON_LAUNCHER
+            : undefined
+          return options.startup(undefined, undefined, launcher)
         },
         vite: {
           build: {
