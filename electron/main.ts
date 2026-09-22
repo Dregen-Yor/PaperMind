@@ -2,17 +2,26 @@ import { app, BrowserWindow, nativeImage, shell } from 'electron'
 import { join } from 'path'
 import { initDb } from './db'
 import { registerIpc } from './ipc'
+import { configureIdentity, getIconPath } from './branding'
 
-app.setName('PaperMind')
+configureIdentity(app, process.platform)
 
 // Fix GPU crash on Linux (Intel GBM/Wayland ENOMEM)
 app.commandLine.appendSwitch('disable-gpu')
 app.commandLine.appendSwitch('disable-software-rasterizer')
 
+const getRuntimeIconPath = () => getIconPath({
+  platform: process.platform,
+  isPackaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+})
+
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
+    icon: process.platform === 'darwin' ? undefined : getRuntimeIconPath(),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -46,9 +55,14 @@ const createWindow = () => {
 }
 
 app.whenReady().then(() => {
-  if (process.platform === 'darwin' && process.env.VITE_DEV_SERVER_URL) {
-    const icon = nativeImage.createFromPath(join(process.cwd(), 'assets', 'papermind-icon.png'))
-    if (!icon.isEmpty()) app.dock?.setIcon(icon)
+  if (process.platform === 'darwin' && !app.isPackaged) {
+    const iconPath = getRuntimeIconPath()
+    const icon = nativeImage.createFromPath(iconPath)
+    if (icon.isEmpty()) {
+      console.warn('[branding] Unable to load icon:', iconPath)
+    } else {
+      app.dock?.setIcon(icon)
+    }
   }
 
   initDb()

@@ -1,30 +1,24 @@
-import { cpSync, existsSync, mkdirSync } from 'node:fs'
-import { spawn, execFileSync } from 'node:child_process'
-import { resolve } from 'node:path'
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { prepareDevBranding } from './lib/dev-branding.mjs'
 
+const root = fileURLToPath(new URL('..', import.meta.url))
 const environment = { ...process.env }
+delete environment.PAPERMIND_ELECTRON_LAUNCHER
+// macOS：准备品牌化副本（名称 / bundle ID / 图标），把启动模块交给 vite 插件
+const launcher = prepareDevBranding({ root, platform: process.platform, arch: process.arch })
+if (launcher) environment.PAPERMIND_ELECTRON_LAUNCHER = pathToFileURL(launcher).href
 
-if (process.platform === 'darwin') {
-  const electronSource = resolve('node_modules/electron/dist/Electron.app')
-  const overrideDirectory = resolve('node_modules/.papermind-electron')
-  const paperMindApp = resolve(overrideDirectory, 'Electron.app')
-
-  if (!existsSync(paperMindApp)) {
-    mkdirSync(overrideDirectory, { recursive: true })
-    cpSync(electronSource, paperMindApp, { recursive: true })
-  }
-
-  const infoPlist = resolve(paperMindApp, 'Contents/Info.plist')
-  execFileSync('plutil', ['-replace', 'CFBundleDisplayName', '-string', 'PaperMind', infoPlist])
-  execFileSync('plutil', ['-replace', 'CFBundleName', '-string', 'PaperMind', infoPlist])
-  environment.ELECTRON_OVERRIDE_DIST_PATH = overrideDirectory
-}
-
-const vite = resolve('node_modules/.bin/vite')
-const child = spawn(vite, process.argv.slice(2), {
+// 用 Node 直接跑 vite.js，避免 Windows .cmd 与 shell 路径转义；信号转发给 child 后再退出
+const child = spawn(process.execPath, [join(root, 'node_modules/vite/bin/vite.js'), ...process.argv.slice(2)], {
+  cwd: root,
   env: environment,
-  shell: process.platform === 'win32',
   stdio: 'inherit',
 })
 
-child.on('exit', code => process.exit(code ?? 1))
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => child.kill(signal))
+}
+child.on('error', error => { console.error(error); process.exitCode = 1 })
+child.on('exit', code => { process.exitCode = code ?? 1 })

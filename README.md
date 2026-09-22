@@ -51,6 +51,20 @@ npm run build
 
 产物在 `release/` 目录。better-sqlite3 通过 `asarUnpack` 解包，确保原生模块可加载。
 
+### 应用名称与图标
+
+品牌母版为 `assets/papermind-icon.svg`。修改后运行 `npm run icons:generate`，再运行 `npm run icons:check`，并提交 `assets/icons` 内的平台产物。普通 `npm run dev` 不会重新生成图标。
+
+macOS 开发启动使用 `node_modules/.papermind-electron/PaperMind.app`，资源或 Electron 版本改变时自动刷新。请使用 `npm run dev`；直接运行 `vite` 会绕过品牌副本准备。同一工作区同时仅运行一个开发实例。
+
+系统图标仍旧时，先核对实际启动包和版本，再移除旧 Dock 固定项并重新固定。不要把清空系统缓存或关闭安全机制作为常规步骤。
+
+Windows 开发进程的 `electron.exe` 元数据仍可能显示 Electron；正式安装包通过原生图标与品牌配置分发。Linux 安装入口依赖持久安装的 hicolor 图标。
+
+`npm test` 里的 `test:branding` 是显式列表：新增 `scripts/tests/*.test.mjs` 时必须同时加进 `package.json` 的 `test:branding`，否则该文件不会被执行。
+
+自动检查命令与逐平台验收结果见 [`docs/testing/app-branding.md`](docs/testing/app-branding.md)。
+
 ## 目录结构
 
 ```

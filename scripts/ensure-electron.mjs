@@ -1,36 +1,26 @@
-// dev 前置自愈：确保 Electron 二进制就绪、清掉过期拷贝。
+// dev 前置自愈：确保原始 Electron 二进制就绪。
 //
 // 背景：Electron 44 起 npm 包不再自带 postinstall 下载二进制（registry 元数据
-// scripts 为 null），npm install 后 dist/ 与 path.txt 会缺失；而 scripts/dev.mjs
-// 设置的 ELECTRON_OVERRIDE_DIST_PATH 会短路 node_modules/electron/index.js 的
-// 兜底下载，最终以 spawn ENOENT 的形式在启动末尾报错。此脚本在 dev 前把这三处
-// 坑补齐：二进制缺失自动下载、版本变化自动清 .papermind-electron 拷贝缓存。
+// scripts 为 null），npm install 后 dist/ 与 path.txt 会缺失。此脚本在 dev 前补齐：
+// 二进制缺失自动下载。macOS 品牌化副本（含 Electron 版本指纹）由
+// scripts/lib/dev-branding.mjs 独立管理，这里不再涉及。
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = process.cwd()
+const root = fileURLToPath(new URL('..', import.meta.url))
 const electronDir = resolve(root, 'node_modules/electron')
-const overrideDir = resolve(root, 'node_modules/.papermind-electron')
-const markerFile = resolve(overrideDir, '.electron-version')
 
-// dev.mjs 的拷贝目标与 index.js 的路径拼接都是 darwin 形态，此脚本与之保持同平台口径
+// 启动 Electron 用的是平台专属路径，此脚本与其保持同平台口径
 function distBinaryPath() {
-  if (process.platform === 'darwin') return resolve(electronDir, 'dist/Electron.app')
+  if (process.platform === 'darwin') return resolve(electronDir, 'dist/Electron.app/Contents/MacOS/Electron')
   if (process.platform === 'win32') return resolve(electronDir, 'dist/electron.exe')
   return resolve(electronDir, 'dist/electron')
 }
 
 function binaryReady() {
   return existsSync(resolve(electronDir, 'path.txt')) && existsSync(distBinaryPath())
-}
-
-function electronVersion() {
-  try {
-    return JSON.parse(readFileSync(resolve(electronDir, 'package.json'), 'utf8')).version
-  } catch {
-    return null
-  }
 }
 
 function download() {
@@ -63,23 +53,4 @@ if (!existsSync(electronDir)) {
   process.exit(1)
 }
 
-const version = electronVersion()
-
-// dev.mjs 只在目标不存在时拷贝（existsSync 缓存），electron 升级后会残留旧版 App；
-// 这里用版本标记在版本变化时清掉，让 dev.mjs 重新拷贝
-if (existsSync(overrideDir)) {
-  let marker = null
-  try {
-    marker = readFileSync(markerFile, 'utf8').trim()
-  } catch { /* 无标记 = 旧格式缓存，一并清理 */ }
-  if (marker !== version) {
-    rmSync(overrideDir, { recursive: true, force: true })
-    console.log(`[ensure-electron] Electron ${marker ?? '(未知版本)'} → ${version}，已清理旧拷贝缓存。`)
-  }
-}
-
 if (!binaryReady()) download()
-
-// 就绪后记录版本标记，供下次版本比对
-mkdirSync(overrideDir, { recursive: true })
-writeFileSync(markerFile, version ?? 'unknown')
