@@ -17,7 +17,7 @@
     "test": "vitest run && npm run test:branding",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "test:branding": "node --test scripts/tests/icon-assets.test.mjs scripts/tests/dev-branding.test.mjs",
+    "test:branding": "node --test scripts/tests/icon-assets.test.mjs scripts/tests/dev-branding.test.mjs scripts/tests/linux-install.test.mjs",
     "icons:generate": "node scripts/generate-icons.mjs",
     "icons:check": "node scripts/check-icons.mjs",
     "bench": "tsx bench/src/cli.ts",
