@@ -59,12 +59,12 @@ harness 日志里的 `npm run dev exited code=1 signal=null` 是收到 SIGINT �
 | --- | --- | --- | --- |
 | 首次启动（先删除 `node_modules/.papermind-electron`） | `npm run dev` | 重新构建品牌副本：日志 9 行 `replacing existing signature`（8 个嵌套项 + 外层 bundle）；缓存指纹文件生成 | `evidence/run1-dev.log`、`evidence/run1-harness.txt` |
 | 缓存复用 | 再跑一次 `npm run dev` | 缓存内 `.branding.json`、`launcher.mjs`、`Info.plist`、`papermind.icns` 的 mtime 均保持 `19:23:00` 不变，日志无签名行 → 未重建、未重签 | `evidence/run2-harness.txt`（mtime）、`evidence/run2-dev.log`（0 行签名输出） |
-| 图标内容变化 | 临时给 `assets/icons/mac.icns` 追加字节后 `npm run dev` | 指纹 `a450a774…` → `5277becc…`，副本与缓存 mtime 更新，`codesign --verify --deep --strict` 仍 exit 0 | `evidence/run2-harness.txt`（改动前指纹）、`evidence/run4-harness.txt`（改动后指纹与 verify） |
+| 图标内容变化 | 临时给 `assets/icons/mac.icns` 追加字节后 `npm run dev` | 指纹 `a450a774…` → `5277becc…`，副本与缓存 mtime 更新，`codesign --verify --deep --strict` 仍 exit 0 | `evidence/run5-harness.txt`、`evidence/run7-harness.txt`（`a450a774…`）、`evidence/run4-harness.txt`（`5277becc…` 与 verify） |
 | 恢复正确产物 | 还原 `mac.icns` 后再 `npm run dev` | 缓存指纹回到 `a450a774…`，副本用正确图标重建；文件 sha256 回到 `63ee71b7…`，`git status --porcelain assets/icons` 为空 | `evidence/run5-harness.txt`（缓存指纹）、`evidence/icon-restore-recheck.txt`（修复轮只读复核 sha256、git 状态与 `HEAD:assets/icons/mac.icns` 一致性） |
 | 缓存缺文件 | 删除副本内 `Contents/Resources/papermind.icns` 后 `npm run dev` | 重新构建并重签（日志 9 行签名输出）；还原出的副本图标与 `assets/icons/mac.icns` 同 sha256 | `evidence/run6-harness.txt`、`evidence/run6-dev.log` |
 | 主进程热重启 | 运行中 `touch electron/main.ts` | Electron 主进程 PID `42504` → `42658`（内容未改，仅 mtime 触发 watcher）；缓存 mtime 不变 | `evidence/run2-harness.txt` |
 | Ctrl-C 退出 | 对进程组发 SIGINT | `npm run dev` 收到 SIGINT 后退出（harness 记 `code=1 signal=null`，属正常，见上文说明）；`pgrep -f <repo>/node_modules/.papermind-electron` 与 `vite`/`dev.mjs` 残留均为空（每个场景都检查） | `evidence/run2-harness.txt` … `evidence/run7-harness.txt` 末两行均为 `[]`；`evidence/run1-harness.txt` 末两行是 `[probe failed] … pgrep …`（`pgrep` 未匹配到进程时退出码为 1，即当时同样没有残留） |
-| 其他目录启动 | `cd /tmp && node <repo>/scripts/ensure-electron.mjs && node <repo>/scripts/dev.mjs` | 正常启动；缓存指纹复用（日志 0 行签名输出）；Electron 进程 cwd 为仓库根，用户数据目录不变 | `evidence/run7-harness.txt` |
+| 其他目录启动 | `cd /tmp && node <repo>/scripts/ensure-electron.mjs && node <repo>/scripts/dev.mjs` | 正常启动；缓存指纹复用（日志 0 行签名输出）；Electron 进程 cwd 为仓库根，用户数据目录不变 | `evidence/run7-harness.txt`、`evidence/run7-dev.log`（0 行签名输出） |
 | Electron 版本变化 | 未做真实升降级（本次约束明确不升级/降级 Electron） | 指纹输入为 Electron 版本 + 架构 + 图标字节 + `REVISION`，该分支由 `scripts/tests/dev-branding.test.mjs` 的 `all identity inputs invalidate fingerprints` 覆盖；本次实机只验证了图标这一支 | `scripts/tests/dev-branding.test.mjs`（`npm run test:branding` 通过） |
 
 ### 品牌身份核验
@@ -143,14 +143,14 @@ DMG 卷内容（只读复核见 `evidence/packaged-app-resources.txt`）：有�
 | 包图标 | `Contents/Resources/icon.icns` 与 `assets/icons/mac.icns` sha256 相同（`63ee71b7…`） |
 | 运行时资源 | `Contents/Resources/icons/` 含 `mac.icns`、`mac.png`、`win.ico`、`linux/{16,32,48,64,128,256,512}.png`（extraResources 生效） |
 | Finder 可见包名 | `PaperMind.app`（DMG 卷与临时副本内的文件名） |
-| Dock / Cmd-Tab 名称 | `lsappinfo`：`LSDisplayName="PaperMind"`、`CFBundleIdentifier="com.papermind.app"`、`type="Foreground"`、`Version=0.1.0`、`Arch=ARM64` |
+| Dock / Cmd-Tab 名称 | `lsappinfo`：条目名 `"PaperMind"`、`bundleID="com.papermind.app"`、`type="Foreground"`、`Version="0.1.0"`、`Arch=ARM64` |
 | 进程名 | 主进程 `…/PaperMind.app/Contents/MacOS/PaperMind`；`PaperMind Helper`（GPU / Renderer）、NetworkService |
 | 窗口 | `BrowserWindow.getAllWindows()` → `url=file://…/app.asar/dist/index.html#/library`、`title="PaperMind"`、`visible=true`、`crashed=false` |
 | 打包态身份 | `app.isPackaged=true`，`userData=~/Library/Application Support/PaperMind` |
 | 数据兼容 | 打包版主进程打开 `papermind.db`、`papermind.db-shm`、`papermind.db-wal`（与 dev 同一目录、同一组文件） |
 | 退出 | SIGTERM 主进程后无任何 PaperMind 进程残留 |
 
-证据：上表“Dock / Cmd-Tab 名称”“进程名”“窗口”“打包态身份”“退出”等运行时取值见 `evidence/packaged-app-runtime.txt`（修复轮重录：`ps` 进程表、`lsappinfo` 的 `LSDisplayName`/`Version`/`Arch`、CDP 读到的 `isPackaged` 与窗口 `url`/`title`/`visible`/`crashed`、SIGTERM 后残留为空）；“Info.plist 身份”“包图标”“运行时资源”“Finder 可见包名”见 `evidence/packaged-app-resources.txt`（`plutil` 全文、`icon.icns` 与源产物同 sha256、`Contents/Resources/icons/` 列表、DMG 卷列表）；数据句柄见 `evidence/packaged-app-lsof.txt`；`evidence/packaged-app-stdout.log` 只含调试器横幅 4 行，本身不含上表取值；缺签名身份的现状见 `evidence/packaged-app-signing.txt`。
+证据：上表“Dock / Cmd-Tab 名称”“进程名”“窗口”“打包态身份”“退出”等运行时取值见 `evidence/packaged-app-runtime.txt`（修复轮重录：`ps` 进程表、`lsappinfo` 的条目名/`Version`/`Arch`、CDP 读到的 `isPackaged` 与窗口 `url`/`title`/`visible`/`crashed`、SIGTERM 后残留为空）；“Info.plist 身份”“包图标”“运行时资源”“Finder 可见包名”见 `evidence/packaged-app-resources.txt`（`plutil` 全文、`icon.icns` 与源产物同 sha256、`Contents/Resources/icons/` 列表、DMG 卷列表）；数据句柄见 `evidence/packaged-app-lsof.txt`；`evidence/packaged-app-stdout.log` 只含调试器横幅 5 行（306 字节），本身不含上表取值；缺签名身份的现状见 `evidence/packaged-app-signing.txt`。
 
 ### 视觉比例（待用户目视确认，不写 PASS）
 
@@ -186,7 +186,7 @@ ICON_ALPHA_THRESHOLD=128 node .superpowers/sdd/2026-09-22-app-branding/evidence/
 # → could not create image from display   （exit 1）
 ```
 
-因此没有生成 Dock 截图，也没有用任何方式绕过系统权限。本次的临时验证副本在 `/tmp/papermind-verify-KlNn/PaperMind.app`（`/tmp` 可能被系统清理），重建方式：`hdiutil attach <repo>/release/PaperMind-0.1.0-arm64.dmg -nobrowse -readonly -mountpoint /tmp/pm-dmg-verify && cp -R /tmp/pm-dmg-verify/PaperMind.app /tmp/papermind-verify-KlNn/`。请用户自行目视：`npm run dev` 后看 Dock 中的开发实例，或从 DMG 启动临时副本，与相邻系统图标比较大小与留白；如需留存截图，先给终端授予“屏幕录制”权限，再执行
+因此没有生成 Dock 截图，也没有用任何方式绕过系统权限。本次的临时验证副本在 `/tmp/papermind-verify-KlNn/PaperMind.app`（`/tmp` 可能被系统清理），重建方式：`mkdir -p /tmp/pm-dmg-verify /tmp/papermind-verify-KlNn && hdiutil attach <repo>/release/PaperMind-0.1.0-arm64.dmg -nobrowse -readonly -mountpoint /tmp/pm-dmg-verify && cp -R /tmp/pm-dmg-verify/PaperMind.app /tmp/papermind-verify-KlNn/ && hdiutil detach /tmp/pm-dmg-verify`（少 `mkdir -p` 时 `cp` 会因目标目录不存在而失败，已实测）。请用户自行目视：`npm run dev` 后看 Dock 中的开发实例，或从 DMG 启动临时副本，与相邻系统图标比较大小与留白；如需留存截图，先给终端授予“屏幕录制”权限，再执行
 `screencapture -x -R0,<屏高-150>,<屏宽>,150 ~/dock.png`。同理，“退出后 Dock 固定项仍显示正确图标”需要人工：请从**最终安装位置**（而不是临时验证副本）固定后再退出观察。
 
 ## 四、验收表
@@ -235,8 +235,10 @@ touch <repo>/electron/main.ts                          # 触发主进程热重�
 
 ```bash
 CSC_IDENTITY_AUTO_DISCOVERY=false ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm run build
+mkdir -p /tmp/pm-dmg-verify <copy>
 hdiutil attach <repo>/release/PaperMind-0.1.0-arm64.dmg -nobrowse -readonly -mountpoint /tmp/pm-dmg-verify
 cp -R /tmp/pm-dmg-verify/PaperMind.app <copy>/
+hdiutil detach /tmp/pm-dmg-verify
 codesign -dv --verbose=4 <copy>/PaperMind.app
 codesign --verify --deep --strict <copy>/PaperMind.app
 spctl -a -vv <copy>/PaperMind.app
