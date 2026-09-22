@@ -117,7 +117,7 @@ npm run build
 
 - 全流程通过：`icons:check` → `vue-tsc` → `vite build` → `electron-builder`
 - Electron 44.2.0 的 `electron-v44.2.0-darwin-arm64.zip`（130 MB）通过镜像下载成功，耗时 8.573 s
-- 产物：`release/PaperMind-0.1.0-arm64.dmg`，177,057,296 字节，2026-09-22 19:31
+- 产物：`release/PaperMind-0.1.0-arm64.dmg`，177,057,296 字节，2026-09-22 19:31（复核：`evidence/build-dmg.log` 末尾补录的 `ls -l`/`stat`）
 - 注意：构建前 `release/` 里 7 月 21 日的旧 DMG 与本产物文件名仅大小写不同，在大小写不敏感卷上是同一路径，已被本次构建覆盖（`release/` 是 gitignore 的构建输出，不在提交范围内）
 - 完整日志：`evidence/build-dmg.log`
 
@@ -186,7 +186,7 @@ ICON_ALPHA_THRESHOLD=128 node .superpowers/sdd/2026-09-22-app-branding/evidence/
 # → could not create image from display   （exit 1）
 ```
 
-因此没有生成 Dock 截图，也没有用任何方式绕过系统权限。本次的临时验证副本在 `/tmp/papermind-verify-KlNn/PaperMind.app`（`/tmp` 可能被系统清理），重建方式：`mkdir -p /tmp/pm-dmg-verify /tmp/papermind-verify-KlNn && hdiutil attach <repo>/release/PaperMind-0.1.0-arm64.dmg -nobrowse -readonly -mountpoint /tmp/pm-dmg-verify && cp -R /tmp/pm-dmg-verify/PaperMind.app /tmp/papermind-verify-KlNn/ && hdiutil detach /tmp/pm-dmg-verify`（少 `mkdir -p` 时 `cp` 会因目标目录不存在而失败，已实测）。请用户自行目视：`npm run dev` 后看 Dock 中的开发实例，或从 DMG 启动临时副本，与相邻系统图标比较大小与留白；如需留存截图，先给终端授予“屏幕录制”权限，再执行
+因此没有生成 Dock 截图，也没有用任何方式绕过系统权限。本次的临时验证副本在 `/tmp/papermind-verify-KlNn/PaperMind.app`（`/tmp` 可能被系统清理），重建方式：`mkdir -p /tmp/pm-dmg-verify /tmp/papermind-verify-KlNn && hdiutil attach <repo>/release/PaperMind-0.1.0-arm64.dmg -nobrowse -readonly -mountpoint /tmp/pm-dmg-verify && cp -R /tmp/pm-dmg-verify/PaperMind.app /tmp/papermind-verify-KlNn/ && hdiutil detach /tmp/pm-dmg-verify`（少 `mkdir -p` 时 `cp` 会因目标目录不存在而失败，已实测，见 `evidence/dmg-rebuild-seq.txt` 首节的失败演示）。请用户自行目视：`npm run dev` 后看 Dock 中的开发实例，或从 DMG 启动临时副本，与相邻系统图标比较大小与留白；如需留存截图，先给终端授予“屏幕录制”权限，再执行
 `screencapture -x -R0,<屏高-150>,<屏宽>,150 ~/dock.png`。同理，“退出后 Dock 固定项仍显示正确图标”需要人工：请从**最终安装位置**（而不是临时验证副本）固定后再退出观察。
 
 ## 四、验收表

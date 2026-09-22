@@ -75,7 +75,8 @@ test('Linux install persists icon and quotes a spaced executable path', linuxOnl
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-for (const exitCode of [0, 7]) {
+// 提取失败（非零退出）与“提取成功但缺图标”都必须给出明确诊断，不能静默失败
+for (const [exitCode, diagnostic] of [[0, /缺少 512px 品牌图标/], [7, /无法从 AppImage 提取文件/]]) {
   test(`extraction exit ${exitCode} without an icon preserves existing installation`, linuxOnly, () => {
     const root = mkdtempSync(join(tmpdir(), 'pm-install-fail-'))
     const image = join(root, 'input.AppImage')
@@ -92,8 +93,8 @@ for (const exitCode of [0, 7]) {
     try {
       const result = install(image, bin, data)
       assert.notEqual(result.status, 0)
-      // exit 0 却没有图标时必须由安装器给出明确错误；exit 7 的静默失败只看状态码
-      if (exitCode === 0) assert.match(result.stderr, /缺少 512px 品牌图标/)
+      assert.match(result.stderr, diagnostic)
+      if (exitCode !== 0) assert.ok(result.stderr.includes(image), '提取失败的诊断必须点名失败的 AppImage 路径')
       assert.equal(readFileSync(oldDesktop, 'utf8'), 'old entry')
       assert.equal(readFileSync(oldIcon, 'utf8'), 'old icon')
       assert.equal(readFileSync(oldBinary, 'utf8'), 'old binary')

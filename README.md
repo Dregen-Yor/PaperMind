@@ -61,6 +61,8 @@ macOS 开发启动使用 `node_modules/.papermind-electron/PaperMind.app`，资�
 
 Windows 开发进程的 `electron.exe` 元数据仍可能显示 Electron；正式安装包通过原生图标与品牌配置分发。Linux 安装入口依赖持久安装的 hicolor 图标。
 
+`npm test` 里的 `test:branding` 是显式列表：新增 `scripts/tests/*.test.mjs` 时必须同时加进 `package.json` 的 `test:branding`，否则该文件不会被执行。
+
 自动检查命令与逐平台验收结果见 [`docs/testing/app-branding.md`](docs/testing/app-branding.md)。
 
 ## 目录结构

@@ -25,6 +25,8 @@ function fixture() {
 const cacheOf = root => join(root, 'node_modules/.papermind-electron')
 const copiedExecutableOf = root => join(cacheOf(root), 'PaperMind.app/Contents/MacOS/Electron')
 const copiedIconOf = root => join(cacheOf(root), 'PaperMind.app/Contents/Resources/papermind.icns')
+// 该用例先建符号链接再验证 cpSync 的 verbatimSymlinks 行为：无开发者模式的 Windows 会直接 EPERM
+const notWindows = { skip: process.platform === 'win32' }
 
 test('non-macOS returns before touching filesystem or tools', () => {
   for (const platform of ['win32', 'linux']) {
@@ -95,7 +97,7 @@ test('launcher imports from a path with spaces and cache is reused', async () =>
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('nested code is re-signed before the outer bundle', () => {
+test('nested code is re-signed before the outer bundle', notWindows, () => {
   const root = fixture()
   const helper = 'node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Helper.app'
   mkdirSync(join(root, helper, 'Contents/MacOS'), { recursive: true })

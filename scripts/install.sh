@@ -27,7 +27,11 @@ install_linux_appimage() (
 
   scratch=$(mktemp -d)
   trap 'rm -rf "$scratch"' EXIT
-  (cd "$scratch" && "$image" --appimage-extract >/dev/null)
+  # 提取失败必须给明确失败信息（stdout 已被丢弃，诊断走 stderr），而不是静默退出
+  (cd "$scratch" && "$image" --appimage-extract >/dev/null) || {
+    printf 'PaperMind 安装失败：无法从 AppImage 提取文件（%s）\n' "$image" >&2
+    exit 1
+  }
   icon="$scratch/squashfs-root/usr/share/icons/hicolor/512x512/apps/com.papermind.app.png"
   if [[ ! -s "$icon" ]]; then
     printf 'PaperMind 安装失败：AppImage 缺少 512px 品牌图标\n' >&2
