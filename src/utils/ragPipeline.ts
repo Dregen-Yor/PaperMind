@@ -82,17 +82,28 @@ export interface PipelineTiming {
 /**
  * 注入式依赖：`now` 供单测注入单调时钟（返回预设序列而非真实 sleep）；生产默认 Date.now。
  * `materialize` 供 benchmark 注入受控 token 预算（§5）；生产不注入时上下文沿用字符预算。
- * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器与预算），
+ * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器、预算与四个融合旋钮），
  * 只对带 `passageIndex` 的论文生效；全部缺席时段落路径按词法模式工作、不碰模型。
  */
 export interface RagPipelineDeps {
   now?: () => number
   materialize?: (groups: ContextGroup[]) => MaterializedContext
-  /** 段落混合检索的注入：查询向量模型与 token 计数器（bench 注入冻结分词器） */
+  /**
+   * 段落混合检索的注入：查询向量模型与 token 计数器（bench 注入冻结分词器）。
+   *
+   * `rrfK` / `sectionWeight` / `neighbourFactor` / `skipLimit` 是方案 §4 的融合旋钮，
+   * 只对带 `passageIndex` 的论文生效；缺席时各自沿用 `DEFAULT_HYBRID_OPTIONS`
+   * （生产路径一个都不传，行为与接入旋钮前逐字一致）。评测的消融矩阵按配置注入它们，
+   * 因此这里的转发是「配置里的旋钮真的到达检索」的唯一通路。
+   */
   passage?: {
     embedder?: Embedder
     countTokens?: (text: string) => number
     maxTokens?: number
+    rrfK?: number
+    sectionWeight?: number
+    neighbourFactor?: number
+    skipLimit?: number
   }
 }
 
@@ -235,7 +246,13 @@ export async function retrieveRagContext(
         ? await retrievePassageContext(paper.passageIndex, retrievalQuery, {
             ...(deps.passage?.embedder ? { embedder: deps.passage.embedder } : {}),
             ...(deps.passage?.countTokens ? { countTokens: deps.passage.countTokens } : {}),
+            // 数值选项一律按 `!== undefined` 判缺席：0 是 sectionWeight / neighbourFactor 的
+            // 合法取值（关掉该路权重），按真值转发会把「显式归零」静默变成「用默认值」
             ...(deps.passage?.maxTokens !== undefined ? { maxTokens: deps.passage.maxTokens } : {}),
+            ...(deps.passage?.rrfK !== undefined ? { rrfK: deps.passage.rrfK } : {}),
+            ...(deps.passage?.sectionWeight !== undefined ? { sectionWeight: deps.passage.sectionWeight } : {}),
+            ...(deps.passage?.neighbourFactor !== undefined ? { neighbourFactor: deps.passage.neighbourFactor } : {}),
+            ...(deps.passage?.skipLimit !== undefined ? { skipLimit: deps.passage.skipLimit } : {}),
           })
         : paper.semantic
           ? await routeWithSemanticTree(paper.semantic.tree, paper.semantic.blocks, retrievalQuery, llm, {

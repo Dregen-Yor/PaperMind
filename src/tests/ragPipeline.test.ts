@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IndexNode } from '../utils/pageIndex'
 import type { ChatTurn } from '../utils/queryRewrite'
+import type { Passage } from '../utils/passages'
 import type { PassageIndex } from '../utils/passageIndex'
+import type { StructureCard } from '../utils/structureCards'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -554,5 +556,70 @@ describe('retrieveRagContext 的段落路径', () => {
     const lexical = await retrieveRagContext([paper], 'Europarl datasets', [], llm, {}, {})
     expect(lexical.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
     expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('转发 sectionWeight：卡片先验的权重真的改变融合选段（R42）', async () => {
+    // 手工索引：4 段各 40 token、预算 45 → 只有融合第一名放得下，选段结果就是融合名次的直接读数。
+    // 两路名次故意错开：BM25（查询 'alpha'）为 P02 > P01 > P03 > P04（只有 P02 命中该词），
+    // 卡片词法先验为 P01 > P03 > P04 > P02（卡片标题里 alpha 分别出现 3 / 1 / 1 / 0 次）。
+    // 于是 sectionWeight=0 时卡片路不计权（等于关掉卡片先验）→ BM25 第一名 P02 胜出；
+    // sectionWeight=1 时 P01 的卡片第 1 名压过 P02 的卡片第 4 名，把 BM25 第 2 名抬成融合第一。
+    // 两次检索的入参只差 sectionWeight，结果不同只可能来自这条转发（未转发时两次都吃默认 0.5）。
+    const makePassage = (order: number, text: string, subsection: string): Passage => {
+      const id = `P${String(order + 1).padStart(2, '0')}`
+      return {
+        id,
+        order,
+        pieces: [{ page: order, text }],
+        text,
+        searchText: text,
+        // 预算只放得下一段：40 ≤ 45，任意两段 40 + 2 + 40 > 45
+        tokenCount: 40,
+        prevId: order > 0 ? `P${String(order).padStart(2, '0')}` : null,
+        nextId: order < 3 ? `P${String(order + 2).padStart(2, '0')}` : null,
+        subsection,
+      }
+    }
+    const fusionPassages = [
+      makePassage(0, 'Overview of the ranking protocol.', 'Overview'),
+      makePassage(1, 'We evaluate on the alpha dataset.', 'Evaluation'),
+      makePassage(2, 'Notes on the evaluation metrics.', 'Metrics'),
+      makePassage(3, 'Ablation details and caveats.', 'Ablation'),
+    ]
+    const fusionCards: StructureCard[] = [
+      { id: 'S1', range: ['P01', 'P01'], title: 'Alpha alpha alpha retrieval', summary: '', keyTerms: [] },
+      { id: 'S2', range: ['P03', 'P03'], title: 'Alpha notes', summary: '', keyTerms: [] },
+      { id: 'S3', range: ['P04', 'P04'], title: 'Alpha caveats', summary: '', keyTerms: [] },
+      { id: 'S4', range: ['P02', 'P02'], title: 'Beta baseline', summary: '', keyTerms: [] },
+    ]
+    const fusionIndex: PassageIndex = {
+      version: PASSAGE_INDEX_VERSION,
+      stage: 3,
+      passages: fusionPassages,
+      cards: fusionCards,
+      tree: cardsToIndexNodes(fusionCards, fusionPassages),
+      passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+      separatorTokens: 2,
+    }
+    const paper = {
+      tree: fusionIndex.tree,
+      pages: fusionPassages.map(passage => passage.text),
+      passageIndex: fusionIndex,
+    }
+    const llm = vi.fn(async () => 'should not be called')
+
+    const cardPriorOff = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { maxTokens: 45, sectionWeight: 0 } },
+    )
+    const cardPriorOn = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { maxTokens: 45, sectionWeight: 1 } },
+    )
+
+    // 卡片路真的在（否则 sectionWeight 只是一个被忽略的数字），且两次真的走了同一条融合路径
+    expect(cardPriorOff.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(cardPriorOn.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(cardPriorOff.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P02'])
+    expect(cardPriorOn.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01'])
+    expect(llm).not.toHaveBeenCalled()
   })
 })
