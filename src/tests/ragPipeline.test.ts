@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IndexNode } from '../utils/pageIndex'
 import type { ChatTurn } from '../utils/queryRewrite'
+import type { PassageIndex } from '../utils/passageIndex'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -17,6 +18,9 @@ const {
 } =
   await import('../utils/ragPipeline')
 const { materializeContext } = await import('../utils/contextTrace')
+const { buildPassages, createEstimatingTokenCounter } = await import('../utils/passages')
+const { buildTitleCards, cardsToIndexNodes } = await import('../utils/structureCards')
+const { PASSAGE_INDEX_VERSION, passageConfigHash } = await import('../utils/passageIndex')
 
 /** 与 contextTrace.test.ts 同款分词器：按空白切词并渲染为 ▁word。 */
 const tokenizer = {
@@ -419,5 +423,70 @@ describe('RAG 阶段拆分', () => {
     ).rejects.toThrow('generation failed')
 
     expect(JSON.stringify(retrieval)).toBe(before)
+  })
+})
+
+describe('retrieveRagContext 的段落路径', () => {
+  const counter = createEstimatingTokenCounter()
+  const passagePages = ['Abstract\nWe study retrieval on Europarl.', 'Methods\nWe use BM25 and dense encoders.']
+  const passages = buildPassages(passagePages, counter, { minTokens: 1 })
+  const cards = buildTitleCards(passages)
+  const passageIndex: PassageIndex = {
+    version: PASSAGE_INDEX_VERSION,
+    stage: 1,
+    passages,
+    tree: cardsToIndexNodes(cards, passages),
+    passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+    separatorTokens: 2,
+  }
+
+  it('有 passageIndex 时走段落检索且检索阶段零 LLM 调用', async () => {
+    const llm = vi.fn(async () => 'should not be called')
+    const retrieval = await retrieveRagContext(
+      [{ tree: passageIndex.tree, pages: passagePages, passageIndex }],
+      'Europarl datasets',
+      [],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.llmCalls).toBe(0)
+    expect(retrieval.retrievals[0].hybrid?.retrievalMode).toBe('bm25')
+    expect(retrieval.retrievals[0].context).toContain('Europarl')
+  })
+
+  it('没有 passageIndex 时仍走旧路径（scoreAndSelect）', async () => {
+    const llm = vi.fn(async () => JSON.stringify({ scores: [{ nodeId: 'root', score: 9 }] }))
+    const retrieval = await retrieveRagContext(
+      [{ tree: cardsToIndexNodes(cards, passages), pages: passagePages }],
+      'Europarl',
+      [],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.llmCalls).toBeGreaterThan(0)
+    expect(retrieval.retrievals[0].hybrid).toBeUndefined()
+  })
+
+  it('多轮历史仍触发查询改写（段落路径不例外）', async () => {
+    // 改写提示词（queryRewrite.ts）是全英文的，判据取它真实包含的 `Latest question:`，
+    // 与生成提示词（含「参考内容：」）区分；llm 的入参是字符串，不是消息数组
+    const llm = vi.fn(async (prompt: string) =>
+      prompt.includes('Latest question:') ? 'rewritten query' : 'answer')
+    const retrieval = await retrieveRagContext(
+      [{ tree: passageIndex.tree, pages: passagePages, passageIndex }],
+      'and the datasets?',
+      [
+        { role: 'user', content: 'What is this paper about?' },
+        { role: 'assistant', content: 'It studies retrieval.' },
+        { role: 'user', content: 'Which datasets?' },
+        { role: 'assistant', content: 'Europarl.' },
+      ],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.retrievalQuery).not.toBe('and the datasets?')
   })
 })
