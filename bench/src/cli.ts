@@ -427,6 +427,13 @@ for (const config of configs) {
               model: config.passage.embedder.model,
               revision: config.passage.embedder.revision,
               dtype: config.passage.embedder.dtype,
+              // 配置 pin 的维度就是断言依据：不传则缺省 384，m3 配置（1024）会死在
+              // 第一趟前向传播上，配置里那行 dim 成了没人读的说明
+              dim: config.passage.embedder.dim,
+              // 权重落 bench/cache/models/（与契约词表同一目录，各 runner 的 modelCacheDir 亦同）。
+              // Node 下没有 indexedDB，自定义缓存只会静默全部未命中：不指目录就永远重新下载，
+              // 离线时每轮都停在 embedderUnavailable（R43）
+              cacheDir: MODEL_CACHE_DIR(),
             })
           } catch (error) {
             console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
