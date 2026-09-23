@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { EvalSample } from '../types'
+import type { EvalSample, QaQuestion } from '../types'
 import type { StreamingLlmClient } from '../llmClient'
 import type { SpeedRunContract } from '../speed/contract'
 import type { IndexNode } from '../../../src/utils/pageIndex'
@@ -26,6 +26,14 @@ const { MATH_FORMAT_INSTRUCTION } = ragPipeline
 // token 估算口径不在此处复写第二份：跟着生产实现走，改了公式测试也跟着改
 const { estimateTokens } = await import('../metrics/retrieval')
 
+function qasperQuestion(question: Omit<QaQuestion, 'qualityAnswers' | 'qualityDefinition'>): QaQuestion {
+  return {
+    ...question,
+    qualityAnswers: question.unanswerable ? ['Unanswerable'] : [...question.answers],
+    qualityDefinition: 'qasper-all-questions-v1',
+  }
+}
+
 function leaf(id: string, start: number, end: number): IndexNode {
   return { title: `S${id}`, nodeId: id, startPage: start, endPage: end, summary: '', nodes: [] }
 }
@@ -43,7 +51,10 @@ const sample: EvalSample = {
   pages: ['EVIDENCE_MARKER_7f3a', 'b', 'c', 'd'],
   source: 'qasper',
   questions: [
-    { id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [0], unanswerable: false },
+    {
+      id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [0], unanswerable: false,
+      qualityAnswers: ['8'], qualityDefinition: 'qasper-all-questions-v1',
+    },
   ],
 }
 
@@ -57,8 +68,8 @@ const fakeClient = {
 
 function speedContract(datasetFingerprint: string): SpeedRunContract {
   return {
-    speedMetricSchemaVersion: 1,
-    speedDefinition: 'query-timeline-v1',
+    speedMetricSchemaVersion: 2,
+    speedDefinition: 'query-timeline-v2',
     datasetFingerprint,
     executedQuestionIdsHash: 'executed-question-ids',
     streaming: true,
@@ -218,7 +229,7 @@ describe('runQaTask', () => {
       ...sample,
       questions: [
         sample.questions[0],
-        { id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false },
+        qasperQuestion({ id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false }),
       ],
     }
     await runQaTask(argsWith({ samples: [twoQuestions], deps }))
@@ -238,7 +249,7 @@ describe('runQaTask', () => {
       ...sample,
       questions: [
         sample.questions[0],
-        { id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false },
+        qasperQuestion({ id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false }),
       ],
     }
     const result = await runQaTask(argsWith({ samples: [twoQuestions], deps }))
@@ -252,6 +263,11 @@ describe('runQaTask', () => {
     expect(result.perSample).toHaveLength(2)
     expect(result.perSample[0].generationStatus).toBe('failed')
     expect(result.perSample[0].metrics.contextPageMrr).toBe(1)
+    expect(result.metrics).toMatchObject({
+      answerF1AllQuestions: 0.5,
+      answerF1AllQuestionsSampleCount: 2,
+      qaCompletionRate: 0.5,
+    })
   })
 
   it('建索引失败时该论文全部问题记为 index 阶段错误', async () => {
@@ -262,6 +278,11 @@ describe('runQaTask', () => {
     expect(result.meta.total).toBe(1)
     expect(result.errors).toHaveLength(1)
     expect(result.errors[0].stage).toBe('index')
+    expect(result.metrics).toMatchObject({
+      answerF1AllQuestions: 0,
+      answerF1AllQuestionsSampleCount: 1,
+      qaCompletionRate: 0,
+    })
   })
 
   it('unanswerable 样本按拒答模式判定，不计入 answerF1', async () => {
@@ -270,7 +291,7 @@ describe('runQaTask', () => {
     })
     const unanswerableSample: EvalSample = {
       ...sample,
-      questions: [{ id: 'p1#0', question: 'Q?', answers: [], evidencePages: [], unanswerable: true }],
+      questions: [qasperQuestion({ id: 'p1#0', question: 'Q?', answers: [], evidencePages: [], unanswerable: true })],
     }
     const result = await runQaTask(argsWith({ samples: [unanswerableSample], deps }))
 
@@ -285,7 +306,7 @@ describe('runQaTask', () => {
     })
     const unanswerableSample: EvalSample = {
       ...sample,
-      questions: [{ id: 'p1#0', question: 'Q?', answers: [], evidencePages: [], unanswerable: true }],
+      questions: [qasperQuestion({ id: 'p1#0', question: 'Q?', answers: [], evidencePages: [], unanswerable: true })],
     }
     const result = await runQaTask(argsWith({ samples: [unanswerableSample], deps }))
     expect(result.metrics.unanswerableAccuracy).toBe(0)
@@ -297,14 +318,16 @@ describe('runQaTask', () => {
       ...sample,
       questions: [
         sample.questions[0],
-        { id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false },
-        { id: 'p1#2', question: 'Q3?', answers: ['7'], evidencePages: [3], unanswerable: false },
+        qasperQuestion({ id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false }),
+        qasperQuestion({ id: 'p1#2', question: 'Q3?', answers: ['7'], evidencePages: [3], unanswerable: false }),
       ],
     }
     const result = await runQaTask(argsWith({ samples: [many], limit: 2, deps }))
 
     expect(result.meta.total).toBe(2)
     expect(deps.retrieveContext).toHaveBeenCalledTimes(2)
+    expect(result.meta.qaExpectedQuestionIds).toEqual(['p1#0', 'p1#1'])
+    expect(result.metrics.answerF1AllQuestionsSampleCount).toBe(2)
   })
 
   it('记录管线诊断指标：降级率、改写率、调用数、分块数', async () => {
@@ -396,7 +419,7 @@ describe('runQaTask', () => {
       ...sample,
       questions: [
         sample.questions[0],
-        { id: 'p1#1', question: 'unknown?', answers: [], evidencePages: [], unanswerable: true },
+        qasperQuestion({ id: 'p1#1', question: 'unknown?', answers: [], evidencePages: [], unanswerable: true }),
       ],
     }
     const result = await runQaTask(argsWith({ samples: [mixed] }))
@@ -418,13 +441,14 @@ describe('runQaTask', () => {
       source: 'qasper',
       questions: [
         { ...sample.questions[0], evidenceMapping: 'mapped' },
-        { id: 'p1#1', question: 'missing?', answers: ['x'], evidencePages: [], unanswerable: false, evidenceMapping: 'unmapped' },
+        qasperQuestion({ id: 'p1#1', question: 'missing?', answers: ['x'], evidencePages: [], unanswerable: false, evidenceMapping: 'unmapped' }),
       ],
     }
     const smoke: EvalSample = { ...qasper, paperId: 'smoke', source: 'smoke' }
     const result = await runQaTask(argsWith({ samples: [qasper, smoke] }))
     expect(result.meta.evidenceMappingCoverage).toBe(0.5)
     expect(result.meta.unmappedEvidenceRate).toBe(0.5)
+    expect(result.meta.qaExpectedQuestionIds).toEqual(['p1#0', 'p1#1'])
   })
 
   it('perPaper 记录索引时长、问题数、cache 差值与 leafCount', async () => {
@@ -649,7 +673,7 @@ describe('runQaTask', () => {
       ...sample,
       questions: [
         sample.questions[0],
-        { id: 'p1#1', question: 'unknown?', answers: [], evidencePages: [2], unanswerable: true },
+        qasperQuestion({ id: 'p1#1', question: 'unknown?', answers: [], evidencePages: [2], unanswerable: true }),
       ],
     }
     const result = await runQaTask(argsWith({
@@ -663,7 +687,8 @@ describe('runQaTask', () => {
     })
     // 非有效题：状态为 ineligible，且一个检索指标键都不写（不伪造观测）
     expect(result.perSample[1].retrievalStatus).toBe('ineligible')
-    expect(result.perSample[1].metrics).toEqual({})
+    expect(result.perSample[1].metrics).toEqual({ answerF1AllQuestions: 0 })
+    expect(result.perSample[1].metrics.contextPageMrr).toBeUndefined()
     // 固定分母只数有效题：1 条观测 == 契约有效题数 1
     expect(result.metrics.contextPageMrrSampleCount).toBe(1)
     expect(result.metrics.contextPageMrrEligibleCount).toBe(1)
@@ -677,7 +702,7 @@ describe('runQaTask', () => {
           ...sample,
           questions: [
             sample.questions[0],
-            { id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false },
+            qasperQuestion({ id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false }),
           ],
         },
       ],
@@ -687,7 +712,7 @@ describe('runQaTask', () => {
           ...sample,
           questions: [
             sample.questions[0],
-            { id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false },
+            qasperQuestion({ id: 'p1#1', question: 'Q2?', answers: ['9'], evidencePages: [2], unanswerable: false }),
           ],
         },
       ]),
@@ -813,8 +838,8 @@ describe('runQaTask — speed mode', () => {
       fullAnswerLatencyP50Ms: 90,
     })
     expect(result.meta).toMatchObject({
-      speedMetricSchemaVersion: 1,
-      speedDefinition: 'query-timeline-v1',
+      speedMetricSchemaVersion: 2,
+      speedDefinition: 'query-timeline-v2',
       completedSpeedQuestionCount: 1,
     })
   })
@@ -961,6 +986,52 @@ describe('runFullContextQaTask — 生成上限基线', () => {
     expect(result.meta.metricSchemaVersion).toBeUndefined()
   })
 
+  it('retains non-stream generation failures and scores them as zero', async () => {
+    const client = {
+      ...fullContextClient,
+      chat: vi.fn().mockRejectedValue(new Error('generation unavailable')),
+    }
+    const result = await runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client: client as never,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+    })
+
+    expect(result.meta.completed).toBe(0)
+    expect(result.perSample).toEqual([expect.objectContaining({
+      id: 'p1#0',
+      generationStatus: 'failed',
+      judgeStatus: 'skipped',
+      metrics: { answerF1AllQuestions: 0 },
+      referenceAnswers: ['8'],
+    })])
+    expect(result.metrics).toMatchObject({
+      answerF1AllQuestions: 0,
+      answerF1AllQuestionsSampleCount: 1,
+      qaCompletionRate: 0,
+    })
+    expect(result.errors).toContainEqual(expect.objectContaining({ stage: 'generate', message: 'generation unavailable' }))
+  })
+
+  it('omits the QASPER quality contract when the selected slice contains only smoke questions', async () => {
+    const smoke: EvalSample = { ...sample, paperId: 'smoke', source: 'smoke' }
+    const result = await runFullContextQaTask({
+      samples: [smoke, sample],
+      limit: 1,
+      config: { name: 'default', topK: 2 },
+      client: { ...fullContextClient, chat: vi.fn(async () => '8') } as never,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+    })
+
+    expect(result.meta.qaQualityDefinition).toBeUndefined()
+    expect(result.metrics.answerF1AllQuestions).toBeUndefined()
+  })
+
   it('保持全文直投：system 报文含整篇论文与数学格式约束，user 报文只含原始问题', async () => {
     fullContextClient.chat.mockClear()
     await fullContext()
@@ -1028,7 +1099,7 @@ describe('runFullContextQaTask — 生成上限基线', () => {
       ...sample,
       questions: [
         sample.questions[0],
-        { id: 'p1#1', question: 'Q2?', answers: [], evidencePages: [], unanswerable: true },
+        qasperQuestion({ id: 'p1#1', question: 'Q2?', answers: [], evidencePages: [], unanswerable: true }),
       ],
     }
     const client = speedClient([
@@ -1199,7 +1270,12 @@ describe('runFullContextQaTask — 生成上限基线', () => {
 
     expect(result.metrics.answerF1).toBe(1)
     expect(result.metrics.judgeFactuality).toBeUndefined()
-    expect(result.perSample[0]).not.toHaveProperty('judgeStatus')
+    expect(result.perSample[0]).toMatchObject({
+      generationStatus: 'completed',
+      judgeStatus: 'failed',
+      answer: '8',
+      metrics: { answerF1: 1, answerF1AllQuestions: 1 },
+    })
     expect(result.errors).toContainEqual({
       sampleId: sample.questions[0].id,
       stage: 'judge',
@@ -1315,7 +1391,7 @@ describe('runQaTask + judge', () => {
     })
     const unanswerableSample: EvalSample = {
       ...sample,
-      questions: [{ id: 'p1#0', question: 'Q?', answers: [], evidencePages: [], unanswerable: true }],
+      questions: [qasperQuestion({ id: 'p1#0', question: 'Q?', answers: [], evidencePages: [], unanswerable: true })],
     }
     const result = await runQaTask(argsWith({
       samples: [unanswerableSample],

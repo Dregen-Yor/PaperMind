@@ -45,6 +45,11 @@ import {
   resolveQaClientCachePolicy,
 } from './speed/policy'
 import { benchmarkPathForLog, writeBenchmarkPathLine } from './logging'
+import { resolveQaAnswerOptions } from './speed/qaOptions'
+import { readBenchResult, readQSource, writeQArtifact, type QArtifact } from './scoring/qArtifacts'
+import { buildQComparison } from './scoring/qComparison'
+import { renderQComparison } from './scoring/qReport'
+import type { QConfig } from './scoring/qScore'
 
 // 必须用 benchPath（fileURLToPath），不能用 new URL(...).pathname——
 // 后者保留百分号转义，路径含空格/中文时得到字面量 %20 目录，写文件静默失败
@@ -55,26 +60,6 @@ const MODEL_CACHE_DIR = () => benchPath(import.meta.url, '../cache/models/')
 
 /** QASPER 参考答案是英文而生产 prompt 是中文，不强制英文作答则 answerF1 恒≈0（Task 10 裁定 3） */
 const QASPER_LANGUAGE_INSTRUCTION = '请依据参考内容，用论文原文语言（英文）作答。'
-const FULL_CONTEXT_LIMITS = { timeoutMs: 120_000, maxTokens: 4096 } as const
-const QA_REQUEST_TIMEOUT_MS = 120_000
-// 可恢复错误有限重试，避免单题在 429/5xx/断网时永久占住整轮。失败题由 runner 记录，
-// 强基线可凭逐题 checkpoint 重启续跑。环境变量便于跑批按端点稳定性收紧超时与次数。
-function nonNegativeIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (raw === undefined || raw === '') return fallback
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} 必须是非负整数，收到：${raw}`)
-  return value
-}
-
-function positiveIntEnv(name: string, fallback: number): number {
-  const value = nonNegativeIntEnv(name, fallback)
-  if (value <= 0) throw new Error(`${name} 必须是正整数，收到：${value}`)
-  return value
-}
-
-const QA_RETRY_ATTEMPTS = nonNegativeIntEnv('BENCH_QA_RETRY_ATTEMPTS', 3)
-const EFFECTIVE_QA_REQUEST_TIMEOUT_MS = positiveIntEnv('BENCH_QA_REQUEST_TIMEOUT_MS', QA_REQUEST_TIMEOUT_MS)
 const retryLog = (event: { attempt: number; retryAttempts: number; delayMs: number; error: string }) => {
   process.stderr.write(
     `[LLM 重试 ${event.attempt}/${event.retryAttempts}] ${event.error}; ` +
@@ -131,6 +116,27 @@ const args = parseArgs(process.argv.slice(2))
 // --compare 是独立路径：只读两份结果输出差异表，不跑评测
 if (args.compare) {
   const [pathA, pathB] = args.compare
+  if (args.qConfig) {
+    const reference = readQSource(pathA)
+    const candidate = readQSource(pathB)
+    const config = readQSource(args.qConfig)
+    const a = readBenchResult(reference.data)
+    const b = readBenchResult(candidate.data)
+    const comparison = buildQComparison(a, b, config.data as QConfig)
+    process.stdout.write(renderComparison(a, b))
+    process.stdout.write(`\n${renderQComparison(comparison)}`)
+    if (args.out) {
+      const artifact: QArtifact = {
+        schemaVersion: 1,
+        kind: 'papermind-q-comparison',
+        comparison,
+        inputs: { reference: { ...reference, data: a }, candidate: { ...candidate, data: b }, config },
+      }
+      writeQArtifact(args.out, artifact)
+      process.stdout.write(`Q artifact written: ${args.out}\n`)
+    }
+    process.exit(0)
+  }
   // readFileSync / JSON.parse 裸抛英文 stack 难以定位，转成中文报错并保留原始原因
   const load = (p: string): BenchResult => {
     let raw: string
@@ -150,6 +156,11 @@ if (args.compare) {
   process.stdout.write(renderComparison(a, b))
   process.exit(0)
 }
+
+// Resolve QA settings only after the offline comparison path has exited.
+const QA_ANSWER_OPTIONS = args.task === 'qa' || args.task === 'all'
+  ? resolveQaAnswerOptions(process.env)
+  : undefined
 
 // --judge 的前置校验：judge 模型名必须显式给出，judge 客户端按配置矩阵逐组创建
 if (args.judge && !process.env.BENCH_JUDGE_MODEL) {
@@ -226,13 +237,16 @@ type CommonQaArgs = {
   judgeModel?: string
 } & { [K in keyof ControlledQaArgs | keyof StrongIdentityArgs]?: never }
 
-/**
- * 生成侧固定设置：随断点签名落盘，改动会让旧断点失效。
- * RAG 模式**不设生成上限**（客户端拿到的是未设 maxTokens 的默认行为），故这里只冻结请求超时。
- * 若将来 RAG 真的加了生成上限，必须把该值一并接进这个对象——它是签名的一部分，
- * 只改调用点而漏了这里，就会导致「换了生成上限却复用旧断点」。
- */
-const RAG_GENERATION_SETTINGS: StrongGenerationSettings = { requestTimeoutMs: EFFECTIVE_QA_REQUEST_TIMEOUT_MS }
+/** Actual answer request settings are frozen into strong-baseline checkpoint signatures. */
+const RAG_GENERATION_SETTINGS: StrongGenerationSettings | undefined = QA_ANSWER_OPTIONS && {
+  maxTokens: QA_ANSWER_OPTIONS.maxTokens,
+  requestTimeoutMs: QA_ANSWER_OPTIONS.timeoutMs,
+  temperature: QA_ANSWER_OPTIONS.temperature,
+  topP: QA_ANSWER_OPTIONS.topP,
+  thinking: QA_ANSWER_OPTIONS.thinking,
+  stop: QA_ANSWER_OPTIONS.stop,
+  retryAttempts: QA_ANSWER_OPTIONS.retryAttempts,
+}
 
 /** 强基线逐题进度；processed 含成功与失败题，与前缀语义一致。 */
 type StrongProgressEvent = Parameters<NonNullable<StrongBaselineQaArgs['onProgress']>>[0]
@@ -275,7 +289,7 @@ for (const config of configs) {
       // Speed needs the same dataset identity even in full-context mode. Ordinary full-context
       // keeps its prior path and does not build an otherwise-unused retrieval contract.
       const speedEvaluationContract = args.speed ? buildEvaluationContract(group, args.limit) : undefined
-      const requestMaxTokens = args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.maxTokens : undefined
+      const answerOptions = QA_ANSWER_OPTIONS!
       const cachePolicy = resolveQaClientCachePolicy({ speed: args.speed, useCache: args.useCache })
       const speedPolicy = speedEvaluationContract
         ? buildSpeedExecutionPolicy({
@@ -284,10 +298,14 @@ for (const config of configs) {
             provider: env.provider,
             model: env.model,
             baseUrl: env.baseUrl,
-            retryAttempts: QA_RETRY_ATTEMPTS,
+            retryAttempts: answerOptions.retryAttempts,
             answerSystemPrompt,
-            maxTokens: requestMaxTokens,
-            stop: undefined,
+            temperature: answerOptions.temperature,
+            maxTokens: answerOptions.maxTokens,
+            topP: answerOptions.topP,
+            thinking: answerOptions.thinking,
+            stop: answerOptions.stop,
+            timeoutMs: answerOptions.timeoutMs,
             environment: {
               platform: process.platform,
               arch: process.arch,
@@ -297,21 +315,18 @@ for (const config of configs) {
             env: process.env,
           })
         : undefined
-      // 全文直投模式不截断论文；为避免上游长上下文请求永久卡死，单题请求 120 秒后中止并由 runner 记为失败后继续。
-      // 生成最多 4,096 tokens，防止推理模型在极简单的 QA 上无限延长隐藏推理；此限制不影响输入论文全文。
+      // All QA answer requests share the same generation and retry limits.
       const client = createLlmClient({
         ...env,
         useCache: cachePolicy.answerUseCache,
-        timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS,
-        retryAttempts: QA_RETRY_ATTEMPTS,
+        ...answerOptions,
         onRetry: retryLog,
-        ...(requestMaxTokens === undefined ? {} : { maxTokens: requestMaxTokens }),
         ...speedPolicy?.answerClientOverrides,
       })
       if (speedPolicy) assertSpeedAnswerClient(client)
       // judge 只换模型，凭据与端点沿用主配置；缓存与主 client 共目录但 key 含模型名，互不污染
       const judgeClient = args.judge
-        ? createLlmClient({ ...env, model: judgeModel!, useCache: cachePolicy.judgeUseCache, timeoutMs: args.mode === 'full-context' ? FULL_CONTEXT_LIMITS.timeoutMs : EFFECTIVE_QA_REQUEST_TIMEOUT_MS, retryAttempts: QA_RETRY_ATTEMPTS, onRetry: retryLog, ...(requestMaxTokens === undefined ? {} : { maxTokens: requestMaxTokens }) })
+        ? createLlmClient({ ...env, model: judgeModel!, useCache: cachePolicy.judgeUseCache, timeoutMs: answerOptions.timeoutMs, maxTokens: answerOptions.maxTokens, retryAttempts: answerOptions.retryAttempts, onRetry: retryLog })
         : undefined
 
       process.stdout.write(`\n[QA] ${config.name}（${source}，${group.length} 篇）...\n`)
@@ -412,8 +427,8 @@ for (const config of configs) {
       result.meta.cacheMode = cachePolicy.answerUseCache ? 'normal' : 'bypass'
       result.meta.mode = args.mode
       if (args.mode === 'full-context') {
-        result.meta.requestTimeoutMs = FULL_CONTEXT_LIMITS.timeoutMs
-        result.meta.generationMaxTokens = FULL_CONTEXT_LIMITS.maxTokens
+        result.meta.requestTimeoutMs = answerOptions.timeoutMs
+        result.meta.generationMaxTokens = answerOptions.maxTokens
       }
       // 缓存计数来自主 RAG client（meta.cacheHits/cacheMisses 在 runQaTask 内统计），
       // 不含 judgeClient——启用 --judge 时明确标注，避免被误读为整轮全部 LLM 流量

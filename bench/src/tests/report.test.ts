@@ -59,8 +59,8 @@ function comparableResult(name: string, metaPatch: Partial<BenchResult['meta']> 
 }
 
 const SPEED_META: Partial<BenchResult['meta']> = {
-  speedMetricSchemaVersion: 1,
-  speedDefinition: 'query-timeline-v1',
+  speedMetricSchemaVersion: 2,
+  speedDefinition: 'query-timeline-v2',
   datasetFingerprint: 'speed-dataset-a',
   executedQuestionIdsHash: 'executed-a',
   completedSpeedQuestionIdsHash: 'completed-a',
@@ -763,7 +763,7 @@ describe('partitionResults（§9）', () => {
 describe('renderReport — query-timeline speed', () => {
   it('renders retrieval speed with exactly six time values and one token mean', () => {
     const md = renderReport([speedResult('papermind', { answerF1: 0.5 })])
-    const header = tableHeaderAfter(md, '### 检索方法速度（query-timeline-v1）')
+    const header = tableHeaderAfter(md, '### 检索方法速度（query-timeline-v2）')
 
     expect(header).toEqual([
       '方法',
@@ -772,7 +772,7 @@ describe('renderReport — query-timeline speed', () => {
       'Full Answer P50', 'P95',
       'Avg Online Tokens',
     ])
-    expect(sectionOf(md, '### 检索方法速度（query-timeline-v1）')).toContain(
+    expect(sectionOf(md, '### 检索方法速度（query-timeline-v2）')).toContain(
       '| papermind | 100 ms | 200 ms | 300 ms | 400 ms | 500 ms | 600 ms | 80 |',
     )
 
@@ -797,7 +797,7 @@ describe('renderReport — query-timeline speed', () => {
     ]
 
     const md = renderReport([run])
-    const speed = sectionOf(md, '### 检索方法速度（query-timeline-v1）')
+    const speed = sectionOf(md, '### 检索方法速度（query-timeline-v2）')
     const diagnostics = sectionOf(md, '### Query-timeline 支持计数与失败诊断')
 
     expect(speed).toContain('| papermind | 100 ms | 200 ms | 300 ms | 400 ms | 500 ms | 600 ms | — |')
@@ -816,8 +816,8 @@ describe('renderReport — query-timeline speed', () => {
       speedResult('papermind'),
       fullContextSpeedResult('full-context'),
     ])
-    const retrievalSpeed = sectionOf(md, '### 检索方法速度（query-timeline-v1）')
-    const ceilingSpeed = sectionOf(md, '### 生成上限速度（query-timeline-v1）')
+    const retrievalSpeed = sectionOf(md, '### 检索方法速度（query-timeline-v2）')
+    const ceilingSpeed = sectionOf(md, '### 生成上限速度（query-timeline-v2）')
 
     expect(retrievalSpeed).toContain('| papermind |')
     expect(retrievalSpeed).not.toContain('| full-context |')
@@ -847,13 +847,26 @@ describe('renderReport — query-timeline speed', () => {
     const report = renderReport([legacy])
     expect(report).toContain('### 详细耗时与缓存诊断（Legacy timing）')
     expect(report).toContain('| legacy |')
-    expect(report).not.toContain('### 检索方法速度（query-timeline-v1）')
-    expect(report).toContain('缺少 `speedDefinition: \'query-timeline-v1\'`')
+    expect(report).not.toContain('### 检索方法速度（query-timeline-v2）')
+    expect(report).toContain('缺少 `speedDefinition: \'query-timeline-v2\'`')
 
     const comparison = renderComparison(legacy, speedResult('current'))
     expect(comparison).not.toContain('### Query-timeline 速度对比')
     expect(comparison).not.toContain('Evidence Ready P50')
     expect(comparison).toContain('Legacy timing 不进入 query-timeline 速度 delta')
+  })
+
+  it('reads historical v1 speed results as diagnostics without relabeling them v2', () => {
+    const historical = speedResult('historical', {}, {
+      speedMetricSchemaVersion: 1,
+      speedDefinition: 'query-timeline-v1',
+      startedAt: '2026-09-05T09:30:00.000Z',
+      finishedAt: '2026-09-05T10:00:00.000Z',
+    })
+    const report = renderReport([historical])
+    expect(report).toContain('### 详细耗时与缓存诊断（Legacy timing）')
+    expect(report).not.toContain('### 检索方法速度（query-timeline-v2）')
+    expect(renderComparison(historical, speedResult('current'))).not.toContain('### Query-timeline 速度对比')
   })
 })
 
@@ -862,7 +875,7 @@ describe('renderComparison — query-timeline speed gate', () => {
     ['dataset fingerprint', { datasetFingerprint: 'other' }],
     ['executed IDs', { executedQuestionIdsHash: 'other' }],
     ['completed speed IDs', { completedSpeedQuestionIdsHash: 'other' }],
-    ['speed schema', { speedMetricSchemaVersion: 2 }],
+    ['speed schema', { speedMetricSchemaVersion: 1 }],
     ['answer model', { answerModelIdentity: 'other' }],
     ['answer framing', { answerFramingIdentityHash: 'other' }],
     ['endpoint', { endpointIdentity: 'other' }],
@@ -893,7 +906,7 @@ describe('renderComparison — query-timeline speed gate', () => {
     )
     expect(md).not.toContain('### Query-timeline 速度对比')
     expect(md).not.toContain('Evidence Ready P50')
-    expect(md).toContain('两侧都必须声明 `speedDefinition: \'query-timeline-v1\'`')
+    expect(md).toContain('两侧都必须声明 `speedDefinition: \'query-timeline-v2\'`')
   })
 
   it('rejects unequal speedSampleCount and same-sized cohorts with different completed IDs', () => {

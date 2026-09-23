@@ -15,6 +15,7 @@ import { RUBRIC_VERSION, type JudgeSampleState } from '../metrics/judge'
 import type { SpeedRunContract } from '../speed/contract'
 import { speedContractMeta } from '../speed/contract'
 import { aggregateSpeedMetrics } from '../speed/metrics'
+import { finalizeQaQuality } from '../metrics/qaQuality'
 
 /** 统一错误消息抽取：`Error` 取 message，其余转字符串。 */
 export function errorMessage(e: unknown): string {
@@ -139,6 +140,8 @@ export interface FinalizeQaArgs {
   extraMeta?: Partial<BenchResult['meta']>
   /** Opt-in query-timeline speed output; quality aggregation remains unchanged when absent. */
   speed?: { contract: SpeedRunContract }
+  /** Exact versioned QASPER questions selected by the original samples/limit execution slice. */
+  qualityQuestions?: QaQuestion[]
 }
 
 /**
@@ -148,6 +151,21 @@ export interface FinalizeQaArgs {
  * `runWallClockMs` 由调用方用各自时钟算好传入（Task 8 的断点续跑需自行调整该口径）。
  */
 export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
+  const quality = args.qualityQuestions && args.qualityQuestions.length > 0
+    ? finalizeQaQuality(args.records, args.qualityQuestions)
+    : undefined
+  if (!quality) {
+    for (const key of ['qaQualityDefinition', 'qaExpectedQuestionIds'] as const) {
+      if (args.extraMeta !== undefined && Object.prototype.hasOwnProperty.call(args.extraMeta, key)) {
+        throw new Error(`extraMeta ${key} is reserved for computed QA quality metadata`)
+      }
+    }
+    for (const key of ['answerF1AllQuestions', 'answerF1AllQuestionsSampleCount', 'qaCompletionRate'] as const) {
+      if (args.extraMetrics !== undefined && Object.prototype.hasOwnProperty.call(args.extraMetrics, key)) {
+        throw new Error(`extraMetrics ${key} is reserved for computed QA quality metrics`)
+      }
+    }
+  }
   const raw = aggregate(args.records)
   const counts = metricSampleCounts(args.records)
   emitMetricSampleCounts(raw, counts)
@@ -173,7 +191,12 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
   // 重命名 0/1 指标的聚合结果为「率」，让报表列名自解释；
   // withLatencyStats 追加既有 latencyP50/P95（deprecated），分位数由 withPercentiles 计算
   const metrics = withPercentiles(
-    { ...withLatencyStats(renameQaRates(raw), args.client.latencies()), ...args.extraMetrics },
+    {
+      ...withLatencyStats(renameQaRates(raw), args.client.latencies()),
+      ...args.extraMetrics,
+      // Fixed-denominator quality fields are contract-owned and cannot be spoofed by callers.
+      ...quality?.metrics,
+    },
     values,
   )
   // Speed is a separate completed-query cohort. Append it only after the existing quality
@@ -184,12 +207,13 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
   const ownedContractMeta: Partial<BenchResult['meta']> = {
     ...contractMeta(args.contract),
     ...speedMeta,
+    ...quality?.meta,
   }
   const extraMeta = { ...args.extraMeta }
   for (const [key, value] of Object.entries(ownedContractMeta)) {
     if (!Object.prototype.hasOwnProperty.call(extraMeta, key)) continue
     const supplied = extraMeta[key as keyof typeof extraMeta]
-    if (supplied !== value) {
+    if (JSON.stringify(supplied) !== JSON.stringify(value)) {
       throw new Error(`extraMeta ${key} cannot override contract-owned metadata`)
     }
     delete extraMeta[key as keyof typeof extraMeta]

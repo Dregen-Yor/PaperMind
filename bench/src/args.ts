@@ -8,6 +8,7 @@ export interface BenchArgs {
   speed: boolean
   out?: string
   compare?: [string, string]
+  qConfig?: string
   mode: 'rag' | 'full-context'
 }
 
@@ -103,6 +104,12 @@ export function parseArgs(argv: string[]): BenchArgs {
         args.compare = [a, b]
         break
       }
+      case '--q-config': {
+        const v = argv[++i]
+        if (!v || v.startsWith('--')) throw new Error('--q-config 需要一个配置文件路径')
+        args.qConfig = v
+        break
+      }
       default:
         throw new Error(`未知参数：${flag}`)
     }
@@ -110,5 +117,6 @@ export function parseArgs(argv: string[]): BenchArgs {
   if (args.speed && args.task !== 'qa') {
     throw new Error('--speed 仅支持显式选择 --task qa')
   }
+  if (args.qConfig && !args.compare) throw new Error('--q-config 需要 --compare')
   return args
 }

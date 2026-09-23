@@ -17,6 +17,9 @@ export interface QaQuestion {
   unanswerable: boolean
   /** QASPER free-text evidence may not map uniquely to a source paragraph. */
   evidenceMapping?: 'mapped' | 'ambiguous' | 'unmapped'
+  /** Versioned references used only by the all-question QASPER quality metric. */
+  qualityAnswers?: string[]
+  qualityDefinition?: 'qasper-all-questions-v1'
 }
 
 /** 一篇论文及其挂载的问答/摘要标注。 */
@@ -225,6 +228,8 @@ export interface PerSampleRecord {
   /** 最终上下文是否被预算截断 */
   contextTruncated?: boolean
   answer?: string
+  /** Versioned references used to score this record; absent from historical result JSON. */
+  referenceAnswers?: string[]
   /** 摘要专有 */
   summary?: string
 }
@@ -287,8 +292,8 @@ export interface BenchResult {
     comparisonEligible?: boolean
     comparisonIneligibleReason?: string
     /** Query-timeline speed benchmark contract fields. */
-    speedMetricSchemaVersion?: 1
-    speedDefinition?: 'query-timeline-v1'
+    speedMetricSchemaVersion?: 1 | 2
+    speedDefinition?: 'query-timeline-v1' | 'query-timeline-v2'
     completedSpeedQuestionIdsHash?: string
     completedSpeedQuestionCount?: number
     streaming?: true
@@ -300,6 +305,9 @@ export interface BenchResult {
     endpointIdentity?: string
     generationSettingsHash?: string
     executionEnvironmentFingerprint?: string
+    /** Versioned all-question QASPER quality provenance. */
+    qaQualityDefinition?: 'qasper-all-questions-v1'
+    qaExpectedQuestionIds?: string[]
   }
   metrics: Record<string, number>
   perSample: PerSampleRecord[]

@@ -3,7 +3,7 @@ import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
 import type { EvaluationContract } from '../evaluationContract'
 import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
-import { isRetrievalEligible } from '../evaluationContract'
+import { executedQuestions, isRetrievalEligible } from '../evaluationContract'
 import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
 import { chunkPages } from '../traditionalRag/chunker'
 import { buildBm25Retriever } from '../traditionalRag/bm25'
@@ -41,6 +41,7 @@ const modelCacheDir = () => benchPath(import.meta.url, '../../cache/models/')
 export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promise<BenchResult> {
   if (args.speed) assertSpeedAnswerClient(args.client as StreamingLlmClient)
   const now = args.now ?? Date.now; const startedAt = new Date().toISOString(); const runStartedMs = now(); const contract = args.evaluationContract; const records: PerSampleRecord[] = []; const perPaper: PaperTimingRecord[] = []; const errors: SampleError[] = []; let total = 0
+  const qualityQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'qasper').map(({ question }) => question)
   // judge 阶段累计口径状态：sawUnanswerable 决定 meta.unanswerableMethod 是否落盘，
   // usedPatternFallback（judge 不可用/失败而回落正则）决定该标注为 judge 还是 pattern
   const judgeState: JudgeSampleState = { sawUnanswerable: false, usedPatternFallback: false }
@@ -226,6 +227,7 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
     mappedEvidenceQuestions,
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
+    ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }

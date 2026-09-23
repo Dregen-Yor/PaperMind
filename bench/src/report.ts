@@ -120,6 +120,7 @@ export function partitionResults(results: BenchResult[]): {
 }
 
 function fmt(value: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
   return Number.isInteger(value) && Math.abs(value) >= 10
     ? String(value)
     : value.toFixed(3)
@@ -127,6 +128,7 @@ function fmt(value: number): string {
 
 /** 命中率百分比：31.7% → '31.7%'（保留 1 位小数，去尾零）。 */
 function fmtPct(rate: number): string {
+  if (typeof rate !== 'number' || !Number.isFinite(rate)) return '—'
   return `${(rate * 100).toFixed(1).replace(/\.0$/, '')}%`
 }
 
@@ -541,14 +543,14 @@ function renderSpeedSection(results: BenchResult[]): string[] {
   const lines: string[] = []
 
   if (retrievalRows.length > 0) {
-    lines.push('### 检索方法速度（query-timeline-v1）')
+    lines.push(`### 检索方法速度（${SPEED_DEFINITION}）`)
     lines.push('')
     lines.push(...renderSpeedTable(retrievalRows, true))
     lines.push('')
   }
 
   if (ceilingRows.length > 0) {
-    lines.push('### 生成上限速度（query-timeline-v1）')
+    lines.push(`### 生成上限速度（${SPEED_DEFINITION}）`)
     lines.push('')
     lines.push('> full-context 只表示生成上限，Evidence Ready 不适用；不参与检索方法速度排名或 delta。')
     lines.push('')
@@ -596,7 +598,7 @@ function renderTimingSection(results: BenchResult[]): string[] {
   lines.push('')
   lines.push('> 本区块保留 index / retrieval / generation / end-to-end / network 旧时延与 wall-clock 诊断，不作为 query-timeline 速度主指标。')
   if (results.some(result => result.meta.speedDefinition !== SPEED_DEFINITION)) {
-    lines.push('> 缺少 `speedDefinition: \'query-timeline-v1\'` 的结果只在 Legacy timing / 诊断区域读取，不进入速度主表或 delta。')
+    lines.push(`> 缺少 \`speedDefinition: '${SPEED_DEFINITION}'\` 的结果只在 Legacy timing / 诊断区域读取，不进入速度主表或 delta。`)
   }
   lines.push('')
 
@@ -748,7 +750,7 @@ function renderSpeedComparison(a: BenchResult, b: BenchResult): string[] {
     const va = a.metrics[row.name]
     const vb = b.metrics[row.name]
     const tokenSuppressed = row.name === 'avgOnlineTokensPerCompletedAnswer' && tokenIssues.length > 0
-    const delta = issues.length > 0 || tokenSuppressed || va === undefined || vb === undefined
+    const delta = issues.length > 0 || tokenSuppressed || !Number.isFinite(va) || !Number.isFinite(vb)
       ? '—'
       : comparisonSpeedDelta(vb - va, row.duration)
     lines.push(`| ${row.label} | ${comparisonSpeedValue(va, row.duration)} | ${comparisonSpeedValue(vb, row.duration)} | ${delta} |`)
@@ -821,7 +823,7 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
     || Object.keys(result.metrics).some(name => SPEED_SECTION_METRICS.has(name))
   ))) {
     if (!isQueryTimelineResult(a) || !isQueryTimelineResult(b)) {
-      lines.push('> Legacy timing 不进入 query-timeline 速度 delta；两侧都必须声明 `speedDefinition: \'query-timeline-v1\'`。')
+      lines.push(`> Legacy timing 不进入 query-timeline 速度 delta；两侧都必须声明 \`speedDefinition: '${SPEED_DEFINITION}'\`。`)
     } else {
       lines.push('> full-context 是独立生成上限，不进入检索方法的 query-timeline 速度 delta。')
     }
@@ -839,7 +841,7 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
     const va = a.metrics[name]
     const vb = b.metrics[name]
     if (isCountMetric(name)) hasCountRow = true
-    const delta = shouldSuppressDelta(name, gated) || va === undefined || vb === undefined
+    const delta = shouldSuppressDelta(name, gated) || !Number.isFinite(va) || !Number.isFinite(vb)
       ? '—'
       : `${vb - va >= 0 ? '+' : ''}${fmt(vb - va)}`
     lines.push(`| ${comparisonMetricLabel(name)} | ${va !== undefined ? fmt(va) : '—'} | ${vb !== undefined ? fmt(vb) : '—'} | ${delta} |`)

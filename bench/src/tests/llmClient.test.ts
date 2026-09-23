@@ -137,6 +137,46 @@ describe('resolveEnvConfig', () => {
 })
 
 describe('generation-limit cache isolation', () => {
+  it.each([
+    [{ topP: 0.7 }, { topP: 0.8 }],
+    [{ thinking: 'enabled' as const }, { thinking: 'disabled' as const }],
+    [{ stop: 'END' }, { stop: 'STOP' }],
+  ])('separates cached responses when a generation parameter changes', async (first, second) => {
+    const firstFetch = vi.fn().mockResolvedValue(okResponse('first'))
+    const secondFetch = vi.fn().mockResolvedValue(okResponse('second'))
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    expect(await createLlmClient({ ...common, ...first, fetchImpl: firstFetch as unknown as typeof fetch }).complete('q')).toBe('first')
+    expect(await createLlmClient({ ...common, ...second, fetchImpl: secondFetch as unknown as typeof fetch }).complete('q')).toBe('second')
+    expect(secondFetch).toHaveBeenCalledOnce()
+  })
+
+  it('sends explicit settings in both OpenAI request modes', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const fetchImpl = vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return bodies.length === 1 ? okResponse('answer') : openAiStream('answer', 1, 1)
+    }) as unknown as typeof fetch
+    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, useCache: false, topP: 0.7, thinking: 'disabled', stop: ['END'], fetchImpl })
+    await client.complete('q')
+    await client.chatStream([{ role: 'user', content: 'q' }], () => {})
+    for (const body of bodies) expect(body).toMatchObject({ top_p: 0.7, thinking: { type: 'disabled' }, stop: ['END'] })
+  })
+
+  it('maps Ollama top-p and stop while rejecting unsupported thinking before fetch', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ollamaResponse('answer'))
+    const common = { provider: 'ollama', model: 'm', baseUrl: 'http://localhost:11434', cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch }
+    await createLlmClient({ ...common, topP: 0.7, stop: 'END' }).complete('q')
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toMatchObject({ options: { top_p: 0.7, stop: ['END'] } })
+    expect(() => createLlmClient({ ...common, thinking: 'enabled' })).toThrow(/thinking/i)
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+
+  it('rejects invalid generation settings before a request', () => {
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    expect(() => createLlmClient({ ...common, topP: Number.NaN })).toThrow(/topP/)
+    expect(() => createLlmClient({ ...common, thinking: 'maybe' as 'enabled' })).toThrow(/thinking/)
+    expect(() => createLlmClient({ ...common, stop: ['END', 3] as string[] })).toThrow(/stop/)
+  })
   it('does not reuse a response cached under a different maxTokens limit', async () => {
     const firstFetch = vi.fn().mockResolvedValue(okResponse('long'))
     const secondFetch = vi.fn().mockResolvedValue(okResponse('short'))

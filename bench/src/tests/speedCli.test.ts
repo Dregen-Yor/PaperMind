@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import type { EvaluationContract } from '../evaluationContract'
 import { createLlmClient, type StreamingLlmClient } from '../llmClient'
 import { answerFramingIdentityHash, generationSettingsHash, questionIdsHash } from '../speed/contract'
@@ -9,6 +13,7 @@ import {
   isLocalExecutionEndpoint,
   resolveQaClientCachePolicy,
 } from '../speed/policy'
+import { parseQaGenerationEnv, resolveQaAnswerOptions } from '../speed/qaOptions'
 
 const evaluationContract: EvaluationContract = {
   metricSchemaVersion: 2,
@@ -60,11 +65,18 @@ describe('speed CLI execution policy', () => {
       retryAttempts: 2,
       maxTokens: 4096,
       temperature: 0,
+      timeoutMs: undefined,
+      topP: undefined,
+      thinking: undefined,
+      stop: undefined,
     })
     expect(policy.generationSettings).toEqual({
       temperature: 0,
       maxTokens: 4096,
       stop: undefined,
+      topP: undefined,
+      thinking: undefined,
+      timeoutMs: undefined,
     })
     expect(policy.queryConcurrency).toBe(1)
     expect(policy).not.toHaveProperty('checkpointPath')
@@ -86,6 +98,83 @@ describe('speed CLI execution policy', () => {
       contract: policy.contract,
       now: policy.now,
     })
+  })
+
+  it('maps every explicit setting into both request overrides and one contract identity', () => {
+    const policy = buildSpeedExecutionPolicy({ ...common, temperature: 0.4, topP: 0.8, thinking: 'disabled', stop: ['END'], timeoutMs: 321 })
+    expect(policy.answerClientOverrides).toMatchObject({ temperature: 0.4, topP: 0.8, thinking: 'disabled', stop: ['END'], timeoutMs: 321 })
+    expect(policy.contract.generationSettingsHash).toBe(generationSettingsHash(policy.generationSettings))
+    expect(policy.generationSettings).toEqual({ temperature: 0.4, maxTokens: 4096, topP: 0.8, thinking: 'disabled', stop: ['END'], timeoutMs: 321 })
+  })
+
+  it('sends the OpenAI streaming request described by its speed contract', async () => {
+    const policy = buildSpeedExecutionPolicy({ ...common, topP: 0.8, thinking: 'disabled', stop: 'END', timeoutMs: 120_000 })
+    let requestBody: Record<string, unknown> | undefined
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"answer"}}]}\n\ndata: [DONE]\n\n'))
+        controller.close()
+      },
+    })
+    const client = createLlmClient({
+      provider: 'openai', model: common.model, baseUrl: common.baseUrl,
+      ...policy.answerClientOverrides,
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return { ok: true, body: stream } as Response
+      },
+    })
+    await client.chatStream([{ role: 'user', content: 'question' }], () => {})
+    expect(requestBody).toMatchObject({ max_tokens: 4096, temperature: 0, top_p: 0.8, thinking: { type: 'disabled' }, stop: 'END', stream: true })
+    expect(policy.contract.generationSettingsHash).toBe(generationSettingsHash({
+      temperature: requestBody?.temperature as number,
+      maxTokens: requestBody?.max_tokens as number,
+      topP: requestBody?.top_p as number,
+      thinking: (requestBody?.thinking as { type: 'disabled' }).type,
+      stop: requestBody?.stop as string,
+      timeoutMs: policy.answerClientOverrides.timeoutMs,
+    }))
+  })
+
+  it('keeps offline comparison independent of invalid QA environment settings', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bench-compare-'))
+    try {
+      const fixture = join(dir, 'result.json')
+      writeFileSync(fixture, JSON.stringify({
+        task: 'qa', config: { name: 'offline' },
+        meta: { model: 'm', timestamp: '2026-01-01', gitSha: 'abc', completed: 1, total: 1 },
+        metrics: {}, perSample: [], errors: [],
+      }))
+      const result = spawnSync(process.execPath, ['--import', 'tsx', 'bench/src/cli.ts', '--compare', fixture, fixture], {
+        cwd: resolve('.'),
+        env: { ...process.env, BENCH_QA_TOP_P: 'invalid', BENCH_QA_REQUEST_TIMEOUT_MS: 'invalid' },
+        encoding: 'utf-8',
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toContain('结果对比')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('parses optional QA generation parameters without replacing provider defaults', () => {
+    expect(parseQaGenerationEnv({})).toEqual({ topP: undefined, thinking: undefined })
+    expect(parseQaGenerationEnv({ BENCH_QA_TOP_P: '0.8', BENCH_QA_THINKING: 'disabled' })).toEqual({ topP: 0.8, thinking: 'disabled' })
+    for (const raw of ['', ' ', 'NaN', 'Infinity', '-0.1', '1.1', 'bad']) {
+      expect(() => parseQaGenerationEnv({ BENCH_QA_TOP_P: raw })).toThrow(/BENCH_QA_TOP_P/)
+    }
+    expect(() => parseQaGenerationEnv({ BENCH_QA_THINKING: 'true' })).toThrow(/BENCH_QA_THINKING/)
+  })
+
+  it('uses one QA answer options source for full-context and RAG limits', () => {
+    expect(resolveQaAnswerOptions({})).toEqual({
+      maxTokens: 4096, temperature: 0, timeoutMs: 120_000, retryAttempts: 3,
+      topP: undefined, thinking: undefined, stop: undefined,
+    })
+    expect(resolveQaAnswerOptions({ BENCH_QA_REQUEST_TIMEOUT_MS: '900', BENCH_QA_RETRY_ATTEMPTS: '2', BENCH_QA_TOP_P: '0.5' })).toMatchObject({
+      maxTokens: 4096, timeoutMs: 900, retryAttempts: 2, topP: 0.5,
+    })
+    expect(() => resolveQaAnswerOptions({ BENCH_QA_REQUEST_TIMEOUT_MS: '0' })).toThrow(/BENCH_QA_REQUEST_TIMEOUT_MS/)
   })
 
   it('provides directly callable monotonic clocks to speed runners', () => {
