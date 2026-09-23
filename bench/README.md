@@ -13,6 +13,10 @@ export BENCH_LLM_PROVIDER=openai        # openai | anthropic | ollama，默认 o
 export BENCH_LLM_MODEL=gpt-4o           # 必填
 export BENCH_LLM_API_KEY=sk-...
 export BENCH_LLM_BASE_URL=https://api.openai.com/v1
+export BENCH_QA_REQUEST_TIMEOUT_MS=120000  # QA 最终回答请求超时，默认 120000 ms
+export BENCH_QA_RETRY_ATTEMPTS=3          # QA 最终回答重试次数，默认 3
+# export BENCH_QA_TOP_P=0.8              # 可选，有限数值 [0,1]
+# export BENCH_QA_THINKING=disabled      # 可选：enabled | disabled；不设置则用 provider 默认值
 export BENCH_JUDGE_MODEL=gpt-4o         # 仅 --judge 时需要
 export HF_TOKEN=hf_...                  # 仅摘要任务需要
 export HF_MODEL=Bashaarat1/t5-small-arxiv-summarizer  # 可选，覆盖摘要模型（此为默认值）
@@ -23,20 +27,24 @@ export HF_ENDPOINT=https://hf-mirror.com
 export HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897
 ```
 
-评测固定 `temperature=0`，与生产 profile 的 0.7 不同 —— 分数必须可复现。
+QA 最终回答统一请求 `maxTokens=4096`、`temperature=0`，并共用上述超时与重试设置；这些请求参数也进入速度协议身份。`temperature=0` 只是请求值，provider 可能忽略参数，不能据此保证确定性。`BENCH_QA_TOP_P` 与 `BENCH_QA_THINKING` 未设置时保持 provider 默认行为，不等同于明确关闭 thinking；正式对照须两侧使用相同的显式选择。`BENCH_QA_THINKING` 的请求对象面向支持它的 OpenAI 兼容端点；`BENCH_LLM_PROVIDER=ollama` 会拒绝任何显式 thinking 值（包括 `disabled`），使用 Ollama 时应留空。客户端支持 `stop`，但目前没有相应的 `BENCH_STOP` CLI 环境变量。
+
+DeepSeek 的受控 profile 可设 `BENCH_LLM_PROVIDER=openai`、`BENCH_LLM_MODEL=deepseek-flash`、`BENCH_LLM_BASE_URL=https://api.deepseek.com`；API key 仅通过本机 `BENCH_LLM_API_KEY` 提供。官方[模型与价格说明](https://api-docs.deepseek.com/quick_start/pricing/)列出 `deepseek-flash` 与 thinking / non-thinking 两种模式；[thinking mode 文档](https://api-docs.deepseek.com/guides/thinking_mode/)使用 `thinking.type: enabled | disabled`。先选定一种模式并在所有正式对照中保持一致；thinking 模式下 provider 对 temperature / top-p 的支持有限，应核对实际请求与响应。这里不替用户选择正式运行模式。
 
 > **`BENCH_LLM_PROVIDER=anthropic` 注意**：端点形状与生产一致（`POST {baseUrl}/chat/completions` + `x-api-key` 头），仅支持 OpenAI 兼容代理；直接指向 `https://api.anthropic.com` 会 404。原生 Anthropic API 的路径是 `/v1/messages`，与该形状不匹配。
 
 ### 2. 数据集
 
 ```bash
-# QASPER（默认 60 篇，可用 QASPER_LIMIT 调整）
-npx tsx bench/datasets/qasper/fetch.ts
+# QASPER 主切片（60 篇、179 题）；旧版归一化文件缺 Q 所需参考答案时也须重新生成
+QASPER_LIMIT=60 npx tsx bench/datasets/qasper/fetch.ts
 
 # 冒烟集：见 datasets/smoke/README.md 自行准备 PDF 与标注
 ```
 
 > 端到端评测尚未真实运行过（需要真实凭据）；`bench/datasets/smoke/` 的 PDF（放入 `papers/`，已 git-ignore）与标注需按指南自行准备。
+
+旧 `bench/datasets/qasper/qasper.jsonl` 若缺 `qualityAnswers` / `qualityDefinition`，加载器会拒绝；上面的命令会覆盖本地归一化数据集，需留存旧文件时先自行备份。正式运行前核对冻结切片确为 60 篇 / 179 题。旧结果无法只补版本标签或参考答案来参与 Q，必须用同一新协议重跑全文参考和候选方法。
 
 ## 运行
 
@@ -67,15 +75,42 @@ npm run bench -- --task qa --dataset qasper --config default --speed
 npm run bench -- --task qa --dataset qasper --mode full-context --speed
 ```
 
-速度运行强制使用真实的流式最终回答、answer response cache 关闭、单题串行（concurrency 1），且不读取或续跑 query checkpoint。`--no-cache` 不能改变这项 answer-cache 强制关闭；若同时使用 `--judge`，judge 在最终回答时间线之后执行，不计入该时间线。失败、部分流或不完整里程碑的题不会被修补进速度样本。
+速度运行采用 schema 2 / `query-timeline-v2`，强制使用真实的流式最终回答、客户端 answer response cache 关闭、单题串行（concurrency 1），且不读取或续跑 query checkpoint。客户端不能控制 provider 侧响应缓存。`--no-cache` 不能改变 answer-cache 强制关闭；若同时使用 `--judge`，judge 在最终回答时间线之后执行，不计入该时间线。失败、部分流或不完整里程碑的题不会被修补进速度样本。
+
+全文参考在每题组装消息**之前**记 t0；整篇论文文本可按论文预备，检索索引也在逐题计时之前建立。逐题检索、上下文与消息组装、排队、网络和重试均计入首次可见回答的 TTFT。reasoning / usage 帧不算首次可见回答文本。
 
 对检索方法，报表的速度主表严格只有七个 headline 值：`Evidence Ready` P50/P95、`TTFT`（首次可见文本）P50/P95、`Full Answer` P50/P95，以及 `Avg Online Tokens`。六个时间百分位数始终从同一个完整题目 cohort 计算；`meta.completedSpeedQuestionIdsHash` 是该 cohort 的有序题目 ID 哈希，`speedSampleCount` 与 `completedSpeedQuestionCount` 必须一致。Token 均值只采用 LLM provider 在流式请求中返回的实际 usage，绝不按字符或 prompt 估算；只要 cohort 中任一完成题的 usage 不完整，`Avg Online Tokens` 整列即显示 `—`。
 
-每份 speed 结果还写入可比较身份：数据集指纹、已执行题目顺序哈希、已完成 cohort 哈希、answer model（provider + model）身份、最终回答固定 framing 哈希、规范化 endpoint 身份、temperature/maxTokens/stop 设置、retry 次数、streaming/cache/concurrency 协议和执行环境指纹。framing 哈希覆盖 `buildAnswerMessages` 实际使用的 base system prompt、样本语言指令、数学格式指令和固定 message/context framing，只落盘 SHA-256，不保存 prompt 明文。速度 delta 的门禁要求这些身份**每一项都存在且两侧相等**，还要求 `completedSpeedQuestionIdsHash`、`completedSpeedQuestionCount` 与两侧的 `speedSampleCount` 彼此一致；任一缺失或不一致，七个 delta 都不输出。Token accounting 不完整只抑制 token delta，不抑制仍满足这些门禁的时间 delta。endpoint 身份会剥离凭据；执行环境只哈希 platform、arch、Node 版本和 backend，不写主机名、路径或凭据。对 Ollama（以及其他 localhost/本地端点）必须设置稳定的实际设备/backend 标签，例如 `BENCH_EXECUTION_BACKEND=metal` 或 `BENCH_EXECUTION_BACKEND=cpu`；该标签进入环境身份，因此不同设备/backend 的数字不会被当作同一可比较运行。speed 模式的缓存与结果路径日志只打印仓库相对路径或 `<external>/文件名`，内部文件操作仍使用完整路径。
+每份 speed 结果还写入可比较身份：数据集指纹、已执行题目顺序哈希、已完成 cohort 哈希、answer model（provider + model）身份、最终回答固定 framing 哈希、规范化 endpoint 身份、temperature/maxTokens/topP/thinking/stop/timeout 设置哈希、retry 次数、streaming/cache/concurrency 协议和执行环境指纹。framing 哈希覆盖 `buildAnswerMessages` 实际使用的 base system prompt、样本语言指令、数学格式指令和固定 message/context framing，只落盘 SHA-256，不保存 prompt 明文。速度 delta 的门禁要求这些身份**每一项都存在且两侧相等**，还要求 `completedSpeedQuestionIdsHash`、`completedSpeedQuestionCount` 与两侧的 `speedSampleCount` 彼此一致；任一缺失或不一致，七个 delta 都不输出。Token accounting 不完整只抑制 token delta，不抑制仍满足这些门禁的时间 delta。endpoint 身份会剥离凭据；执行环境只哈希 platform、arch、Node 版本和 backend，不写主机名、路径或凭据。对 Ollama（以及其他 localhost/本地端点）必须设置稳定的实际设备/backend 标签，例如 `BENCH_EXECUTION_BACKEND=metal` 或 `BENCH_EXECUTION_BACKEND=cpu`；该标签进入环境身份，因此不同设备/backend 的数字不会被当作同一可比较运行。speed 模式的缓存与结果路径日志只打印仓库相对路径或 `<external>/文件名`，内部文件操作仍使用完整路径。
 
-`--mode full-context --speed` 是**生成上限**：它不走检索，也不会伪造 `Evidence Ready`，因此在独立的生成上限速度表中该两格为 `—`，并且始终 `comparisonEligible: false`，不进入检索速度排名或 delta。速度表与「详细耗时与缓存诊断（Legacy timing）」是两套口径：前者才是 query-timeline-v1 的主指标；后者保留 index/retrieval/generation/end-to-end/network 与 wall-clock 的历史诊断，不能拿来替代或混入速度主表和 delta。
+`--mode full-context --speed` 在旧报表中标为**生成上限**：它不走检索，也不会伪造 `Evidence Ready`，因此在独立的生成上限速度表中该两格为 `—`，并且始终 `comparisonEligible: false`，不进入检索速度排名或 delta；该旧标签仅指全文直投的对照路径，不代表理论质量上限。速度表与「详细耗时与缓存诊断（Legacy timing）」是两套口径：前者才是 query-timeline-v2 的主指标；后者保留 index/retrieval/generation/end-to-end/network 与 wall-clock 的历史诊断，不能拿来替代或混入速度主表和 delta。
 
 **QASPER 英文作答**：CLI 按 source 分组跑 QA，qasper 组会在 systemPrompt 后追加英文作答指令——参考答案是英文，模型若用中文作答，中英 token 完全不相交，answerF1 恒≈0。
+
+### Q：同一论文问答切片的质量与速度
+
+Q 是在两份已经生成的 QASPER `--speed` 结果上离线计算的单一相对分数。先用**同一冻结切片与同一生成协议**分别运行 `--mode full-context --speed` 和候选 RAG `--speed`，再从仓库根目录执行：
+
+```bash
+npm run bench -- --compare bench/results/full-context.json bench/results/rag.json --q-config bench/configs/scoring/q-score.json
+npm run bench -- --compare bench/results/full-context.json bench/results/rag.json --q-config bench/configs/scoring/q-score.json --out bench/results/q-comparison.json
+```
+
+第一份输入必须是全文直投参考，第二份是候选；有无 `--out` 都是离线对比，不调用模型或要求 API key。省略 `--out` 只打印报表；使用时父目录须已存在，目标必须是新路径，已有文件（含符号链接、硬链接）不会被覆盖，也没有强制覆盖选项。
+
+配置 `configs/scoring/q-score.json` 使用 schema 1、`weighted-geometric-relative-v1`，当前默认权重为回答质量 0.6、TTFT P50 0.2、TTFT P95 0.2。设 `F=answerF1AllQuestions`，`T50/T95=timeToFirstTokenP50Ms/P95Ms`，下标 `ref` 表示第一份全文参考，则
+
+```text
+Q = 100 × (F/Fref)^wF × (T50ref/T50)^w50 × (T95ref/T95)^w95
+```
+
+权重必须是严格正的有限数，且总和为 1；没有固定 TTFT 预算、阈值、epsilon 或分数截断。参考自身 Q=100，候选可以超过 100；100 只是相对标尺，既非准确率百分比，也非理论质量上限。参考 F1 为 0，或任一侧 TTFT 非正、非有限时 Q 不可用；候选 F1 为 0 且其他比较条件均有效时 Q=0。权重来自配置文件而非编译进代码；更改权重应另存配置与新输出，保留原实验口径。计算保留完整浮点精度，报表只显示两位小数。
+
+`answerF1AllQuestions` 使用 QASPER 官方归一化 token 多重集 F1，对多位标注者取最高分。数据归一化保留 extractive spans 拼接、free form、yes/no、`Unanswerable` 参考；每道**已尝试题**都进入固定分母，失败或跳过计 0，缺题或缺参考答案使 Q 无效。这个词法 F1 不等于语义准确性或有证据支撑的正确性。旧 `answerF1` 仍是可缺席的历史诊断；拒答、judge、检索、token、完整答案时间、失败与原始逐题记录也分别保留，不由 Q 代替。
+
+Q 要求两侧都是 schema 2 / `query-timeline-v2`，并逐项核对同一数据集指纹、已执行题目顺序、已完成速度 cohort、answer provider/model、endpoint、固定 prompt framing、生成设置哈希、retry、流式/缓存/并发协议与执行环境。它重算每题 F1、质量聚合与速度聚合；旧 v1、缺参考答案、指标不一致、仅取成功题交集或用旧 `answerF1` 补空值均不可出 Q。即使结果含失败题，失败题也留在质量分母，速度 cohort 只接受完整时间线；两侧 cohort 不一致时 Q 为 `—` 并列出原因。`full-context` 虽然 `comparisonEligible: false`、继续排除在检索排名及检索 delta 之外，仍是 Q 的合法参考。
+
+派生 JSON 原样包含参考结果、候选结果及配置的解析后内容（包括当前 schema 未识别字段），同时记录三份输入的文件名和原始字节 SHA-256，便于追溯。写入器递归拒绝 `apiKey`、`authorization` 等凭据键，但**不扫描自由文本**；导出或分享前检查源结果的 `errors` 和自由文本，勿提交凭据或原始用户数据。
 
 **`--limit` 语义**：在 `--dataset all` 下为**每组（每个 source）各取 N 条**，不是全局 N 条。
 
@@ -101,7 +136,7 @@ npm run bench -- --task qa --dataset qasper --mode full-context --speed
 
 > 注意天花板：evidence 反查成功率约 92%——图注类 evidence 存于 QASPER 独立字段，不在正文段落中，检索指标读数接近 92% 不代表检索已完美。
 
-**答案** —— `answerF1`（QASPER token 级 F1）、`unanswerableAccuracy`（该拒答时是否拒答）、`judge*`（三维 1-5 分，仅 `--judge`）
+**答案** —— `answerF1AllQuestions`（QASPER 已尝试全题固定分母 F1；Q 的质量项）、`answerF1`（历史可缺席诊断）、`unanswerableAccuracy`（该拒答时是否拒答）、`judge*`（三维 1-5 分，仅 `--judge`）
 
 **摘要** —— `rouge1` / `rouge2` / `rougeL`、`compressionRatio`、`emptyRate`
 
@@ -124,7 +159,7 @@ npm run bench -- --task qa --dataset qasper --mode full-context --speed
 | 组 | 行 | 说明 |
 |---|---|---|
 | Classic | jaccard / bm25 / cosine | 既有检索对照组，口径见上文 |
-| Ceiling | `--mode full-context` | **生成上限**，不是检索选手：无检索、全文直投，预算不受 4096 约束，故 `comparisonEligible: false`，只进「生成上限」表、不进检索排名。注意它是 `--mode` 取值而**不是**配置名——没有 `configs/full-context.json`，结果文件里的 `config.name` 仍是 `default`，不要去找一个不存在的配置 |
+| Ceiling | `--mode full-context` | 报表沿用**生成上限**标签，指全文直投参考而非理论质量上限；它不是检索选手：无检索、全文直投，预算不受 4096 约束，故 `comparisonEligible: false`，只进「生成上限」表、不进检索排名。注意它是 `--mode` 取值而**不是**配置名——没有 `configs/full-context.json`，结果文件里的 `config.name` 仍是 `default`，不要去找一个不存在的配置 |
 | Strong | `hybrid-rerank`、`long-section-rag` | 强基线组（计划 §0）：成熟检索栈、结构化阅读 |
 | Primary | PaperMind 当前管线 | 被评测的生产方法 |
 | Tree | `semantic-tree` | Primary 的变体：同一条分阶段管线（`retrieveRagContext` → `generateRagAnswer`；`runRagPipeline` 仅是向后兼容的组合封装），仅把平面 `scoreAndSelect` 换成单轮树路由——树的收益是唯一变量 |
@@ -153,7 +188,7 @@ npm run bench -- --task qa --dataset qasper --mode full-context --speed
 
 ## 缓存
 
-LLM 响应按 `sha256(provider + baseUrl + model + messages + maxTokens)` 缓存到 `bench/cache/`（字段以 `\0` 分隔）。key 含 provider、baseUrl 与生成上限——同名模型在不同端点或不同截断口径下不会串用缓存。这让配置矩阵可行：不同 `topK` 共享同一份索引构建结果，只有评分调用需要重发。失败请求也计入 misses，故 `hits/(hits+misses)` 在有错误时会偏低；runner 为纯串行，无并发去重需求——若未来并行跑样本需加 in-flight 去重，否则命中率会塌。
+LLM 响应缓存 key 是 `provider`、`baseUrl`、`model`、序列化的 `messages` 与生成参数对象的 `\0` 分隔串的 SHA-256；生成参数包含 `maxTokens`、`temperature`、`topP`、`thinking`、`stop`。不同采样、thinking 或停止设置不会串用缓存；这让配置矩阵可行：不同 `topK` 共享同一份索引构建结果，只有评分调用需要重发。失败请求也计入 misses，故 `hits/(hits+misses)` 在有错误时会偏低；runner 为纯串行，无并发去重需求——若未来并行跑样本需加 in-flight 去重，否则命中率会塌。
 
 `--no-cache` 当前只跳过**读**缓存、不覆写已有缓存文件（与 spec §8 的「强制重跑并覆写」有差距），`meta.cacheMode` 如实记录实际口径（`normal` / `bypass`）。summary 任务走 HuggingFace 摘要模型、不经过 LLM 缓存，`cacheMode` 仅做口径统一，`--no-cache` 对它无实际作用。
 

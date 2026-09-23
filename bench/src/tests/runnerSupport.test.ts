@@ -5,6 +5,8 @@ import type { FinalizeQaArgs } from '../runner/support'
 import { finalizeQaResult } from '../runner/support'
 import { questionIdsHash, type SpeedRunContract } from '../speed/contract'
 import type { PerSampleRecord } from '../types'
+import type { QaQuestion } from '../types'
+import { QA_QUALITY_DEFINITION } from '../metrics/qaQuality'
 
 const evaluationContract: EvaluationContract = {
   metricSchemaVersion: 2,
@@ -19,8 +21,8 @@ const evaluationContract: EvaluationContract = {
 }
 
 const speedContract: SpeedRunContract = {
-  speedMetricSchemaVersion: 1,
-  speedDefinition: 'query-timeline-v1',
+  speedMetricSchemaVersion: 2,
+  speedDefinition: 'query-timeline-v2',
   datasetFingerprint: 'dataset',
   executedQuestionIdsHash: 'executed',
   streaming: true,
@@ -99,6 +101,79 @@ function finalizeArgs(records: PerSampleRecord[]): FinalizeQaArgs {
 }
 
 describe('finalizeQaResult speed hook', () => {
+  it('merges all-question QASPER quality before legacy aggregation and owns its metadata', () => {
+    const qualityQuestion: QaQuestion = {
+      id: 'p#0',
+      question: 'Q?',
+      answers: ['legacy'],
+      evidencePages: [0],
+      unanswerable: false,
+      qualityAnswers: ['cat'],
+      qualityDefinition: QA_QUALITY_DEFINITION,
+    }
+    const quality = qualityRecord()
+    quality.source = 'qasper'
+    quality.answer = 'The cat.'
+
+    const result = finalizeQaResult({
+      ...finalizeArgs([quality]),
+      qualityQuestions: [qualityQuestion],
+      extraMetrics: { answerF1AllQuestions: 0.25, qaCompletionRate: 0.25 },
+    })
+
+    expect(result.metrics).toMatchObject({
+      answerF1: 0.75,
+      answerF1AllQuestions: 1,
+      answerF1AllQuestionsSampleCount: 1,
+      qaCompletionRate: 1,
+    })
+    expect(result.meta).toMatchObject({
+      qaQualityDefinition: QA_QUALITY_DEFINITION,
+      qaExpectedQuestionIds: ['p#0'],
+    })
+    expect(result.perSample[0].referenceAnswers).toEqual(['cat'])
+  })
+
+  it('deep-compares duplicate quality metadata and rejects spoofing', () => {
+    const qualityQuestion: QaQuestion = {
+      id: 'p#0', question: 'Q?', answers: ['cat'], evidencePages: [0], unanswerable: false,
+      qualityAnswers: ['cat'], qualityDefinition: QA_QUALITY_DEFINITION,
+    }
+    const quality = { ...qualityRecord(), source: 'qasper' as const, answer: 'cat' }
+
+    expect(() => finalizeQaResult({
+      ...finalizeArgs([quality]),
+      qualityQuestions: [qualityQuestion],
+      extraMeta: { qaExpectedQuestionIds: ['forged'] },
+    })).toThrow(/qaExpectedQuestionIds.*contract/i)
+
+    expect(finalizeQaResult({
+      ...finalizeArgs([quality]),
+      qualityQuestions: [qualityQuestion],
+      extraMeta: { qaExpectedQuestionIds: ['p#0'] },
+    }).meta.qaExpectedQuestionIds).toEqual(['p#0'])
+  })
+
+  it.each([
+    ['omitted', undefined],
+    ['empty', []],
+  ] as const)('reserves quality keys when qualityQuestions is %s', (_name, qualityQuestions) => {
+    for (const key of ['qaQualityDefinition', 'qaExpectedQuestionIds'] as const) {
+      expect(() => finalizeQaResult({
+        ...finalizeArgs([qualityRecord()]),
+        ...(qualityQuestions === undefined ? {} : { qualityQuestions: [...qualityQuestions] }),
+        extraMeta: { [key]: undefined },
+      })).toThrow(new RegExp(`extraMeta.*${key}.*reserved`, 'i'))
+    }
+
+    for (const key of ['answerF1AllQuestions', 'answerF1AllQuestionsSampleCount', 'qaCompletionRate'] as const) {
+      expect(() => finalizeQaResult({
+        ...finalizeArgs([qualityRecord()]),
+        ...(qualityQuestions === undefined ? {} : { qualityQuestions: [...qualityQuestions] }),
+        extraMetrics: { [key]: 0 },
+      })).toThrow(new RegExp(`extraMetrics.*${key}.*reserved`, 'i'))
+    }
+  })
   it('keeps pre-speed quality metrics byte-for-byte unchanged when speed is absent', () => {
     const result = finalizeQaResult(finalizeArgs([qualityRecord()]))
 

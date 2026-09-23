@@ -4,12 +4,12 @@ import { assertCompletedSpeedRecord } from './queryTimeline'
 import type { PerSampleRecord } from '../types'
 import { buildAnswerMessages } from '../../../src/utils/answerMessages'
 
-export const SPEED_METRIC_SCHEMA_VERSION = 1 as const
-export const SPEED_DEFINITION = 'query-timeline-v1' as const
+export const SPEED_METRIC_SCHEMA_VERSION = 2 as const
+export const SPEED_DEFINITION = 'query-timeline-v2' as const
 
 export interface SpeedRunContract {
-  speedMetricSchemaVersion: 1
-  speedDefinition: 'query-timeline-v1'
+  speedMetricSchemaVersion: 2
+  speedDefinition: 'query-timeline-v2'
   datasetFingerprint: string
   executedQuestionIdsHash: string
   streaming: true
@@ -27,6 +27,9 @@ export interface SpeedGenerationSettings {
   temperature: number
   maxTokens?: number
   stop?: string | string[]
+  topP?: number
+  thinking?: 'enabled' | 'disabled'
+  timeoutMs?: number
 }
 
 export interface ExecutionEnvironment {
@@ -63,7 +66,9 @@ export interface CompletedSpeedRecord extends PerSampleRecord {
 
 export interface SpeedComparableResult {
   config: { name: string }
-  meta: Partial<SpeedRunContract & {
+  meta: Partial<Omit<SpeedRunContract, 'speedMetricSchemaVersion' | 'speedDefinition'> & {
+    speedMetricSchemaVersion: 1 | 2
+    speedDefinition: 'query-timeline-v1' | 'query-timeline-v2'
     completedSpeedQuestionIdsHash: string
     completedSpeedQuestionCount: number
   }>
@@ -108,6 +113,9 @@ export function generationSettingsHash(settings: SpeedGenerationSettings): strin
     temperature: settings.temperature,
     maxTokens: settings.maxTokens ?? null,
     stop: settings.stop ?? null,
+    topP: settings.topP ?? 'provider-default',
+    thinking: settings.thinking ?? 'provider-default',
+    timeoutMs: settings.timeoutMs ?? null,
   })
 }
 

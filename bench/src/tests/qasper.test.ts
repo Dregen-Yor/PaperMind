@@ -1,5 +1,9 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
-import { paragraphsToPages, normalizeQasperEntry, PSEUDO_PAGE_CHARS, sectionsToPages } from '../datasets/qasper'
+import { loadQasperDataset, paragraphsToPages, normalizeQasperEntry, PSEUDO_PAGE_CHARS, sectionsToPages } from '../datasets/qasper'
+import { QA_QUALITY_DEFINITION } from '../metrics/qaQuality'
 
 describe('paragraphsToPages', () => {
   it('段落按字符数聚成伪页，并记录段落到页的映射', () => {
@@ -47,8 +51,8 @@ describe('normalizeQasperEntry', () => {
     qas: {
       question: ['Q1?', 'Q2?'],
       answers: [
-        [{ answer: { free_form_answer: 'A1', extractive_spans: [], unanswerable: false, evidence: ['methods para'] } }],
-        [{ answer: { free_form_answer: '', extractive_spans: [], unanswerable: true, evidence: [] } }],
+        [{ answer: { free_form_answer: 'A1', extractive_spans: [], unanswerable: false, yes_no: null, evidence: ['methods para'] } }],
+        [{ answer: { free_form_answer: '', extractive_spans: [], unanswerable: true, yes_no: null, evidence: [] } }],
       ],
     },
   }
@@ -121,6 +125,36 @@ describe('normalizeQasperEntry', () => {
     expect(s.questions[0].answers).toEqual(['eight', '8'])
   })
 
+  it('按标注者保留 unanswerable、extractive、free-form 与 yes/no 的版本化参考答案', () => {
+    const s = normalizeQasperEntry('p', {
+      ...entry,
+      qas: {
+        question: ['Q?'],
+        answers: [[
+          { answer: { free_form_answer: '', extractive_spans: [], unanswerable: true, yes_no: null, evidence: [] } },
+          { answer: { free_form_answer: 'ignored', extractive_spans: ['span one', 'span two'], unanswerable: false, yes_no: true, evidence: [] } },
+          { answer: { free_form_answer: 'free', extractive_spans: [], unanswerable: false, yes_no: null, evidence: [] } },
+          { answer: { free_form_answer: '', extractive_spans: [], unanswerable: false, yes_no: false, evidence: [] } },
+        ]],
+      },
+    })
+
+    expect(s.questions[0].qualityDefinition).toBe(QA_QUALITY_DEFINITION)
+    expect(s.questions[0].qualityAnswers).toEqual(['Unanswerable', 'span one, span two', 'free', 'No'])
+  })
+
+  it('rejects annotations with no valid versioned reference', () => {
+    expect(() => normalizeQasperEntry('p', {
+      ...entry,
+      qas: {
+        question: ['Q?'],
+        answers: [[
+          { answer: { free_form_answer: '', extractive_spans: [], unanswerable: false, yes_no: null, evidence: [] } },
+        ]],
+      },
+    })).toThrow(/reference/i)
+  })
+
   it('evidence 匹配不上任何段落时该问题 evidencePages 为空', () => {
     const s = normalizeQasperEntry('p', {
       ...entry,
@@ -137,5 +171,18 @@ describe('normalizeQasperEntry', () => {
   it('问题 id 由 paperId 与序号组成', () => {
     const s = normalizeQasperEntry('1234.5678', entry)
     expect(s.questions[0].id).toBe('1234.5678#0')
+  })
+
+  it('rejects old normalized JSONL without versioned quality references', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'qasper-quality-'))
+    const path = join(dir, 'old.jsonl')
+    const old = normalizeQasperEntry('p', entry)
+    for (const q of old.questions) {
+      delete q.qualityAnswers
+      delete q.qualityDefinition
+    }
+    await writeFile(path, `${JSON.stringify(old)}\n`)
+
+    await expect(loadQasperDataset(path)).rejects.toThrow(/重新运行.*fetch\.ts/)
   })
 })

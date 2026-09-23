@@ -30,7 +30,7 @@ import type {
 } from '../types'
 import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { applyRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
-import { isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
+import { executedQuestions, isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
@@ -123,6 +123,9 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const retrieveContext = args.deps?.retrieveContext ?? retrieveRagContext
   const generateAnswer = args.deps?.generateAnswer ?? generateRagAnswer
   const contract = args.evaluationContract
+  const qualityQuestions = executedQuestions(samples, limit)
+    .filter(({ sample }) => sample.source === 'qasper')
+    .map(({ question }) => question)
   // 语言覆盖指令追加在调用方 systemPrompt 之后；未传时 prompt 原样透传
   const systemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`
@@ -431,6 +434,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     mappedEvidenceQuestions,
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
+    ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
     extraMetrics: treeAgg.metrics,
     extraTimingValues: { treeBuildLatency: treeAgg.latencies },
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),

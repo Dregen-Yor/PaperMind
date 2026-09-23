@@ -31,7 +31,10 @@ const sample: EvalSample = {
   pages: ['ATTENTION_IS_ALL_YOU_NEED_MARKER'],
   source: 'qasper',
   questions: [
-    { id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [0], unanswerable: false },
+    {
+      id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [0], unanswerable: false,
+      qualityAnswers: ['8'], qualityDefinition: 'qasper-all-questions-v1',
+    },
   ],
 }
 
@@ -153,8 +156,8 @@ const argsWith = (overrides: Partial<QaTaskArgs> = {}): QaTaskArgs => {
 
 function speedContract(datasetFingerprint: string): SpeedRunContract {
   return {
-    speedMetricSchemaVersion: 1,
-    speedDefinition: 'query-timeline-v1',
+    speedMetricSchemaVersion: 2,
+    speedDefinition: 'query-timeline-v2',
     datasetFingerprint,
     executedQuestionIdsHash: 'executed-question-ids',
     streaming: true,
@@ -399,7 +402,10 @@ describe('runQaTask — 语义树模式（§11.2 / §11.4）', () => {
     const fallbackSample: EvalSample = {
       ...sample,
       pages: ['P0', 'P1', 'P2'],
-      questions: [{ id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [2], unanswerable: false }],
+      questions: [{
+        id: 'p1#0', question: 'Q1?', answers: ['8'], evidencePages: [2], unanswerable: false,
+        qualityAnswers: ['8'], qualityDefinition: 'qasper-all-questions-v1',
+      }],
     }
     const deps = makeDeps({
       retrieveContext: vi.fn().mockResolvedValue(retrievalStage({

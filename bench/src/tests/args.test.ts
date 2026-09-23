@@ -47,6 +47,13 @@ describe('parseArgs', () => {
     expect(a.compare).toEqual(['a.json', 'b.json'])
   })
 
+  it('requires --compare and a non-flag path for --q-config', () => {
+    expect(parseArgs(['--compare', 'a.json', 'b.json', '--q-config', 'q.json']).qConfig).toBe('q.json')
+    expect(() => parseArgs(['--q-config', 'q.json'])).toThrow(/--compare/)
+    expect(() => parseArgs(['--compare', 'a.json', 'b.json', '--q-config'])).toThrow(/--q-config/)
+    expect(() => parseArgs(['--compare', 'a.json', 'b.json', '--q-config', '--out', 'x.json'])).toThrow(/--q-config/)
+  })
+
   it('--task 取值非法时抛出列出合法值的错误', () => {
     expect(() => parseArgs(['--task', 'nope'])).toThrow(/qa.*summary.*all/)
   })

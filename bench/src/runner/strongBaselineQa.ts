@@ -19,7 +19,7 @@ import type { EvaluationContract } from '../evaluationContract'
 import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { MATH_FORMAT_INSTRUCTION } from '../../../src/utils/ragPipeline'
 import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
-import { isRetrievalEligible } from '../evaluationContract'
+import { executedQuestions, isRetrievalEligible } from '../evaluationContract'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
 import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
@@ -59,6 +59,11 @@ export interface StrongRetrievalRuntime {
 export interface StrongGenerationSettings {
   maxTokens?: number
   requestTimeoutMs?: number
+  temperature?: number
+  topP?: number
+  thinking?: 'enabled' | 'disabled'
+  stop?: string | string[]
+  retryAttempts?: number
 }
 
 export interface StrongBaselineQaArgs {
@@ -189,6 +194,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
     client: args.client as StreamingLlmClient,
   })
   const now = args.now ?? Date.now
+  const qualityQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'qasper').map(({ question }) => question)
   const started = now()
   const signature = checkpointSignature(args)
   const checkpoint = readCheckpoint(args.checkpointPath, signature)
@@ -491,6 +497,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
     extraMeta: { baselineFamily: args.meta.baselineFamily, candidateGranularity: args.retrieval.granularity },
+    ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }

@@ -16,7 +16,7 @@ export interface GenerateSpeedAnswerArgs {
   question: string
   history?: ChatTurn[]
   systemPrompt: string
-  /** Prebuilt messages let generation-only runners place t0 after large prompt construction. */
+  /** Prebuilt messages avoid constructing the prompt twice; the runner owns t0. */
   messages?: ChatMessage[]
   timeline: QueryTimeline
   client: StreamingLlmClient
