@@ -302,6 +302,12 @@ describe('retrievePassageContext（模式判定与组装）', () => {
     // 来源一致时稠密路照常：该 fixture 卡片向量齐全，模式为 full
     const matched = await retrievePassageContext(index, 'MultiUN results', { embedder })
     expect(matched.hybrid.retrievalMode).toBe('full')
+
+    // 记录没写 embedderId（阶段① 记录 / 旧落盘格式）时保持接入前的判据：
+    // 维度与数组长度自洽即走稠密路，不因为「说不出是谁算的」而白丢已付过费的向量
+    const legacy: PassageIndex = { ...index, embedderId: undefined }
+    const unlabeled = await retrievePassageContext(legacy, 'MultiUN results', { embedder })
+    expect(unlabeled.hybrid.retrievalMode).toBe('full')
   })
 
   it('空段落索引返回空上下文而不抛错', async () => {

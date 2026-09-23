@@ -177,7 +177,7 @@ export interface RagResult {
 /**
  * 检索阶段（纯函数）：查询改写 → 逐篇评分多选 → 合并上下文。
  *
- * 逐篇检索按论文手上已有的索分派：`paper.passageIndex` → 段落混合检索（本地打分，
+ * 逐篇检索按论文手上已有的索引分派：`paper.passageIndex` → 段落混合检索（本地打分，
  * 检索阶段零 LLM 调用）；否则 `paper.semantic` → 语义树路由；都没有 → 平面 scoreAndSelect。
  * 后两路与接入段落路径之前逐字一致。
  *
