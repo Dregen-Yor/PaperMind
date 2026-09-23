@@ -148,6 +148,60 @@ function hasPassageFields(passage: unknown): boolean {
 }
 
 /**
+ * `StructureFallbackReason` 的全部成员。标注成 `StructureFallbackReason[]` 只能让**拼错**的
+ * 字面量在编译期报错，抓不住「联合类型加了新原因、这里忘了同步」——那种情况需要
+ * `passageIndex.test.ts` 的 `Record<StructureFallbackReason, true>` 兜住：联合一改，测试
+ * 就编译不过，逼着把新原因同时加进这里。漏同步的后果是新记录被当成损坏、反复重建。
+ */
+const STRUCTURE_FALLBACK_REASONS: readonly StructureFallbackReason[] = [
+  'request-failed', 'invalid-json', 'invalid-structure', 'input-too-large', 'no-passages',
+]
+
+function isStructureFallbackReason(value: unknown): value is StructureFallbackReason {
+  return typeof value === 'string' && (STRUCTURE_FALLBACK_REASONS as readonly string[]).includes(value)
+}
+
+/**
+ * 卡片元素的形态校验。**只查形态、不查语义，刻意不调用 `validateStructureCards`**：
+ * 那个校验器描述的是 **LLM 输出**，而标题回落的卡片合法地违反它三条——`keyTerms: []`
+ * 低于 `MIN_KEY_TERMS`、回落标题（如「Introduction」）会被 `isGenericSectionLabel`
+ * 判为通用章节名、卡片数可以少于 `MIN_STRUCTURE_CARDS`。加载期复用它会把合法记录判死。
+ * 这里只保证读的时候不抛、不类型撒谎：缺 `range` 的卡片会让 `cardsToIndexNodes`
+ * 在 `card.range[0]` 处抛错。
+ */
+function hasStructureCardFields(card: unknown): boolean {
+  if (!isPlainObject(card)) return false
+  const { id, range, title, summary, keyTerms } = card as Record<string, unknown>
+  return typeof id === 'string'
+    && Array.isArray(range) && range.length === 2 && range.every(item => typeof item === 'string')
+    && typeof title === 'string'
+    && typeof summary === 'string'
+    && Array.isArray(keyTerms) && keyTerms.every(term => typeof term === 'string')
+}
+
+/**
+ * `tree` 的形态校验（根与所有嵌套 `nodes`，按 `IndexNode` 的字段逐个查）。写成显式栈而不是
+ * 递归：`index_json` 是从库里读出的字符串，`JSON.parse` 对极深的嵌套也能解析（迭代实现），
+ * 而递归下潜到两万层就会 `RangeError`——那会从 `parsePassageIndex` 里抛出去，违反「只拒绝、
+ * 不抛」。坏树没有可回落的替代物（UI 与 v1 语义路径直接读 `tree.nodes.length` / `.map`），
+ * 只能整份记录作废、由调用方后台重建。
+ */
+function hasIndexNodeShape(root: unknown): boolean {
+  const pending: unknown[] = [root]
+  while (pending.length > 0) {
+    const node = pending.pop()
+    if (!isPlainObject(node)) return false
+    const { title, nodeId, startPage, endPage, summary, nodes } = node as Record<string, unknown>
+    if (typeof title !== 'string' || typeof nodeId !== 'string') return false
+    if (typeof startPage !== 'number' || !Number.isInteger(startPage)) return false
+    if (typeof endPage !== 'number' || !Number.isInteger(endPage)) return false
+    if (typeof summary !== 'string' || !Array.isArray(nodes)) return false
+    for (const child of nodes) pending.push(child)
+  }
+  return true
+}
+
+/**
  * 解析并校验一份存量索引。**任何不自洽都返回 undefined**（调用方视为无索引、后台重建）：
  * 静默接受一份损坏的索引会让检索用错的分片与页号，比报错更难查。
  * 向量不自洽时只丢向量（降到阶段①/③ 检索），不丢整个索引。
@@ -168,7 +222,7 @@ export function parsePassageIndex(raw: unknown): PassageIndex | undefined {
   const passages = value.passages
   if (!Array.isArray(passages) || passages.length === 0) return undefined
   if (!passages.every(passage => hasPassagePartition(passage) && hasPassageFields(passage))) return undefined
-  if (!isPlainObject(value.tree)) return undefined
+  if (!hasIndexNodeShape(value.tree)) return undefined
   if (typeof value.passageConfigHash !== 'string' || !value.passageConfigHash) return undefined
   const separatorTokens = typeof value.separatorTokens === 'number' && Number.isInteger(value.separatorTokens) && value.separatorTokens >= 0
     ? value.separatorTokens
@@ -187,17 +241,31 @@ export function parsePassageIndex(raw: unknown): PassageIndex | undefined {
   if (typeof value.embedderId === 'string') index.embedderId = value.embedderId
   if (typeof value.structureHash === 'string') index.structureHash = value.structureHash
 
-  if (isPlainObject(value.structureFallback) && typeof (value.structureFallback as Record<string, unknown>).reason === 'string') {
-    index.structureFallback = { reason: (value.structureFallback as { reason: StructureFallbackReason }).reason }
+  // 可选字段的形态纪律与 passages 一致：键出现就必须是声明里的形态，否则整份记录不可信。
+  // `paper` 与 `structureFallback` 会被原样当声明类型用（`cardsToIndexNodes(..., { summary })`
+  // 会把非字符串 summary 原样写进推导出的树，未知的 reason 会冒充 `StructureFallbackReason`），
+  // 类型撒谎比缺字段更难查；两者都没有「丢了也能自愈」的回落路径，只能整份重建。
+  if (value.paper !== undefined) {
+    if (!isPlainObject(value.paper)) return undefined
+    const { title, summary } = value.paper as Record<string, unknown>
+    if (typeof title !== 'string' || typeof summary !== 'string') return undefined
+    index.paper = { title, summary }
   }
-  if (isPlainObject(value.paper) && typeof (value.paper as Record<string, unknown>).title === 'string') {
-    index.paper = value.paper as unknown as { title: string; summary: string }
+  if (value.structureFallback !== undefined) {
+    if (!isPlainObject(value.structureFallback)) return undefined
+    const reason = (value.structureFallback as Record<string, unknown>).reason
+    if (!isStructureFallbackReason(reason)) return undefined
+    index.structureFallback = { reason }
   }
-  if (Array.isArray(value.cards) && value.cards.length > 0) index.cards = value.cards as StructureCard[]
+  // 卡片形态不对时**只丢卡片**（`cardVectors` 随之不挂），不丢整份索引：与「向量数组不自洽
+  // 只丢向量」同一种处理，且 `planPassageIndexRebuild` 已经把 `cards === undefined` 当作
+  // 「只重做阶段③」——段落与向量照用，比整份重建便宜得多。
+  if (Array.isArray(value.cards) && value.cards.length > 0 && value.cards.every(hasStructureCardFields)) {
+    index.cards = value.cards as StructureCard[]
+  }
 
   const dim = typeof value.vectorDim === 'number' && Number.isInteger(value.vectorDim) && value.vectorDim > 0 ? value.vectorDim : undefined
   if (dim !== undefined) {
-    index.vectorDim = dim
     if (typeof value.passageVectors === 'string') {
       const vectors = decodeVectors(value.passageVectors, dim)
       if (vectors && vectors.length === typedPassages.length) index.passageVectors = vectors
@@ -206,6 +274,9 @@ export function parsePassageIndex(raw: unknown): PassageIndex | undefined {
       const vectors = decodeVectors(value.cardVectors, dim)
       if (vectors && vectors.length === index.cards.length) index.cardVectors = vectors
     }
+    // `vectorDim` 只在真有向量数组留下时才挂：两个数组都被丢掉时它描述的是不存在的维度，
+    // 只看 `vectorDim` 判断「有没有向量」的调用方会被骗。
+    if (index.passageVectors !== undefined || index.cardVectors !== undefined) index.vectorDim = dim
   }
   return index
 }

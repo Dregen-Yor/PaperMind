@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildPassages, createEstimatingTokenCounter, hasPassagePartition } from '../utils/passages'
 import { buildTitleCards, cardsToIndexNodes } from '../utils/structureCards'
+import type { StructureFallbackReason } from '../utils/structureCards'
 import { encodeVectors } from '../utils/embedder'
 import {
   PASSAGE_INDEX_SCHEMA_VERSION, PASSAGE_INDEX_VERSION, planPassageIndexRebuild,
@@ -74,6 +75,96 @@ describe('serialize / parse', () => {
     const parsed = parsePassageIndex(broken)
     expect(parsed).toBeDefined()
     expect(parsed?.passageVectors).toBeUndefined()
+  })
+
+  // `vectorDim` 描述的是「留下的向量有多宽」：两个数组都被丢掉时它描述的是不存在的维度，
+  // 只看 `vectorDim` 判断「有没有向量」的调用方会被骗。
+  it('两串向量都被丢弃时 vectorDim 也不挂', () => {
+    const broken = JSON.parse(JSON.stringify(serializePassageIndex(baseIndex)))
+    broken.stage = 2
+    broken.embedderId = 'fake@main#q8'
+    broken.vectorDim = 3
+    broken.passageVectors = encodeVectors([new Float32Array([1, 0, 0])])  // 只有 1 个，段落数 > 1
+    const parsed = parsePassageIndex(broken)
+    expect(parsed).toBeDefined()
+    expect(parsed?.passageVectors).toBeUndefined()
+    expect(parsed?.vectorDim).toBeUndefined()
+  })
+
+  // 字段形态纪律此前只落在 passages 上：`paper` / `structureFallback` 会被原样当声明类型用
+  // （`paper.summary: 42` 会走进推导出的树、未知 reason 会冒充 `StructureFallbackReason`），
+  // `tree` 只查「是对象」会让 v1 语义路径读到 `nodes.length` 为 undefined。
+  it('paper / 回落原因 / 树的形态不对视为损坏', () => {
+    const corruptions: Array<[string, (broken: any) => void]> = [
+      ['paper.summary 非字符串', broken => { broken.paper = { title: 'Title', summary: 42 } }],
+      ['paper 非对象', broken => { broken.paper = 'Title' }],
+      ['structureFallback.reason 未知', broken => { broken.structureFallback = { reason: 'made-up' } }],
+      ['structureFallback.reason 缺失', broken => { broken.structureFallback = {} }],
+      ['tree.nodes 非数组', broken => { broken.tree.nodes = 'x' }],
+      ['tree.nodes 元素缺字段', broken => { broken.tree.nodes = [{}] }],
+      ['tree 孙节点 nodes 非数组', broken => { broken.tree.nodes = [{ ...broken.tree.nodes[0], nodes: 'x' }] }],
+    ]
+    for (const [name, corrupt] of corruptions) {
+      const broken = JSON.parse(JSON.stringify(serializePassageIndex(baseIndex)))
+      corrupt(broken)
+      expect(parsePassageIndex(broken), name).toBeUndefined()
+    }
+  })
+
+  // 形态校验不能过紧：完整的 `paper` 与每一个回落原因都是合法记录，必须照常解析。
+  // `Record<StructureFallbackReason, true>` 是给联合类型的编译期锚点：新增原因时这里编译
+  // 不过，逼着同时更新测试与 `passageIndex.ts` 的白名单（只加联合不改白名单 → 下面的断言红）。
+  const ALL_REASONS: Record<StructureFallbackReason, true> = {
+    'request-failed': true, 'invalid-json': true, 'invalid-structure': true, 'input-too-large': true, 'no-passages': true,
+  }
+  it('形态完整的 paper 与全部回落原因照常解析', () => {
+    const valid = JSON.parse(JSON.stringify(serializePassageIndex({ ...baseIndex, paper: { title: 'Title', summary: 'Two sentences.' } })))
+    expect(parsePassageIndex(valid)?.paper).toEqual({ title: 'Title', summary: 'Two sentences.' })
+    for (const reason of Object.keys(ALL_REASONS) as StructureFallbackReason[]) {
+      const withFallback = JSON.parse(JSON.stringify(serializePassageIndex({ ...baseIndex, structureFallback: { reason } })))
+      expect(parsePassageIndex(withFallback)?.structureFallback?.reason, reason).toBe(reason)
+    }
+  })
+
+  // 卡片形态不对时只丢卡片（`cardVectors` 随之不挂），段落与向量照用；`cards` 缺席会让
+  // `planPassageIndexRebuild` 只重做阶段③（对照：形态完整的同一份记录全部复用）。
+  it('卡片元素形态不对时只丢卡片，不丢整份索引', () => {
+    const withCards = {
+      ...baseIndex,
+      stage: 3 as const,
+      structureHash: 'sh',
+      embedderId: 'e1',
+      vectorDim: 3,
+      passageVectors: passages.map(() => new Float32Array([1, 2, 3])),
+      cards: [{ id: 'S1', range: [passages[0].id, passages[1].id] as [string, string], title: 'Datasets', summary: '', keyTerms: [] }],
+      cardVectors: [new Float32Array([1, 0, 0])],
+    }
+    const intact = parsePassageIndex(JSON.parse(JSON.stringify(serializePassageIndex(withCards))))
+    expect(intact?.cards).toHaveLength(1)
+    expect(planPassageIndexRebuild({ stored: intact, passageConfigHash: 'pcfg', structureHash: 'sh', embedderId: 'e1' }))
+      .toEqual({ passages: false, vectors: false, structure: false })
+
+    const broken = JSON.parse(JSON.stringify(serializePassageIndex(withCards)))
+    delete broken.cards[0].range
+    const parsed = parsePassageIndex(broken)
+    expect(parsed).toBeDefined()
+    expect(parsed?.cards).toBeUndefined()
+    expect(parsed?.cardVectors).toBeUndefined()
+    expect(parsed?.passageVectors).toHaveLength(passages.length)
+    expect(planPassageIndexRebuild({ stored: parsed, passageConfigHash: 'pcfg', structureHash: 'sh', embedderId: 'e1' }))
+      .toEqual({ passages: false, vectors: false, structure: true })
+  })
+
+  // 「只拒绝、不抛」对深嵌套同样成立：`JSON.parse` 能解析极深的树（迭代实现），形态校验
+  // 若写成递归会在两万层上下 `RangeError` 抛出——那会从 `parsePassageIndex` 里漏出去。
+  it('深嵌套的树不会让解析抛错', () => {
+    const depth = 20000
+    const level = '{"title":"t","nodeId":"n","startPage":0,"endPage":0,"summary":"s","nodes":['
+    const record = {
+      ...JSON.parse(JSON.stringify(serializePassageIndex(baseIndex))),
+      tree: JSON.parse(level.repeat(depth) + ']}'.repeat(depth)),
+    }
+    expect(parsePassageIndex(record)).toBeDefined()
   })
 })
 
