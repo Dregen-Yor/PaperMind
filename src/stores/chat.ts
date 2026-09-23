@@ -331,6 +331,17 @@ function claimsPassageIndex(raw: unknown): boolean {
     && (raw as { version?: unknown }).version === PASSAGE_INDEX_VERSION
 }
 
+/**
+ * 存量段落索引是否缺向量：只有「向量与当前模型同源且自洽」才算不缺。
+ *
+ * 判据与 `planPassageIndexRebuild` 的向量项逐字一致（来源模型不一致 / 没有向量 / 阶段不到 2），
+ * 刻意不另立一套口径：两处一旦分叉，补建要么漏掉本该重算的那批（换了模型仍被判为「有向量」），
+ * 要么每次模型就绪都白跑一遍。
+ */
+function lacksPassageVectors(index: PassageIndex, embedderId: string): boolean {
+  return index.embedderId !== embedderId || index.passageVectors === undefined || index.stage < 2
+}
+
 export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([])
   const profiles = ref<LLMProfile[]>([{ ...DEFAULT_PROFILE }])
@@ -442,7 +453,7 @@ export const useChatStore = defineStore('chat', () => {
       // 作废让它们停止写盘（方案 §8），再把受影响的论文重新入队
       buildGeneration.invalidateAll()
       await refreshTreeReadyPapers()
-      void reindexStalePapers()
+      void reindexStalePapers().catch(() => {})
     }
   }
 
@@ -463,8 +474,12 @@ export const useChatStore = defineStore('chat', () => {
   async function setIndexProfileId(id: string) {
     indexProfileId.value = id
     await window.db.settings.set('llm_profile_index', id)
-    // 换了索引配置就直接换了一套建树配置：就绪集合必须跟着重算
+    // 换了索引配置就直接换了一套建树配置：就绪集合必须跟着重算。
+    // 段落索引同理（与 updateProfile 的同一分支等价）：在途构建按旧端点算出的结构卡片
+    // 与 structureHash 已经不对了，作废让它们停止写盘（方案 §8），再把受影响的论文重新入队
+    buildGeneration.invalidateAll()
     await refreshTreeReadyPapers()
+    void reindexStalePapers().catch(() => {})
   }
 
   async function setAbstractToken(token: string) {
@@ -605,6 +620,8 @@ export const useChatStore = defineStore('chat', () => {
     try {
       embedderInstance = await createTransformersEmbedder({ wasmPaths: './ort/' })
       vectorModelState.value = 'ready'
+      // 模型刚就绪：此前按词法降级建好的论文还缺向量，补建一次（卡片复用，无 LLM 调用）
+      void backfillPassageVectors().catch(() => {})
       return embedderInstance
     } catch {
       // 下载失败 / 离线无缓存：停留阶段①，下次导入或切换索引配置时重试
@@ -622,11 +639,40 @@ export const useChatStore = defineStore('chat', () => {
   /** 构建代次保护（方案 §8）：写盘前复核，过期的一代整体丢弃。 */
   const buildGeneration = createBuildGeneration()
 
+  /**
+   * 在途构建的两个里程碑。`indexingPapers` 只回答「有没有在途构建」，这里回答
+   * 「阶段① 落盘了没有」与「整轮跑完没有」：提问路径等前者（不等卡片调用），
+   * 重建队列等后者（等在途构建结束，才能以新一代重新入队）。
+   */
+  const inFlightBuilds = new Map<string, { stage1: Promise<void>; build: Promise<void> }>()
+
   async function indexPaper(paperId: string, opts: IndexPaperOptions = {}): Promise<void> {
     if (indexingPapers.value.has(paperId)) return
     indexingPapers.value.add(paperId)
     const token = buildGeneration.begin(paperId)
+    // 构建一开始就把模型下载的「火」点起来（不 await，也不阻塞阶段①）；
+    // 这次构建若正好赶上模型就绪，`loadEmbedder` 的补建会把缺向量的论文一起收走
     void ensureEmbedder()
+    let markStage1!: () => void
+    const stage1 = new Promise<void>(resolve => { markStage1 = resolve })
+    // 先挂里程碑再开跑：构建体第一行就有 await，不会抢在挂载之前写盘
+    const build = runIndexBuild(paperId, token, markStage1, opts)
+    inFlightBuilds.set(paperId, { stage1, build })
+    try {
+      await build
+    } finally {
+      inFlightBuilds.delete(paperId)
+      indexingPapers.value.delete(paperId)
+    }
+  }
+
+  /** `indexPaper` 的构建体（拆出来只为让代次快照、里程碑与收尾各有唯一出口）。 */
+  async function runIndexBuild(
+    paperId: string,
+    token: number,
+    markStage1: () => void,
+    opts: IndexPaperOptions,
+  ): Promise<void> {
     try {
       const base64 = await window.db.paper.readFile(paperId)
       if (!base64) throw new Error('论文文件缺失')
@@ -636,7 +682,11 @@ export const useChatStore = defineStore('chat', () => {
       const buildProfile: LLMProfile = { ...indexProfile.value }
       const stored = await window.db.index.get(paperId)
       const existing = stored ? parsePassageIndex(stored.indexJson) : undefined
-      const embedder = await currentEmbedder()
+      // 只用**已经加载好**的向量模型实例，绝不 await：冷启动时它可能要下载 35 MB，
+      // 阶段①（本地切段 + 标题卡片 + 落盘）不能被它挡在前面——「阶段① <1 秒即可提问」
+      // 与「提问不等待卡片调用」是同一件事的两面。模型缺席是**受支持的降级态**：
+      // 阶段① 与卡片照常产出、记录按词法模式服务，模型就绪后由 `backfillPassageVectors` 补齐
+      const embedder = embedderInstance
 
       const { rest } = await startPassagePipeline(
         pages,
@@ -658,30 +708,87 @@ export const useChatStore = defineStore('chat', () => {
         },
         { existing },
       )
-      indexedPapers.value = new Set([...indexedPapers.value, paperId])
-      // 阶段① 已落盘，②③ 在后台继续；提问路径（syncStage1Only）只等阶段①，
-      // 因为提问不等待卡片调用（方案 §6.1）
+      // 阶段① 已落盘（上一步的 persist 与这里用同一个代次复核）：放行等里程碑的提问路径
+      markStage1()
+      // 写盘被代次守卫拦下时这一代什么都没落盘，绝不能把这篇记进「已建立索引」：
+      // 那个集合是索引徽标与「重建全部语义树」的目标列表，谎报会去重建一篇没有索引的论文
+      if (buildGeneration.isCurrent(paperId, token)) {
+        indexedPapers.value = new Set([...indexedPapers.value, paperId])
+      }
+      // 阶段②③ 继续在后台跑：提问路径（`syncStage1Only`）只等阶段①，不等待卡片调用（方案 §6.1）
       void rest.catch(() => {})
       if (!opts.syncStage1Only) await rest.catch(() => {})
     } finally {
-      indexingPapers.value.delete(paperId)
+      // 失败或提前返回都要放行等里程碑的人：否则提问会一直等一篇永远写不出记录的论文
+      markStage1()
     }
+  }
+
+  /**
+   * 让某篇论文的阶段① 落盘，供提问路径在「读不到记录」时补齐（方案 §6.1）。
+   *
+   * - 已有在途构建（导入构建 / 后台重建）→ 等它的阶段① 里程碑就返回：提问**不等待卡片调用**，
+   *   也绝不因为 `indexingPapers` 去重让 `indexPaper` 立刻返回、再读一行还空着的记录，
+   *   就把这篇论文从回答里静默丢掉；
+   * - 没有在途构建 → 同步跑一次阶段①（本地切段 + 落盘，不碰模型、不碰 LLM）。
+   */
+  async function waitForStage1(paperId: string): Promise<void> {
+    const pending = inFlightBuilds.get(paperId)
+    if (pending) return pending.stage1
+    await indexPaper(paperId, { syncStage1Only: true })
+    // 这一次可能刚好被在途构建去重挡回（别的构建抢先开始）：再认一次它的里程碑
+    await inFlightBuilds.get(paperId)?.stage1
+  }
+
+  /**
+   * 重新入队：先等在途构建跑完，再以**新一代**重建这篇论文。
+   *
+   * 在途构建恰恰是「刚被作废」的那一批（配置一变 `invalidateAll` 就丢掉了它的写盘），
+   * 而 `indexPaper` 对在途论文直接返回（去重）——不等就跑等于把这篇漏掉，它手里那条
+   * 旧哈希的记录永远等不到重建。旧构建结束、`indexingPapers` 清空之后，新一代才起得来。
+   */
+  async function reindexPaper(paperId: string): Promise<void> {
+    await inFlightBuilds.get(paperId)?.build
+    await indexPaper(paperId)
   }
 
   /**
    * 索引 profile 变了（端点 / 模型）→ 每篇论文的 structureHash 随之改变 → 卡片与卡片向量全部过期。
    * 逐个重新入队，**串行**（`await` 每一篇）而不是并发铺开：阶段③ 是要计费的 LLM 调用，
    * 一次导入几十篇论文时并发会把服务商打爆。调用方用 `void` 脱离，不阻塞设置页。
-   * `indexPaper` 内部已有 `indexingPapers` 去重，对正在构建的论文重复调用是安全的；
    * 具体重建到哪一阶段交给 `planPassageIndexRebuild` 判断（结构没变时只重算向量）。
    */
   async function reindexStalePapers(): Promise<void> {
     const papers = (await window.db.paper.list()) as Array<{ id: string }>
     for (const paper of papers) {
       try {
-        await indexPaper(paper.id)
+        await reindexPaper(paper.id)
       } catch {
         // 单篇失败不影响其余论文：与 collectIndexedPapers 的容错口径一致
+      }
+    }
+  }
+
+  /**
+   * 向量模型就绪后补齐「只有词法层」的论文：逐篇读记录，只重建确实缺向量的那些。
+   *
+   * 判据沿用 `planPassageIndexRebuild` 的向量规则（见 `lacksPassageVectors`），不另立一套口径。
+   * 结构哈希没变 → 卡片原样复用，这次补齐**不产生任何 LLM 调用**；串行且逐篇容错
+   * （与 `reindexStalePapers` 同口径），调用方用 `void` 脱离。
+   */
+  async function backfillPassageVectors(): Promise<void> {
+    const embedder = embedderInstance
+    if (!embedder) return
+    const papers = (await window.db.paper.list()) as Array<{ id: string }>
+    for (const paper of papers) {
+      try {
+        const stored = await window.db.index.get(paper.id)
+        const index = stored ? parsePassageIndex(stored.indexJson) : undefined
+        // 没有记录 / 记录根本解析不出来：那不是「缺向量」，交给导入与提问路径各自重建
+        if (!index || !lacksPassageVectors(index, embedder.id)) continue
+        await reindexPaper(paper.id)
+      } catch {
+        // 单篇失败不影响其余论文：与 reindexStalePapers 的容错口径一致
       }
     }
   }
@@ -1040,10 +1147,13 @@ export const useChatStore = defineStore('chat', () => {
     for (const paperId of conv.paperIds) {
       let stored = await window.db.index.get(paperId)
       if (!stored) {
-        // 导入时后台预处理未完成（LLM 未配置等）：同步只做阶段①（本地切段，<1 秒），
-        // ②③ 继续在后台跑——提问不等待卡片调用（方案 §6.1）
+        // 没有记录：导入时后台预处理未完成（LLM 未配置等），或这一篇正在构建中。
+        // 前者同步补阶段①（本地切段，<1 秒）；后者等它的阶段① 里程碑再重读——
+        // 绝不因为 `indexingPapers` 去重让 `indexPaper` 立刻返回、再读到一行空记录
+        // 就把这篇论文从回答里静默丢掉（方案 §6.1）。两条路径都只等阶段①：
+        // ②③ 继续在后台跑，提问不等待卡片调用
         try {
-          await indexPaper(paperId, { syncStage1Only: true })
+          await waitForStage1(paperId)
           stored = await window.db.index.get(paperId)
         } catch { /* ignore — no index available for this paper */ }
       }

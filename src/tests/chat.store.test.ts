@@ -23,6 +23,8 @@ vi.mock('../utils/pageIndex', async importOriginal => ({
 }))
 
 import { useChatStore } from '../stores/chat'
+import { createTransformersEmbedder } from '../utils/transformersEmbedder'
+import { encodeVectors, type Embedder } from '../utils/embedder'
 
 /** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
 const sse = (chunks: string[], finishReason = 'stop') => {
@@ -353,5 +355,182 @@ describe('段落索引的分阶段构建', () => {
     expect(papers.papers[0].passageIndex).toBeUndefined()
     expect(papers.papers[0].tree.nodeId).toBe('root')
     expect(vi.mocked(window.db.paper.readFile)).toHaveBeenCalledWith('paper-1')
+  })
+})
+
+/** 向量模型身份（`passagesUsable` / `planPassageIndexRebuild` 都按它判断「向量是不是这个模型算的」） */
+const EMBEDDER_ID = 'test-embedder'
+
+const fakeEmbedder = {
+  id: EMBEDDER_ID,
+  embedPassages: vi.fn(async (texts: string[]) => texts.map(() => new Float32Array([1, 0, 0]))),
+  embedQuery: vi.fn(async () => new Float32Array([1, 0, 0])),
+} as unknown as Embedder
+
+/**
+ * 段落索引构建的公共测试环境（`chat.store.test.ts` 用真实管线，不给 `passageIndexBuilder` 打桩）：
+ * - `extractPages` 由文件顶部的 mock 给出固定的两页；
+ * - `index.get` 是**伪 DB**：`index.set` 写进去的记录由它读回来——提问路径「重读落盘行」
+ *   才是真读盘，否则「在途构建 → 阶段① 落盘 → 重读」这条链只能用替身自证；
+ * - 卡片调用（阶段③）给一个不返回的应答：不连网，也让「等 ②③」的用例直接超时暴露；
+ * - 向量模型按用例默认缺席（第一次加载失败），需要时用例自己换成成功。
+ */
+function passageBuildEnv() {
+  setActivePinia(createPinia())
+  vi.clearAllMocks()
+  vi.mocked(window.db.paper.readFile).mockResolvedValue('BASE64')
+  vi.mocked(window.db.paper.list).mockResolvedValue([])
+  vi.mocked(window.db.index.get).mockImplementation(async (paperId: string) => {
+    const write = vi.mocked(window.db.index.set).mock.calls.filter(call => call[0] === paperId).at(-1)
+    return write ? { indexJson: write[1], pagesJson: write[2] } : null
+  })
+  vi.mocked(createTransformersEmbedder).mockRejectedValue(new Error('测试不加载向量模型'))
+  global.fetch = vi.fn(() => new Promise(() => {})) as never
+}
+
+/** 把一个用例要卡住的第一次 `index.get` 换成可控的挂起读（构建停在阶段① 之前）。 */
+function holdNextIndexRead(): () => void {
+  let release!: () => void
+  vi.mocked(window.db.index.get).mockImplementationOnce(
+    () => new Promise(resolve => { release = () => resolve(null) }),
+  )
+  return () => release()
+}
+
+describe('冷启动：阶段① 不等向量模型', () => {
+  beforeEach(passageBuildEnv)
+
+  it('模型仍在下载（永不返回）时，阶段① 照常落盘并产出段落', async () => {
+    // 冷启动的 35 MB 下载挂在那里：阶段①（本地切段 + 落盘）与它无关，绝不能被挡住
+    vi.mocked(createTransformersEmbedder).mockImplementation(() => new Promise(() => {}) as never)
+    const store = useChatStore()
+
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+
+    const saved = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    const index = JSON.parse(saved[1] as string)
+    expect(index.passages.length).toBeGreaterThan(0)
+    // 模型缺席是**受支持的降级态**：记录如实没有向量，检索按词法模式服务
+    expect(index.passageVectors).toBeUndefined()
+  })
+})
+
+describe('提问路径与在途构建', () => {
+  beforeEach(passageBuildEnv)
+
+  it('导入构建在途时提问：等它的阶段① 落盘再重读，不把这篇论文静默丢掉', async () => {
+    const store = useChatStore()
+    // 把构建卡在「读已有记录」这一步：此刻它还没进管线，阶段① 尚未落盘
+    const releaseBuild = holdNextIndexRead()
+    const build = store.indexPaper('paper-1')
+    await vi.waitFor(() => expect(vi.mocked(window.db.index.get)).toHaveBeenCalledTimes(1))
+
+    let settled = false
+    const question = store.collectIndexedPapers({ id: 'c1', paperIds: ['paper-1'] } as never)
+      .then(result => { settled = true; return result })
+    // 提问读到的是空记录，接下来必须停在阶段① 里程碑上，而不是立刻放弃这篇论文
+    await vi.waitFor(() => expect(vi.mocked(window.db.index.get)).toHaveBeenCalledTimes(2))
+    expect(settled).toBe(false)
+
+    releaseBuild()
+    const result = await question
+
+    expect(settled).toBe(true)
+    // 阶段① 的记录此刻已落盘：这篇论文在回答里（旧实现读完空行就 continue 了）
+    expect(result.paperIds).toEqual(['paper-1'])
+    expect(result.papers[0].passageIndex).toBeDefined()
+    expect(vi.mocked(window.db.index.set)).toHaveBeenCalledTimes(1)
+    // 卡片调用还挂在那里（永不返回），提问却已经拿到索引：没有等待卡片调用
+    expect(global.fetch).toHaveBeenCalled()
+  })
+})
+
+describe('代次作废与「已建立索引」标记', () => {
+  beforeEach(passageBuildEnv)
+
+  it('正对照：没有失效时构建完成会写盘，并记入「已建立索引」', async () => {
+    const store = useChatStore()
+
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+
+    expect(vi.mocked(window.db.index.set)).toHaveBeenCalledTimes(1)
+    expect(store.indexedPapers.has('paper-1')).toBe(true)
+  })
+
+  it('代次作废的那一代不写盘，也不把论文记成「已建立索引」', async () => {
+    const store = useChatStore()
+    const releaseBuild = holdNextIndexRead()
+    const build = store.indexPaper('paper-1', { syncStage1Only: true })
+    await vi.waitFor(() => expect(vi.mocked(window.db.index.get)).toHaveBeenCalledTimes(1))
+    // 构建在途时换了索引配置：这一代的写盘整体作废
+    await store.updateProfile(store.indexProfileId, { model: 'another-model' })
+    releaseBuild()
+    await build
+
+    expect(vi.mocked(window.db.index.set)).not.toHaveBeenCalled()
+    // 徽标与「重建全部语义树」的目标列表都不该包含一篇实际没有索引的论文
+    expect(store.indexedPapers.has('paper-1')).toBe(false)
+  })
+})
+
+describe('索引配置切换后的重建队列', () => {
+  beforeEach(passageBuildEnv)
+
+  it('等在途构建结束再重新入队：刚被作废的那篇不会漏掉', async () => {
+    vi.mocked(window.db.paper.list).mockResolvedValue([{ id: 'paper-1' }])
+    const store = useChatStore()
+    const releaseBuild = holdNextIndexRead()
+    const build = store.indexPaper('paper-1', { syncStage1Only: true })   // 在途构建（写盘将被作废）
+    await vi.waitFor(() => expect(vi.mocked(window.db.index.get)).toHaveBeenCalledTimes(1))
+
+    await store.updateProfile(store.indexProfileId, { model: 'another-model' })   // 作废 + 启动重建队列
+    // 队列必须先等在途构建结束：并发再开一轮只会在 `indexingPapers` 处被去重挡回，
+    // 那篇论文就永远等不到新一代的重建
+    await vi.waitFor(() => expect(vi.mocked(window.db.paper.list)).toHaveBeenCalledTimes(1))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(vi.mocked(window.db.paper.readFile)).toHaveBeenCalledTimes(1)
+
+    releaseBuild()
+    await build
+    // 在途构建结束后队列才重新入队：重读原文（重建第一步）是它真的跑起来了的证据
+    await vi.waitFor(() => expect(vi.mocked(window.db.paper.readFile)).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('向量模型就绪后的补建', () => {
+  beforeEach(passageBuildEnv)
+
+  it('只重建缺向量的论文：已有向量的那篇不碰', async () => {
+    // 先让 store 自己写出一条阶段① 记录，再把它改造成「向量就是这个模型算的」同款记录：
+    // 手工拼记录会漏掉 `passageConfigHash` / `tree` 的形态，于是「有向量」的用例其实走的是解析失败
+    vi.mocked(window.db.index.get).mockResolvedValue(null)
+    const store = useChatStore()
+    await store.indexPaper('p-lex', { syncStage1Only: true })
+    const write = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    const stage1 = JSON.parse(write[1] as string) as { passages: unknown[] }
+    const dense = JSON.stringify({
+      ...stage1,
+      stage: 2,
+      embedderId: EMBEDDER_ID,
+      vectorDim: 3,
+      passageVectors: encodeVectors(stage1.passages.map(() => new Float32Array([1, 0, 0]))),
+    })
+    vi.mocked(window.db.index.set).mockClear()
+    vi.mocked(window.db.index.get).mockImplementation(async (paperId: string) => {
+      if (paperId === 'p-dense') return { indexJson: dense, pagesJson: write[2] }
+      if (paperId === 'p-lex') return { indexJson: write[1], pagesJson: write[2] }
+      return null
+    })
+    // p-dense 排在前：它被跳过、队列走到 p-lex，「没有重建它」才是真读数而非「还没轮到」
+    vi.mocked(window.db.paper.list).mockResolvedValue([{ id: 'p-dense' }, { id: 'p-lex' }])
+    // 第二次加载成功（第一次是上面那次构建触发的、按环境默认失败）→ 触发补建
+    vi.mocked(createTransformersEmbedder).mockResolvedValue(fakeEmbedder)
+    // 清掉「造记录」那一步的调用历史：下面两条断言只认补建跑出来的读原文
+    vi.mocked(window.db.paper.readFile).mockClear()
+
+    await store.indexPaper('p-trigger', { syncStage1Only: true })
+
+    await vi.waitFor(() => expect(vi.mocked(window.db.paper.readFile)).toHaveBeenCalledWith('p-lex'))
+    expect(vi.mocked(window.db.paper.readFile)).not.toHaveBeenCalledWith('p-dense')
   })
 })
