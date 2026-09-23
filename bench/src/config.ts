@@ -196,6 +196,11 @@ function validatePassageParams(value: unknown, path: string): PassageRuntimePara
 }
 
 export function validatePaperMind(raw: Record<string, unknown>, path: string): ConfigFile {
+  // 顶层键白名单：拼错的开关（passag / semanticTre）和写错层级的旋钮都不能静默失效。
+  // 少了这道闸，一个拼错的 passage 会让整份配置照常展开、照常带着 `papermind-hybrid`
+  // 这个名字去跑平铺管道——量出来的数字标着混合检索，比直接崩掉更糟。
+  const allowedTop = new Set(['name', 'kind', 'semanticTree', 'passage', 'matrix'])
+  for (const key of Object.keys(raw)) if (!allowedTop.has(key)) fail(path, key, '不是支持的 PaperMind 配置项')
   if (typeof raw.name !== 'string' || !raw.name) fail(path, 'name', '缺失或不是非空字符串')
   if (!obj(raw.matrix)) fail(path, 'matrix', '缺失或不是对象')
   const matrix = raw.matrix as Record<string, unknown>
@@ -248,6 +253,8 @@ export async function loadConfigs(nameOrPath: string, configDir: string = DEFAUL
   if (!isMatrixKind) return [KIND_VALIDATORS[record.kind as string](record, path)]
   // validatePaperMind 已按「配置即口径」校验过一遍旋钮；这里对已展开的每个点再校验一次，
   // 保证校验对象正是调用方随后要跑的那份配置（重复校验无副作用）。
+  // 两道 pass 是构造上同一件事：同一个 validateHybridKnobs 作用在同一份展开结果上，
+  // 不是分工不同的两道闸——改动其中一处就等于同时改动两处。
   const configs = expandMatrix(validatePaperMind(record, path)).map(config => {
     validateHybridKnobs(config, path)
     return config

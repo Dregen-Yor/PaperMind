@@ -41,4 +41,9 @@ describe('validatePaperMind（段落混合配置）', () => {
     expect(configs).toHaveLength(1)
     expect(configs[0].passage).toBeUndefined()
   })
+
+  it('顶层键拼错（passag）直接报错：名字照旧会静默跑成平铺管道，标错口径比崩掉更糟', () => {
+    const { passage, ...rest } = baseConfig
+    expect(() => validatePaperMind({ ...rest, passag: passage }, 'test')).toThrow(/的 passag 不是/)
+  })
 })
