@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
-import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, SemanticTreeParams, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
+import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, PassageRuntimeParams, SemanticTreeParams, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
 import { benchPath } from './paths'
 // 受控上下文预算只有一处定义：契约模块（evaluationContract.ts）的 CONTEXT_BUDGET_TOKENS。
 // 这里刻意不再另立 4096 常量——两个数字各写一遍，就有一天会各自漂移而没人发现。
@@ -20,6 +20,8 @@ export function expandMatrix(file: ConfigFile): PaperMindConfig[] {
   const carried: Partial<PaperMindConfig> = {
     ...(file.kind && file.kind !== 'papermind' ? { kind: file.kind } : {}),
     ...(file.semanticTree ? { semanticTree: file.semanticTree } : {}),
+    // passage 的身份由 validatePaperMind 校验并归一化，这里不再重复校验
+    ...(file.passage ? { passage: file.passage } : {}),
   }
   if (!keys.length) return [{ ...carried, name: file.name }]
   let combos: Array<Record<string, number | boolean>> = [{}]
@@ -160,11 +162,48 @@ function validateSemanticTreeParams(value: unknown, path: string): SemanticTreeP
   return { evidence: { targetChars, maxChars, minChars }, maxInputChars: raw.maxInputChars as number }
 }
 
-function validatePaperMind(raw: Record<string, unknown>, path: string): ConfigFile {
+/** 段落混合检索的旋钮必须齐全且在合理范围：缺一个就会静默用产品默认值，配置就不等于口径了。 */
+function validateHybridKnobs(config: PaperMindConfig, path: string): void {
+  if (!config.passage) return
+  const require = (name: keyof PaperMindConfig, predicate: (v: unknown) => boolean, hint: string) => {
+    const value = config[name]
+    if (!predicate(value)) fail(path, `passage`, `${String(name)} ${hint}`)
+  }
+  require('minTokens', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
+  require('maxTokens', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
+  if (typeof config.maxTokens === 'number' && typeof config.minTokens === 'number' && config.maxTokens < config.minTokens) {
+    fail(path, 'passage', 'maxTokens 必须不小于 minTokens')
+  }
+  require('maxInputChars', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
+  require('rrfK', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
+  require('sectionWeight', v => typeof v === 'number' && v >= 0 && v <= 1, '必须在 [0, 1]')
+  require('neighbourFactor', v => typeof v === 'number' && v >= 0 && v <= 1, '必须在 [0, 1]')
+  require('skipLimit', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
+}
+
+function validatePassageParams(value: unknown, path: string): PassageRuntimeParams {
+  if (!obj(value)) fail(path, 'passage', '必须是对象')
+  const embedder = (value as Record<string, unknown>).embedder
+  if (!obj(embedder)) fail(path, 'passage.embedder', '缺失或不是对象')
+  const e = embedder as Record<string, unknown>
+  for (const key of ['model', 'revision', 'dtype'] as const) {
+    if (typeof e[key] !== 'string' || !(e[key] as string).trim()) {
+      fail(path, `passage.embedder.${key}`, '必须为非空字符串（显式 pin，禁止环境默认）')
+    }
+  }
+  if (typeof e.dim !== 'number' || !Number.isInteger(e.dim) || e.dim <= 0) fail(path, 'passage.embedder.dim', '必须为正整数')
+  return { embedder: { model: e.model as string, revision: e.revision as string, dtype: e.dtype as string, dim: e.dim as number } }
+}
+
+export function validatePaperMind(raw: Record<string, unknown>, path: string): ConfigFile {
   if (typeof raw.name !== 'string' || !raw.name) fail(path, 'name', '缺失或不是非空字符串')
   if (!obj(raw.matrix)) fail(path, 'matrix', '缺失或不是对象')
   const matrix = raw.matrix as Record<string, unknown>
-  const allowed = new Set(['topK', 'minScore', 'chunkPages', 'minSectionPages', 'maxSectionPages', 'maxContextChars', 'forceFixedChunk', 'enableRewrite'])
+  const allowed = new Set([
+    'topK', 'minScore', 'chunkPages', 'minSectionPages', 'maxSectionPages', 'maxContextChars', 'forceFixedChunk', 'enableRewrite',
+    // 段落混合检索旋钮（方案 §7）：与其它参数一样显式列出，拼错的键不能静默失效
+    'minTokens', 'maxTokens', 'maxInputChars', 'rrfK', 'sectionWeight', 'neighbourFactor', 'skipLimit',
+  ])
   for (const [key, values] of Object.entries(matrix)) {
     if (!allowed.has(key)) fail(path, `matrix.${key}`, '不是支持的 PaperMind 参数')
     if (!Array.isArray(values)) fail(path, `matrix.${key}`, '必须为 number/boolean 数组')
@@ -172,15 +211,21 @@ function validatePaperMind(raw: Record<string, unknown>, path: string): ConfigFi
     if (list.some(v => typeof v !== 'number' && typeof v !== 'boolean')) fail(path, `matrix.${key}`, '必须为 number/boolean 数组')
     if (!list.length) fail(path, `matrix.${key}`, '展开为 0 个配置')
   }
-  if (raw.kind === 'semantic-tree') {
-    return {
-      name: raw.name as string,
-      kind: 'semantic-tree',
-      semanticTree: validateSemanticTreeParams(raw.semanticTree, path),
-      matrix: matrix as ConfigFile['matrix'],
-    }
-  }
-  return { name: raw.name as string, kind: 'papermind', matrix: matrix as ConfigFile['matrix'] }
+  const file: ConfigFile = raw.kind === 'semantic-tree'
+    ? {
+        name: raw.name as string,
+        kind: 'semantic-tree',
+        semanticTree: validateSemanticTreeParams(raw.semanticTree, path),
+        matrix: matrix as ConfigFile['matrix'],
+      }
+    : { name: raw.name as string, kind: 'papermind', matrix: matrix as ConfigFile['matrix'] }
+  // 段落混合检索块：不可消融，校验后写回 ConfigFile，由 expandMatrix 原样带到每个展开点
+  if (raw.passage !== undefined) file.passage = validatePassageParams(raw.passage, path)
+  // 旋钮校验挂在本函数自己身上（而不是只挂在 loadConfigs 上）：配置即口径，
+  // 任何拿到 ConfigFile 的入口（含单测直接调用）都必须面对同一道校验，
+  // 而不是展开之后才在另一处补一刀。expandMatrix 同在本模块导出，不构成循环。
+  if (file.passage) for (const config of expandMatrix(file)) validateHybridKnobs(config, path)
+  return file
 }
 
 /** kind → 校验器分发；新基线一律单配置（无矩阵展开），非法 kind 在此显式拒绝。 */
@@ -201,7 +246,13 @@ export async function loadConfigs(nameOrPath: string, configDir: string = DEFAUL
   const isMatrixKind = record.kind === undefined || record.kind === 'papermind' || record.kind === 'semantic-tree'
   if (!isMatrixKind && !KIND_VALIDATORS[record.kind as string]) fail(path, 'kind', '未知')
   if (!isMatrixKind) return [KIND_VALIDATORS[record.kind as string](record, path)]
-  return expandMatrix(validatePaperMind(record, path))
+  // validatePaperMind 已按「配置即口径」校验过一遍旋钮；这里对已展开的每个点再校验一次，
+  // 保证校验对象正是调用方随后要跑的那份配置（重复校验无副作用）。
+  const configs = expandMatrix(validatePaperMind(record, path)).map(config => {
+    validateHybridKnobs(config, path)
+    return config
+  })
+  return configs
 }
 
 export function configLabel(config: BenchConfig): string { return config.name.replace(/[^\w.=,[\]-]/g, '_').replace(/[[\],=]/g, '.').replace(/\.+$/, '') }

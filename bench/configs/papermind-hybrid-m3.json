@@ -1,0 +1,20 @@
+{
+  "name": "papermind-hybrid-m3",
+  "kind": "papermind",
+  "passage": {
+    "embedder": { "model": "BAAI/bge-m3", "revision": "main", "dtype": "q8", "dim": 1024 }
+  },
+  "matrix": {
+    "topK": [4],
+    "minScore": [6],
+    "maxContextChars": [24000],
+    "enableRewrite": [false],
+    "minTokens": [120],
+    "maxTokens": [350],
+    "maxInputChars": [120000],
+    "rrfK": [60],
+    "sectionWeight": [0.5],
+    "neighbourFactor": [0.5],
+    "skipLimit": [20]
+  }
+}
