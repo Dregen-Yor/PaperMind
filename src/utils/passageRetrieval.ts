@@ -5,10 +5,11 @@
  * 关键口径：预算判定必须与 `materializeContext` 的计法一致——「已用 + 新组分隔符 +
  * 段落 token ≤ 预算」，这样最终物化永不截断（`contextTruncated === false`）。
  */
-import { cosineSimilarity, type Embedder } from './embedder'
+import { buildBm25Scorer } from './bm25'
+import { cardEmbedText, cosineSimilarity, type Embedder } from './embedder'
 import { CONTEXT_GROUP_SEPARATOR, type ContextGroup } from './contextTrace'
 import type { IndexNode, RetrievalResult } from './pageIndex'
-import type { Passage } from './passages'
+import { createEstimatingTokenCounter, type Passage, type TokenCounter } from './passages'
 import type { PassageIndex } from './passageIndex'
 import { createMaxHeap } from './priorityQueue'
 import { reciprocalRankFusion, type RankedItem } from './rrf'
@@ -57,4 +58,332 @@ export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageC
     fromNeighbour: false,
   }))
   return candidates
+}
+
+export interface HybridPassageDiagnostics {
+  retrievalMode: RetrievalMode
+  selectedPassageIds: string[]
+  /** 入队值来自邻段扩展（「该段分 × neighbourFactor」压过了它自己的融合分）的段落 */
+  neighbourSelectedIds: string[]
+  candidateCount: number
+  skippedCount: number
+}
+
+export type PassageRetrievalResult = RetrievalResult & { hybrid: HybridPassageDiagnostics }
+
+export interface PassageRetrievalOptions {
+  embedder?: Embedder
+  /** 段落 token 计数器；bench 注入冻结的 BGE-M3 分词器，产品用估算器 */
+  countTokens?: TokenCounter
+  maxTokens?: number
+  rrfK?: number
+  sectionWeight?: number
+  neighbourFactor?: number
+  skipLimit?: number
+}
+
+export const DEFAULT_HYBRID_OPTIONS: Required<Pick<PassageRetrievalOptions, 'maxTokens' | 'rrfK' | 'sectionWeight' | 'neighbourFactor' | 'skipLimit'>> = {
+  maxTokens: 4096,
+  rrfK: 60,
+  sectionWeight: 0.5,
+  neighbourFactor: 0.5,
+  skipLimit: 20,
+}
+
+export interface FillPassageBudgetArgs {
+  passages: Passage[]
+  candidates: PassageCandidate[]
+  /** 组间分隔符的 token 数；与 materializeContext 同口径 */
+  separatorTokens: number
+  maxTokens: number
+  neighbourFactor: number
+  skipLimit: number
+}
+
+export interface FillPassageBudgetResult {
+  /** 按原文 order 升序 */
+  selectedOrders: number[]
+  neighbourOrders: number[]
+  skippedCount: number
+}
+
+/**
+ * 预算填充（方案 §4.4）。**「放得下」的判定必须与 materializeContext 同口径**：
+ * 已用 + 新开一组的组间分隔符 + 本段 token ≤ 预算。这样物化时
+ * `used + prefix >= maxTokens` 的截断守卫永远不会触发，`contextTruncated === false`。
+ *
+ * 连续跳过上限只约束「连续」：一旦有一段成功放入，计数归零——
+ * 否则一段小段落就能把后续所有候选挡在门外。
+ */
+export function fillPassageBudget(args: FillPassageBudgetArgs): FillPassageBudgetResult {
+  const { passages, candidates, separatorTokens, maxTokens, neighbourFactor, skipLimit } = args
+  const totalTokens = passages.reduce((sum, passage) => sum + passage.tokenCount, 0)
+  if (totalTokens <= maxTokens) {
+    return { selectedOrders: passages.map(passage => passage.order), neighbourOrders: [], skippedCount: 0 }
+  }
+
+  const heap = createMaxHeap<{ score: number; order: number }>()
+  const queued = new Map<number, number>()
+  const offered = new Map<number, boolean>()
+  const selected = new Set<number>()
+  const neighbourSelected = new Set<number>()
+
+  const offer = (order: number, score: number, fromNeighbour: boolean) => {
+    if (order < 0 || order >= passages.length || selected.has(order)) return
+    if ((queued.get(order) ?? Number.NEGATIVE_INFINITY) >= score) return
+    queued.set(order, score)
+    offered.set(order, fromNeighbour)
+    heap.push({ score, order })
+  }
+
+  for (const candidate of candidates) offer(candidate.order, candidate.score, candidate.fromNeighbour)
+
+  const runCount = (chosen: number[]): number => {
+    const sorted = [...chosen].sort((a, b) => a - b)
+    let runs = 0
+    for (let i = 0; i < sorted.length; i++) if (i === 0 || sorted[i] !== sorted[i - 1] + 1) runs++
+    return runs
+  }
+  const usedTokens = (chosen: number[]): number =>
+    chosen.reduce((sum, order) => sum + passages[order].tokenCount, 0) + Math.max(0, runCount(chosen) - 1) * separatorTokens
+
+  let consecutiveSkips = 0
+  let skippedCount = 0
+  while (heap.size > 0 && consecutiveSkips < skipLimit) {
+    const entry = heap.pop() as { score: number; order: number }
+    if (selected.has(entry.order)) continue
+    // 惰性删除：堆里可能留着同一段落的旧（较低）分数
+    if ((queued.get(entry.order) ?? Number.NEGATIVE_INFINITY) > entry.score) continue
+    if (usedTokens([...selected, entry.order]) > maxTokens) {
+      consecutiveSkips++
+      skippedCount++
+      continue
+    }
+    selected.add(entry.order)
+    consecutiveSkips = 0
+    if (offered.get(entry.order)) neighbourSelected.add(entry.order)
+    // 邻段扩展：同一小节内的前后邻段以「本段分 × neighbourFactor」入队，取较大值
+    const current = passages[entry.order]
+    for (const neighbour of [passages[entry.order - 1], passages[entry.order + 1]]) {
+      if (neighbour && neighbour.subsection === current.subsection) {
+        offer(neighbour.order, entry.score * neighbourFactor, true)
+      }
+    }
+  }
+
+  return {
+    selectedOrders: [...selected].sort((a, b) => a - b),
+    neighbourOrders: [...neighbourSelected].sort((a, b) => a - b),
+    skippedCount,
+  }
+}
+
+/** 卡片标题查询表：段落 order → 卡片标题。卡片覆盖连续区间，线性扫一遍即可。 */
+function cardTitlesByOrder(index: PassageIndex): Map<number, string> {
+  const titles = new Map<number, string>()
+  if (!index.cards) return titles
+  const orderById = new Map(index.passages.map(passage => [passage.id, passage.order]))
+  for (const card of index.cards) {
+    const start = orderById.get(card.range[0])
+    const end = orderById.get(card.range[1])
+    if (start === undefined || end === undefined) continue
+    for (let order = start; order <= end; order++) titles.set(order, card.title)
+  }
+  return titles
+}
+
+function emptyResult(mode: RetrievalMode): PassageRetrievalResult {
+  return {
+    context: '',
+    contextGroups: [],
+    sources: [],
+    selected: [],
+    scores: [],
+    degraded: false,
+    llmCalled: false,
+    hybrid: { retrievalMode: mode, selectedPassageIds: [], neighbourSelectedIds: [], candidateCount: 0, skippedCount: 0 },
+  }
+}
+
+/**
+ * 段落级混合检索。降级顺序严格按方案 §4 的表：
+ * `full` → `full-title-fallback` → `bm25+dense` → `bm25+card-lexical` → `bm25`。
+ */
+export async function retrievePassageContext(
+  index: PassageIndex,
+  query: string,
+  opts: PassageRetrievalOptions = {},
+): Promise<PassageRetrievalResult> {
+  const maxTokens = opts.maxTokens ?? DEFAULT_HYBRID_OPTIONS.maxTokens
+  const rrfK = opts.rrfK ?? DEFAULT_HYBRID_OPTIONS.rrfK
+  const sectionWeight = opts.sectionWeight ?? DEFAULT_HYBRID_OPTIONS.sectionWeight
+  const neighbourFactor = opts.neighbourFactor ?? DEFAULT_HYBRID_OPTIONS.neighbourFactor
+  const skipLimit = opts.skipLimit ?? DEFAULT_HYBRID_OPTIONS.skipLimit
+  const countTokens = opts.countTokens ?? createEstimatingTokenCounter()
+  const passages = index.passages
+  if (passages.length === 0) return emptyResult('bm25')
+
+  const cards = index.cards
+  const cardByPassage = cards ? mapCardsToPassageIndexes(index) : undefined
+
+  // 查询向量是唯一需要 await 的一步。模型不可用**不发异常给调用方**：
+  // 这一次提问按可用信号降级即可，下一次模型就绪后自然恢复（方案 §8）
+  const passagesUsable = index.passageVectors !== undefined && (index.vectorDim ?? 0) > 0
+  let queryVector: Float32Array | undefined
+  if (opts.embedder && passagesUsable) {
+    try {
+      queryVector = await opts.embedder.embedQuery(query)
+    } catch {
+      queryVector = undefined
+    }
+  }
+  const denseAvailable = queryVector !== undefined && passagesUsable
+
+  const bm25 = buildBm25Scorer(passages.map(passage => passage.searchText))
+
+  let dense: ((query: string) => RankedItem[]) | undefined
+  let card: ((query: string) => RankedItem[]) | undefined
+  let mode: RetrievalMode
+
+  if (denseAvailable) {
+    const vector = queryVector as Float32Array
+    const passageVectors = index.passageVectors as Float32Array[]
+    dense = () => passages.map(passage => ({
+      id: passage.order,
+      score: cosineSimilarity(vector, passageVectors[passage.order]),
+    }))
+    let cardScores: number[] | undefined
+    if (cards && index.cardVectors) {
+      const cardVectors = index.cardVectors
+      cardScores = cards.map((_, cardIndex) => vector.length === cardVectors[cardIndex].length
+        ? cosineSimilarity(vector, cardVectors[cardIndex])
+        : Number.NEGATIVE_INFINITY)
+    }
+    if (cardScores && cardByPassage) {
+      const scores = cardScores
+      card = () => passages.map(passage => ({ id: passage.order, score: scores[cardByPassage.get(passage.order) ?? -1] ?? 0 }))
+      mode = index.structureFallback ? 'full-title-fallback' : 'full'
+    } else {
+      mode = 'bm25+dense'
+    }
+  } else if (cards && cards.length > 0) {
+    // 向量不可用但卡片已生成：卡片先验退化为卡片文本的词法匹配（方案 §4 的表）
+    const scoreCards = buildBm25Scorer(cards.map(card => cardEmbedText(card)))
+    card = text => {
+      const scores = scoreCards(text)
+      return passages.map(passage => ({ id: passage.order, score: scores[cardByPassage!.get(passage.order) ?? -1]?.score ?? 0 }))
+    }
+    mode = 'bm25+card-lexical'
+  } else {
+    mode = 'bm25'
+  }
+
+  const candidates = fusePassageCandidates({
+    passages,
+    query,
+    bm25: text => bm25(text),
+    ...(dense ? { dense } : {}),
+    ...(card ? { card } : {}),
+    rrfK,
+    sectionWeight,
+    passagesCannotUseVectors: !denseAvailable,
+  })
+
+  const fill = fillPassageBudget({
+    passages,
+    candidates,
+    separatorTokens: index.separatorTokens,
+    maxTokens,
+    neighbourFactor,
+    skipLimit,
+  })
+
+  return assembleResult(index, fill, candidates, mode)
+}
+
+/** 选中段落 → 原文顺序组装。组与组的页序即 materializeContext 的输入。 */
+function assembleResult(
+  index: PassageIndex,
+  fill: FillPassageBudgetResult,
+  candidates: PassageCandidate[],
+  mode: RetrievalMode,
+): PassageRetrievalResult {
+  const passages = index.passages
+  if (fill.selectedOrders.length === 0) {
+    return {
+      ...emptyResult(mode),
+      hybrid: {
+        retrievalMode: mode,
+        selectedPassageIds: [],
+        neighbourSelectedIds: [],
+        candidateCount: candidates.length,
+        skippedCount: fill.skippedCount,
+      },
+    }
+  }
+
+  // 原文连续的段落合为一个 ContextGroup；pieces 直接拼接，页号天然正确
+  const runs: Passage[][] = []
+  for (const order of fill.selectedOrders) {
+    const last = runs.at(-1)
+    if (last && last[last.length - 1].order + 1 === order) last.push(passages[order])
+    else runs.push([passages[order]])
+  }
+  const contextGroups: ContextGroup[] = runs.map(run => ({ pieces: run.flatMap(passage => passage.pieces) }))
+  const context = runs.map(run => run.map(passage => passage.text).join('')).join(CONTEXT_GROUP_SEPARATOR)
+
+  // selected：按真实连续页区间拆分。相邻但不连续（中间缺页）必须分成两段，
+  // 否则 sources 会声称读了一页其实没读的原文
+  const titles = cardTitlesByOrder(index)
+  interface Span { startPage: number; endPage: number; startOrder: number }
+  const spans: Span[] = []
+  for (const order of fill.selectedOrders) {
+    const passage = passages[order]
+    const startPage = passage.pieces[0].page
+    const endPage = passage.pieces[passage.pieces.length - 1].page
+    const last = spans.at(-1)
+    if (last && startPage <= last.endPage + 1) last.endPage = Math.max(last.endPage, endPage)
+    else spans.push({ startPage, endPage, startOrder: order })
+  }
+
+  const selectedNodes: IndexNode[] = spans.map(span => ({
+    title: titles.get(span.startOrder) ?? `段落 ${passages[span.startOrder].id}`,
+    nodeId: `R${span.startOrder}`,
+    startPage: span.startPage,
+    endPage: span.endPage,
+    summary: '',
+    nodes: [],
+  }))
+
+  return {
+    context,
+    contextGroups,
+    sources: selectedNodes.map(node => `Pages ${node.startPage + 1}–${node.endPage + 1}: ${node.title}`),
+    selected: selectedNodes,
+    // 段落路径复用该字段装融合名次（`IndexNode` 打分的替代品），不是 LLM 返回的打分
+    scores: candidates.map(candidate => ({ id: candidate.order, score: candidate.score })),
+    degraded: false,
+    llmCalled: false,
+    hybrid: {
+      retrievalMode: mode,
+      selectedPassageIds: fill.selectedOrders.map(order => passages[order].id),
+      neighbourSelectedIds: fill.neighbourOrders.map(order => passages[order].id),
+      candidateCount: candidates.length,
+      skippedCount: fill.skippedCount,
+    },
+  }
+}
+
+/** 段落 order → 卡片下标（查询卡片向量时用） */
+function mapCardsToPassageIndexes(index: PassageIndex): Map<number, number> {
+  const map = new Map<number, number>()
+  if (!index.cards) return map
+  const orderById = new Map(index.passages.map(passage => [passage.id, passage.order]))
+  index.cards.forEach((card, cardIndex) => {
+    const start = orderById.get(card.range[0])
+    const end = orderById.get(card.range[1])
+    if (start === undefined || end === undefined) return
+    for (let order = start; order <= end; order++) map.set(order, cardIndex)
+  })
+  return map
 }
