@@ -15,8 +15,12 @@ import {
   type RagRetrievalStage,
 } from '../../../src/utils/ragPipeline'
 import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
+import type { Embedder } from '../../../src/utils/embedder'
+import type { TokenCounter } from '../../../src/utils/passages'
 import type { SemanticTreeHook } from '../metrics/treeDiagnostics'
 import { summarizeTreeDiagnostics, treeRecordFields } from '../metrics/treeDiagnostics'
+import { summarizeColdStart } from '../metrics/passageDiagnostics'
+import type { PassageIndexHook, PassageIndexInfo } from './passageIndexHook'
 import type {
   PaperMindConfig,
   BenchResult,
@@ -74,6 +78,15 @@ export interface QaTaskArgs {
    * 同一条生产 RAG 管线，只是每篇论文多挂一棵树。
    */
   semanticTree?: SemanticTreeHook
+  /** 提供时走段落级混合检索：hook 建索引、embedder 供提问时的查询向量 */
+  passage?: {
+    hook: PassageIndexHook
+    embedder: Embedder | undefined
+    countTokens: TokenCounter
+    maxTokens: number
+    /** 本轮 embedder 加载失败：结果标为不参与正式对照（方案 §7） */
+    embedderUnavailable: boolean
+  }
   /**
    * 受控上下文物化器（§3.1）：对比实验的统一 token 预算由它施加——四个检索指标
    * 消费的最终页序与上下文文本同源产出，禁止从事后推断的候选包络反推。
@@ -149,9 +162,17 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     const indexClientBefore = client.stats()
     const indexStartedMs = now()
     let tree: IndexNode | undefined
+    let passageInfo: PassageIndexInfo | undefined
     let indexError: unknown
     try {
-      tree = await buildIndex(sample.pages, client.complete, indexOptions(config))
+      if (args.passage) {
+        // 段落配置下索引由 hook 全权产出：不计 buildPageIndex 的 N+1 次调用，
+        // 也不存在「hook 失败后回落平面索引」——失败即本篇记 index 阶段错误（方案 §7）
+        passageInfo = await args.passage.hook(sample)
+        tree = passageInfo.index.tree
+      } else {
+        tree = await buildIndex(sample.pages, client.complete, indexOptions(config))
+      }
     } catch (e) {
       indexError = e
     }
@@ -178,6 +199,8 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
           + (indexClientAfter.misses - indexClientBefore.misses),
         indexCacheHits: indexClientAfter.hits - indexClientBefore.hits,
         indexCacheMisses: indexClientAfter.misses - indexClientBefore.misses,
+        // 索引失败也要在冷启动账上留痕：该论文一次构建都没走完（Task 13 的 D73）
+        ...(args.passage ? { coldStartFailed: 1 } : {}),
         error: errorMessage(indexError),
       })
       continue
@@ -187,8 +210,9 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     // 与生产 pipeline 里的树路由用同一个取法，保证两边的候选集合一致
     const leaves = collectLeafNodes(tree)
     // 语义树在平面索引之后单独建：树的输入是原文证据块，与平面索引互不依赖。
-    // 建树失败只是没有树，本篇所有问题照常走平面路径（§8.2）
-    const treeInfo = args.semanticTree ? await args.semanticTree(sample) : undefined
+    // 建树失败只是没有树，本篇所有问题照常走平面路径（§8.2）。
+    // 段落配置下不再建语义树：检索已被段落索引接管，多建一棵树只会白花一次 LLM 调用
+    const treeInfo = !args.passage && args.semanticTree ? await args.semanticTree(sample) : undefined
 
     perPaper.push({
       paperId: sample.paperId,
@@ -204,6 +228,8 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       indexCacheMisses: indexClientAfter.misses - indexClientBefore.misses,
       leafCount: leaves.length,
       ...treeRecordFields(treeInfo),
+      // 段落索引的冷启动成本（不进入 Q，与 Q 并列报告）
+      ...(passageInfo ? passageInfo.coldStart : {}),
     })
 
     for (const question of sample.questions) {
@@ -235,12 +261,27 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
             tree,
             pages: sample.pages,
             ...(treeInfo?.semantic ? { semantic: treeInfo.semantic } : {}),
+            ...(passageInfo?.index ? { passageIndex: passageInfo.index } : {}),
           }],
           question.question,
           [],                       // 单轮评测，无历史；rewriteRate 因此在本评测中恒为 0
           client.complete,
           ragOptions(config),
-          { now, materialize: args.materialize },
+          {
+            now,
+            materialize: args.materialize,
+            // 段落路径的注入项：查询向量模型、契约分词器、冻结预算（与物化器同一常量）。
+            // 三者同源是「填充放得下 ⇒ 物化不截断」成立的前提（见 passageRetrieval 文件头）
+            ...(args.passage
+              ? {
+                  passage: {
+                    ...(args.passage.embedder ? { embedder: args.passage.embedder } : {}),
+                    countTokens: args.passage.countTokens,
+                    maxTokens: args.passage.maxTokens,
+                  },
+                }
+              : {}),
+          },
         )
         timeline?.markEvidenceReady()
         assertRetrievalTiming(retrieval)
@@ -260,6 +301,9 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       record.retrievalQuery = retrieval.retrievalQuery
       if (retrieval.contextPageOrder !== undefined) record.contextPageOrder = retrieval.contextPageOrder
       if (retrieval.contextTokenCount !== undefined) record.contextTokenCount = retrieval.contextTokenCount
+      // 段落配置下逐题记录实际生效的检索模式（bm25 / bm25+dense / full / …）；
+      // 非段落路径没有 hybrid 诊断，该字段缺席
+      record.retrievalMode = retrieval.retrievals[0]?.hybrid?.retrievalMode
       record.contextTruncated = retrieval.contextTruncated
       // selectedPages 是诊断字段（候选页区间包络），真实页集合一律看 contextPageOrder
       record.selectedPages = first ? expandPages(first.selected) : []
@@ -429,13 +473,26 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     total,
     cacheHits,
     cacheMisses,
-    retrievalAlgorithm: args.semanticTree ? 'semantic-tree' : 'papermind-llm',
+    retrievalAlgorithm: args.passage ? 'hybrid-passage' : args.semanticTree ? 'semantic-tree' : 'papermind-llm',
     qasperEvidenceQuestions,
     mappedEvidenceQuestions,
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
     ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
-    extraMetrics: treeAgg.metrics,
+    // 段落配置下 extraMetrics 换成冷启动成本（树诊断在段落路径上恒为空：hook 接管后不再建树）
+    extraMetrics: args.passage ? summarizeColdStart(perPaper) : treeAgg.metrics,
+    ...(args.passage
+      ? {
+          extraMeta: {
+            baselineFamily: 'classic' as const,
+            candidateGranularity: 'paragraph passage',
+            // 向量模型不可用时本轮检索信号与其它基线不同源，如实标为不可比（方案 §7）
+            ...(args.passage.embedderUnavailable
+              ? { comparisonEligible: false, comparisonIneligibleReason: 'embedder-unavailable' }
+              : {}),
+          },
+        }
+      : {}),
     extraTimingValues: { treeBuildLatency: treeAgg.latencies },
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })

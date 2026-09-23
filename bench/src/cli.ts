@@ -18,6 +18,8 @@ import { runTraditionalRagQaTask } from './runner/traditionalRagQa'
 import { runHybridRerankQaTask } from './runner/hybridRerankQa'
 import { runLongSectionQaTask } from './runner/longSectionQa'
 import { runSemanticTreeQaTask } from './runner/semanticTreeQa'
+import { createPassageIndexHook, type HybridKnobs } from './runner/passageIndexHook'
+import { errorMessage } from './runner/support'
 import { runSummaryTask } from './runner/summary'
 import { renderReport, renderComparison } from './report'
 import { benchPath } from './paths'
@@ -26,6 +28,8 @@ import type { PaperMindConfig } from './types'
 import type { LlmClient } from './llmClient'
 import type { StrongBaselineQaArgs, StrongGenerationSettings } from './runner/strongBaselineQa'
 import { materializeContext, type ContextGroup } from '../../src/utils/contextTrace'
+import type { Embedder } from '../../src/utils/embedder'
+import { createTransformersEmbedder } from '../../src/utils/transformersEmbedder'
 import { MATH_FORMAT_INSTRUCTION } from '../../src/utils/ragPipeline'
 import {
   buildEvaluationContract,
@@ -176,7 +180,12 @@ if ((args.task === 'summary' || args.task === 'all') && configs.some(config => c
   throw new Error('summary task 只接受 PaperMind 配置')
 }
 // full-context 模式绕过检索配置，只对 PaperMind 管线有意义；检索型基线（传统 RAG
-// 与强基线）在 full-context 下跑出的数字与自身配置无关，必须拒绝而非静默跑错对象
+// 与强基线）在 full-context 下跑出的数字与自身配置无关，必须拒绝而非静默跑错对象。
+// 段落混合配置同样没有检索路径可走，单独先判：矩阵展开会把 PaperMind 的 kind 剥成空，
+// 落到下面那条通用断言只会报「不是 PaperMind 配置」——名义指向了错误的原因
+if (args.mode === 'full-context' && configs.some(config => 'passage' in config && config.passage !== undefined)) {
+  throw new Error('--mode full-context 不支持段落混合配置：全文直投没有检索路径，混用会产出无意义的对照')
+}
 if (args.mode === 'full-context' && configs.some(config => config.kind !== 'papermind')) {
   throw new Error('--mode full-context 只接受 PaperMind 配置；检索型基线请直接用对应 --config')
 }
@@ -408,6 +417,49 @@ for (const config of configs) {
             onProgress: strongProgress(config),
             ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })
+        } else if (config.passage) {
+          // 冷启动全部发生在逐题计时之前（query-timeline-v2）：hook 内部 await 到阶段③。
+          // 向量模型按配置显式 pin 加载，失败不中断本轮——降级为 bm25* 并标为不可比，
+          // 因为「模型没下下来」和「检索不行」是两件事，混在一起读会得出错误结论
+          let passageEmbedder: Embedder | undefined
+          try {
+            passageEmbedder = await createTransformersEmbedder({
+              model: config.passage.embedder.model,
+              revision: config.passage.embedder.revision,
+              dtype: config.passage.embedder.dtype,
+            })
+          } catch (error) {
+            console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
+          }
+          const knobs: HybridKnobs = {
+            minTokens: config.minTokens as number,
+            maxTokens: config.maxTokens as number,
+            maxInputChars: config.maxInputChars as number,
+            rrfK: config.rrfK as number,
+            sectionWeight: config.sectionWeight as number,
+            neighbourFactor: config.neighbourFactor as number,
+            skipLimit: config.skipLimit as number,
+          }
+          // 契约分词器只有 tokenize：计数口径必须与 materializeContext 完全一致，
+          // 否则预算填充放得下的段落会在物化时被截断
+          const countTokens = (text: string) => contractTokenizer.tokenize(text).length
+          result = await runQaTask({
+            ...common, ...controlled, config,
+            passage: {
+              hook: createPassageIndexHook({
+                knobs,
+                client,
+                embedder: passageEmbedder,
+                countTokens,
+                modelIdentity: env.model,
+              }),
+              embedder: passageEmbedder,
+              countTokens,
+              maxTokens: CONTEXT_BUDGET_TOKENS,
+              embedderUnavailable: passageEmbedder === undefined,
+            },
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
+          })
         } else if (config.kind === 'semantic-tree') {
           result = await runSemanticTreeQaTask({
             ...common, ...controlled, config,
@@ -420,8 +472,8 @@ for (const config of configs) {
           })
         }
         // 显式资格声明：受控预算下产出的四个检索指标可进入横向比较。
-        // full-context 分支由它自己的 runner 写 false + 原因，这里不覆盖也不代填
-        result.meta.comparisonEligible = true
+        // runner 已自行声明 false（full-context 的生成上限、embedder-unavailable）时不得覆盖
+        if (result.meta.comparisonEligible !== false) result.meta.comparisonEligible = true
       }
       // --no-cache 与 speed answer-cache bypass 都只跳过读缓存，不覆写已有缓存文件，如实记录口径。
       result.meta.cacheMode = cachePolicy.answerUseCache ? 'normal' : 'bypass'
