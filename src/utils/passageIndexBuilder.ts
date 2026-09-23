@@ -89,6 +89,37 @@ function reuseStage1(existing: PassageIndex | undefined, plan: PassageIndexBuild
   return { passages: existing.passages, tree: existing.tree, separatorTokens: existing.separatorTokens }
 }
 
+/**
+ * 无 embedder 时把存量段落向量的三元组（`passageVectors` / `vectorDim` / `embedderId`）原样带过去。
+ *
+ * 场景：模型还没下载完、或会话暂时拿不到 → `deps.embedder` 缺席。此时
+ * `planPassageIndexRebuild` 看到的是 `stored.embedderId ('x') !== undefined`，据此判定
+ * 「向量要重算」（`vectors: true`），而阶段② 在「没有 embedder」时第一行就返回、一条都没算：
+ * 最终记录会丢掉已经付过费、且与段落逐条对应的向量，检索静默退化成 `bm25+card-lexical`
+ * （`passageRetrieval` 的 `passagesUsable` 为假），要等下一次模型就绪才恢复。段落没重切时
+ * （`plan.passages === false`，即 `reuseStage1` 原样搬的 `existing.passages`——最终记录的段落
+ * 与向量所依据的段落是同一个数组）这些向量依然有效，不该扔。
+ *
+ * 三元组必须**一起**搬，不能只搬数组：少了 `embedderId` 记录就自相矛盾（有向量却说不出是谁
+ * 算的），而且下次换一个 embedder 构建时 `planPassageIndexRebuild` 是拿 `undefined` 去比 id，
+ * 判断纯属撞运气。任何一处不自洽都不搬——向量数 ≠ 段落数、某条向量长度不等于 `vectorDim`
+ * （落盘格式不带每行长度，错位的向量只会在检索时静默算错）——降级到词法检索是可接受的代价。
+ */
+function carryStoredPassageVectors(
+  existing: PassageIndex | undefined,
+  plan: PassageIndexBuildPlan,
+  embedder: Embedder | undefined,
+): { passageVectors: Float32Array[]; vectorDim: number; embedderId: string } | undefined {
+  // 有 embedder 时由阶段② 按 `plan.vectors` 决定复用还是重算（`canReusePassageVectors`），不走这里
+  if (embedder || plan.passages || !existing) return undefined
+  const { passageVectors, embedderId } = existing
+  const vectorDim = existing.vectorDim ?? 0
+  if (!passageVectors || vectorDim <= 0 || !embedderId) return undefined
+  if (passageVectors.length !== existing.passages.length) return undefined
+  if (passageVectors.some(vector => vector.length !== vectorDim)) return undefined
+  return { passageVectors, vectorDim, embedderId }
+}
+
 export async function startPassagePipeline(
   pages: string[],
   deps: PassagePipelineDeps,
@@ -142,9 +173,14 @@ async function runRemainingStages(
 ): Promise<PassageIndex> {
   const { plan, stage1, now } = ctx
   const embedder = deps.embedder
+  // 无 embedder（模型没就绪）时存量向量在这里带回；`embedderId` 与它同源，三元组一起写才自洽
+  // （见 `carryStoredPassageVectors`）。carried 非空 ⇒ embedder 为空 ⇒ 阶段② 第一行就返回，
+  // 下面这两个初值不可能被它覆盖。
+  const carried = carryStoredPassageVectors(ctx.existing, plan, embedder)
+  const embedderId = embedder?.id ?? carried?.embedderId
   // 阶段② 与 ③ 各写一份自己的产物，最后由下面的 merge 合成，避免两条并行分支互相覆盖
-  let passageVectors: Float32Array[] | undefined
-  let vectorDim: number | undefined
+  let passageVectors: Float32Array[] | undefined = carried?.passageVectors
+  let vectorDim: number | undefined = carried?.vectorDim
   let cards: StructureCard[] | undefined
   let paper: { title: string; summary: string } | undefined
   let structureFallback: { reason: StructureFallbackReason } | undefined
@@ -248,7 +284,7 @@ async function runRemainingStages(
     separatorTokens: stage1.separatorTokens,
     ...(passageVectors ? { passageVectors } : {}),
     ...(vectorDim ? { vectorDim } : {}),
-    ...(embedder ? { embedderId: embedder.id } : {}),
+    ...(embedderId ? { embedderId } : {}),
     ...(cards ? { cards } : {}),
     ...(cardVectors ? { cardVectors } : {}),
     ...(paper ? { paper } : {}),

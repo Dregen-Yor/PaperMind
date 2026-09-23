@@ -88,6 +88,9 @@ describe('startPassagePipeline', () => {
     const ctx = deps(async () => { llmCalled = true; return CARDS_JSON }, slowEmbedder)
     const started = await startPassagePipeline(PAGES, ctx.deps, {})
     await new Promise(resolve => setTimeout(resolve, 0))
+    // 卡住的那次调用必须真的发出去了：否则「向量还卡着」无从谈起，
+    // `resolveEmbed` 会是 undefined、`resolveEmbed?.()` 空转，本用例变成空断言
+    expect(slowEmbedder.embedPassages).toHaveBeenCalled()
     expect(llmCalled).toBe(true)          // 向量还卡着，卡片调用已经发出
     resolveEmbed?.()
     await started.rest
@@ -184,6 +187,96 @@ describe('startPassagePipeline', () => {
     const final = await started.rest
     expect(llm).not.toHaveBeenCalled()
     expect(final.embedderId).toBe('other@main#q8')
+  })
+
+  it('无 embedder 时原样带过存量向量（段落未重切）：三元组一起保留', async () => {
+    const first = await (await startPassagePipeline(PAGES, deps(async () => CARDS_JSON, fakeEmbedder()).deps, {})).rest
+    expect(first.passageVectors).toHaveLength(first.passages.length)
+
+    // 第二次构建没有 embedder（模型没下载完 / 会话暂时拿不到）：段落没重切、向量依然有效，
+    // 已经付过费的东西不该因为「模型还没就绪」就作废
+    const llm = vi.fn(async () => CARDS_JSON)
+    const ctx = deps(llm)
+    const final = await (await startPassagePipeline(PAGES, ctx.deps, { existing: first })).rest
+    expect(final.passageVectors).toEqual(first.passageVectors)
+    expect(final.vectorDim).toBe(first.vectorDim)
+    expect(final.embedderId).toBe(first.embedderId)   // 有向量就必须说得出是谁算的，三元组一起写
+    expect(final.passageVectors).toHaveLength(final.passages.length)
+    expect(final.stage).toBe(3)                       // 卡片照常是阶段③ 的成果
+    expect(llm).not.toHaveBeenCalled()                // structureHash 未变 → 卡片也复用
+    expect(ctx.persisted.map(item => item.stage)).toEqual([1, 3])
+  })
+
+  it('存量向量数与段落数不一致 → 不搬：错位的向量比没有向量更糟', async () => {
+    const first = await (await startPassagePipeline(PAGES, deps(async () => CARDS_JSON, fakeEmbedder()).deps, {})).rest
+    const vectors = first.passageVectors ?? []
+    expect(vectors).toHaveLength(first.passages.length)   // 前提：存量本来是可搬的
+
+    const shortCtx = deps(async () => CARDS_JSON)
+    const short = await (await startPassagePipeline(PAGES, shortCtx.deps, { existing: { ...first, passageVectors: vectors.slice(0, -1) } })).rest
+    expect(short.passageVectors).toBeUndefined()
+    expect(short.vectorDim).toBeUndefined()
+    expect(short.embedderId).toBeUndefined()
+
+    // 逐条维度也要对上：`vectorDim: 3` 配着长度 2 的向量是同一类不自洽
+    const dimCtx = deps(async () => CARDS_JSON)
+    const dim = await (await startPassagePipeline(PAGES, dimCtx.deps, { existing: { ...first, vectorDim: 3 } })).rest
+    expect(dim.passageVectors).toBeUndefined()
+    expect(dim.vectorDim).toBeUndefined()
+  })
+
+  it('段落重切（passageConfigHash 变）→ 绝不带过存量向量：它们属于别的段落', async () => {
+    const first = await (await startPassagePipeline(PAGES, deps(async () => CARDS_JSON, fakeEmbedder()).deps, {})).rest
+    expect(first.passageVectors).toHaveLength(first.passages.length)
+
+    const llm = vi.fn(async () => CARDS_JSON)
+    const ctx = deps(llm)
+    const final = await (await startPassagePipeline(PAGES, { ...ctx.deps, passageConfigHash: 'pch-v2' }, { existing: first })).rest
+    // 切法没变（段落数与 first 相同），所以唯一拦住搬运的就是 plan.passages
+    expect(final.passages).toHaveLength(first.passages.length)
+    expect(final.passageVectors).toBeUndefined()
+    expect(final.vectorDim).toBeUndefined()
+    expect(final.embedderId).toBeUndefined()
+    expect(llm).toHaveBeenCalledTimes(1)              // 全量重建：卡片也重做
+  })
+
+  it('force 全量重来：调用 LLM、重算向量，不继承任何存量字段', async () => {
+    const first = await (await startPassagePipeline(PAGES, deps(async () => CARDS_JSON, fakeEmbedder()).deps, {})).rest
+    const storedVectors = first.passageVectors ?? []
+    expect(storedVectors).toHaveLength(first.passages.length)   // 前提：存量是完整可复用的稠密索引
+    // 给存量打上「只会被继承带出来」的标记：段落文本前缀、向量值、回落原因与 paper
+    const stale: PassageIndex = {
+      ...first,
+      passages: first.passages.map(passage => ({ ...passage, searchText: `STALE ${passage.searchText}` })),
+      passageVectors: storedVectors.map(() => new Float32Array([7, 7])),
+      vectorDim: 2,
+      structureFallback: { reason: 'invalid-json' },
+      paper: { title: 'stale-title', summary: 'stale-summary' },
+    }
+
+    // 对照组：同一份存量、不带 force → 三个指纹都命中，全部复用（零 LLM 调用，向量原样搬过来）
+    const reuseEmbedder = fakeEmbedder()
+    const reuseLlm = vi.fn(async () => CARDS_JSON)
+    const reused = await (await startPassagePipeline(PAGES, deps(reuseLlm, reuseEmbedder).deps, { existing: stale })).rest
+    expect(reuseLlm).not.toHaveBeenCalled()
+    expect(reuseEmbedder.embedPassages).toHaveBeenCalledTimes(1)   // 只剩卡片向量那一次（刻意不看 plan.vectors）
+    expect(reused.passages[0].searchText.startsWith('STALE')).toBe(true)
+    expect(reused.passageVectors?.[0][0]).toBe(7)
+    expect(reused.structureFallback?.reason).toBe('invalid-json')
+    expect(reused.paper?.title).toBe('stale-title')
+
+    // force：现有索引整份丢弃，三个指纹都不参与复用
+    const forceEmbedder = fakeEmbedder()
+    const forceLlm = vi.fn(async () => CARDS_JSON)
+    const forced = await (await startPassagePipeline(PAGES, deps(forceLlm, forceEmbedder).deps, { existing: stale, force: true })).rest
+    expect(forceLlm).toHaveBeenCalledTimes(1)
+    expect(forceEmbedder.embedPassages).toHaveBeenCalledTimes(2)   // 段落向量 + 卡片向量都重算
+    expect(forced.passages[0].searchText.startsWith('STALE')).toBe(false)   // 重新切出来的段落
+    expect(forced.passageVectors?.[0][0]).toBe(1)                  // 模型重算的向量，不是存量那份
+    expect(forced.vectorDim).toBe(2)
+    expect(forced.embedderId).toBe(forceEmbedder.id)
+    expect(forced.structureFallback).toBeUndefined()
+    expect(forced.paper).toBeUndefined()
   })
 
   it('旧版（v1）存量索引视为过期，全量重建', async () => {
