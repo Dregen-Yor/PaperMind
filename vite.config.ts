@@ -26,6 +26,27 @@ try {
   )
 } catch { /* ignore if already exists */ }
 
+// onnxruntime-web 的 wasm 运行时资源：随包发布到 public/ort/，
+// 供 src/utils/transformersEmbedder.ts 以 wasmPaths='./ort/' 加载。
+// 打包后是 file:// 页面，不能从 CDN 取，而向量模型离线可用是阶段②③ 的前提。
+const ORT_ASSETS = [
+  'ort-wasm-simd-threaded.wasm',
+  'ort-wasm-simd-threaded.mjs',
+  'ort-wasm-simd-threaded.jsep.wasm',
+  'ort-wasm-simd-threaded.jsep.mjs',
+]
+try {
+  mkdirSync(resolve(__dirname, 'public/ort'), { recursive: true })
+  for (const asset of ORT_ASSETS) {
+    copyFileSync(
+      resolve(__dirname, 'node_modules/onnxruntime-web/dist', asset),
+      resolve(__dirname, 'public/ort', asset),
+    )
+  }
+} catch {
+  // 依赖缺失时不阻断 dev / build：向量模型不可用时检索退化为阶段①
+}
+
 export default defineConfig({
   test: {
     globals: true,

@@ -6,6 +6,9 @@ dist/
 dist-electron/
 release/
 
+# 构建期从 node_modules 拷贝的静态资源（vite.config.ts）
+public/ort/
+
 # Logs
 *.log
 npm-debug.log*
