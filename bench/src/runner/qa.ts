@@ -83,7 +83,21 @@ export interface QaTaskArgs {
     hook: PassageIndexHook
     embedder: Embedder | undefined
     countTokens: TokenCounter
-    maxTokens: number
+    /**
+     * 受控上下文预算（与 CLI 的 `materializeContext` 同一常量 `CONTEXT_BUDGET_TOKENS`）。
+     * 刻意不叫 `maxTokens`：那是段落**切分**上限（`config.maxTokens` / `HybridKnobs.maxTokens`），
+     * 两者同名又只隔二十来行，谁都可能把其中一个当另一个传。
+     */
+    contextBudgetTokens: number
+    /**
+     * 方案 §4 融合旋钮：原样透传进 `retrieveRagContext` 的 `passage` 注入
+     * （缺席时检索侧吃 `DEFAULT_HYBRID_OPTIONS`）。配置矩阵的消融轴只有真的走到
+     * 检索才产生差异，这四行就是「配置 → deps → 检索」的最后一段。
+     */
+    rrfK?: number
+    sectionWeight?: number
+    neighbourFactor?: number
+    skipLimit?: number
     /** 本轮 embedder 加载失败：结果标为不参与正式对照（方案 §7） */
     embedderUnavailable: boolean
   }
@@ -270,14 +284,20 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
           {
             now,
             materialize: args.materialize,
-            // 段落路径的注入项：查询向量模型、契约分词器、冻结预算（与物化器同一常量）。
-            // 三者同源是「填充放得下 ⇒ 物化不截断」成立的前提（见 passageRetrieval 文件头）
+            // 段落路径的注入项：查询向量模型、契约分词器、冻结预算（与物化器同一常量）
+            // 与四个融合旋钮。前三者同源是「填充放得下 ⇒ 物化不截断」成立的前提
+            // （见 passageRetrieval 文件头）；旋钮只有给出时才转发——0 是合法取值
+            // （关掉该路权重），按真值转发会把显式归零静默换回默认 0.5
             ...(args.passage
               ? {
                   passage: {
                     ...(args.passage.embedder ? { embedder: args.passage.embedder } : {}),
                     countTokens: args.passage.countTokens,
-                    maxTokens: args.passage.maxTokens,
+                    maxTokens: args.passage.contextBudgetTokens,
+                    ...(args.passage.rrfK !== undefined ? { rrfK: args.passage.rrfK } : {}),
+                    ...(args.passage.sectionWeight !== undefined ? { sectionWeight: args.passage.sectionWeight } : {}),
+                    ...(args.passage.neighbourFactor !== undefined ? { neighbourFactor: args.passage.neighbourFactor } : {}),
+                    ...(args.passage.skipLimit !== undefined ? { skipLimit: args.passage.skipLimit } : {}),
                   },
                 }
               : {}),

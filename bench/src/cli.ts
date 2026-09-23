@@ -462,7 +462,15 @@ for (const config of configs) {
               }),
               embedder: passageEmbedder,
               countTokens,
-              maxTokens: CONTEXT_BUDGET_TOKENS,
+              // 上下文预算与切分上限是两个数：前者是冻结的 4096（与物化器同源），
+              // 后者是 knobs.maxTokens（切段），字段名分开写，避免未来被对调
+              contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
+              // 方案 §4 融合旋钮：本配置唯一的消融轴（sectionWeight 0/0.5/1）靠这四行
+              // 走到检索；漏一条，三次运行就产出三份一样的数字而各自声称不同口径
+              rrfK: knobs.rrfK,
+              sectionWeight: knobs.sectionWeight,
+              neighbourFactor: knobs.neighbourFactor,
+              skipLimit: knobs.skipLimit,
               embedderUnavailable: passageEmbedder === undefined,
             },
             ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
