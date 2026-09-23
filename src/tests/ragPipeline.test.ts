@@ -515,4 +515,44 @@ describe('retrieveRagContext 的段落路径', () => {
     expect(retrieval.llmCalls).toBe(1)
     expect(retrieval.treeRouted).toBe(false)
   })
+
+  it('只有注入 deps.passage.embedder 才走得到依赖向量的 full 模式', async () => {
+    // 同一篇论文、同一份索引：段落向量与卡片向量都在，差别只在 deps.passage 有没有被转发下去。
+    // 少了这条用例，把 `deps.passage.embedder` 从转发里漏掉也照样全绿（检索静默退回词法）
+    const dim = 4
+    const unit = (seed: number) => {
+      const vector = new Float32Array(dim)
+      vector[seed % dim] = 1
+      return vector
+    }
+    const embedder = {
+      id: 'test-embedder',
+      embedQuery: vi.fn(async () => unit(0)),
+      embedPassages: vi.fn(async (texts: string[]) => texts.map((_, index) => unit(index))),
+    }
+    const denseIndex: PassageIndex = {
+      ...passageIndex,
+      stage: 3,
+      embedderId: embedder.id,
+      vectorDim: dim,
+      passageVectors: passages.map((_, index) => unit(index)),
+      cards,
+      cardVectors: cards.map((_, index) => unit(index)),
+    }
+    const paper = { tree: denseIndex.tree, pages: passagePages, passageIndex: denseIndex }
+    const llm = vi.fn(async () => 'should not be called')
+
+    const dense = await retrieveRagContext(
+      [paper], 'Europarl datasets', [], llm, {}, { passage: { embedder } },
+    )
+    expect(dense.retrievals[0].hybrid?.retrievalMode).toBe('full')
+    // 模式名之外再钉一次入参：模型真的被调用过，而不是模式名碰巧对上
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+
+    // 正对照：同一篇论文不注入 deps 时一路向量都不读。卡片在索引里，所以词法模式是
+    // 「BM25 + 卡片文本 BM25」（方案 §4 的降级表），而不是裸 bm25
+    const lexical = await retrieveRagContext([paper], 'Europarl datasets', [], llm, {}, {})
+    expect(lexical.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+  })
 })
