@@ -135,9 +135,12 @@ describe('useChatStore — 语义树开关与状态', () => {
     expect(store.treeEnabled).toBe(false)
   })
 
-  it('恢复已保存的关闭状态', async () => {
+  it('已保存的非开启值（字符串 false）同样保持关闭', async () => {
+    // 存的是字符串编码：加载判据在 true 一侧刻意接受 'true'，它的同胞 'false' 就绝不能被
+    // 当成真值。用布尔 false 测不出这一点——布尔 false 恰好等于新默认值，
+    // 把加载点整个删掉也照样绿（存在性/真值判据的实现才会在这里露馅）
     mockDb().settings.get.mockImplementation((key: string) =>
-      Promise.resolve(key === 'semantic_tree_enabled' ? false : null))
+      Promise.resolve(key === 'semantic_tree_enabled' ? 'false' : null))
     const store = useChatStore()
     await store.init()
     expect(store.treeEnabled).toBe(false)
