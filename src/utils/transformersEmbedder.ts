@@ -15,6 +15,34 @@ import { createIdbStore, createModelFileCache, type ModelFileCache } from './mod
 /** 单批前向传播的文本数：WASM 下单批过大会陡增内存占用。 */
 export const EMBED_BATCH_SIZE = 16
 
+/** 按批切分文本（尾批是余数）；空输入不产生批次。 */
+export function batchTexts(texts: string[], batchSize = EMBED_BATCH_SIZE): string[][] {
+  const batches: string[][] = []
+  for (let start = 0; start < texts.length; start += batchSize) {
+    batches.push(texts.slice(start, start + batchSize))
+  }
+  return batches
+}
+
+/** `pipeline('feature-extraction')` 的输出：行优先展平的 `data` + `dims`。 */
+export interface FeatureExtractionOutput {
+  data: Float32Array
+  dims: number[]
+}
+
+/**
+ * 批输出 → 与批内文本一一对应的向量。
+ * 宽度或元素个数不符时抛错：宁可整体失败，也不能把某一行的向量配给另一行文本。
+ */
+export function vectorsFromOutput(output: FeatureExtractionOutput, batchLength: number): Float32Array[] {
+  const width = output.dims.at(-1) ?? 0
+  if (width <= 0 || output.data.length !== batchLength * width) throw new Error('向量输出维度异常')
+  if (width !== BGE_SMALL_DIM) throw new Error(`向量维度 ${width} 与约定 ${BGE_SMALL_DIM} 不一致`)
+  const vectors: Float32Array[] = []
+  for (let i = 0; i < batchLength; i++) vectors.push(output.data.slice(i * width, (i + 1) * width))
+  return vectors
+}
+
 export interface TransformersEmbedderOptions {
   model?: string
   revision?: string
@@ -46,16 +74,9 @@ export async function createTransformersEmbedder(options: TransformersEmbedderOp
   const extractor = await transformers.pipeline('feature-extraction', model, { revision, dtype: dtype as DataType })
   const embed = async (texts: string[]): Promise<Float32Array[]> => {
     const vectors: Float32Array[] = []
-    for (let start = 0; start < texts.length; start += EMBED_BATCH_SIZE) {
-      const batch = texts.slice(start, start + EMBED_BATCH_SIZE)
-      const output = await extractor(batch, { pooling: 'cls', normalize: true }) as unknown as {
-        data: Float32Array
-        dims: number[]
-      }
-      const width = output.dims.at(-1) ?? 0
-      if (width <= 0 || output.data.length !== batch.length * width) throw new Error('向量输出维度异常')
-      if (width !== BGE_SMALL_DIM) throw new Error(`向量维度 ${width} 与约定 ${BGE_SMALL_DIM} 不一致`)
-      for (let i = 0; i < batch.length; i++) vectors.push(output.data.slice(i * width, (i + 1) * width))
+    for (const batch of batchTexts(texts)) {
+      const output = await extractor(batch, { pooling: 'cls', normalize: true }) as unknown as FeatureExtractionOutput
+      vectors.push(...vectorsFromOutput(output, batch.length))
     }
     return vectors
   }

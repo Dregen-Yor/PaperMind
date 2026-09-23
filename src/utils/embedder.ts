@@ -89,6 +89,11 @@ function fromBase64(value: string): Uint8Array {
 /** 一组等长向量 → base64（Float32Array 原始字节，小端）。落盘前统一走这里。 */
 export function encodeVectors(vectors: Float32Array[]): string {
   const dim = vectors[0]?.length ?? 0
+  // 落盘格式不带每行长度：不等长时短向量会被静默补零、长向量会静默盖掉下一行，
+  // 写入一份悄悄错位的索引比直接报错更糟。
+  for (const vector of vectors) {
+    if (vector.length !== dim) throw new Error(`向量长度不一致：${vector.length} 与 ${dim}`)
+  }
   const flat = new Float32Array(vectors.length * dim)
   vectors.forEach((vector, index) => flat.set(vector, index * dim))
   return toBase64(new Uint8Array(flat.buffer, flat.byteOffset, flat.byteLength))
