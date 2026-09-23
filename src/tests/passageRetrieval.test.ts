@@ -286,6 +286,24 @@ describe('retrievePassageContext（模式判定与组装）', () => {
     expect(multiGroupBudgets.length).toBeGreaterThan(0)
   })
 
+  it('R31：embedder.id 与索引记录不一致时不走稠密路（同维模型也不算相似度）', async () => {
+    const { index, embedder } = fakeIndex()
+    // 换个 id 的同维模型：维度对得上，但两批向量来自不同嵌入空间，
+    // 点积只会给出看似合理的乱序 —— 契约要求这种记录降级到词法模式，而不是评分
+    const swapped: Embedder = {
+      ...embedder,
+      id: 'other@main#q8',
+      embedQuery: vi.fn(async () => new Float32Array([1, 1, 0, 0])),
+    }
+    const mismatched = await retrievePassageContext(index, 'MultiUN results', { embedder: swapped })
+    expect(mismatched.hybrid.retrievalMode).toBe('bm25+card-lexical')
+    expect(swapped.embedQuery).not.toHaveBeenCalled()
+
+    // 来源一致时稠密路照常：该 fixture 卡片向量齐全，模式为 full
+    const matched = await retrievePassageContext(index, 'MultiUN results', { embedder })
+    expect(matched.hybrid.retrievalMode).toBe('full')
+  })
+
   it('空段落索引返回空上下文而不抛错', async () => {
     const { index } = fakeIndex()
     const result = await retrievePassageContext({ ...index, passages: [] }, 'x', {})

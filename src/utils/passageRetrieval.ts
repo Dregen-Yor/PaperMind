@@ -248,8 +248,15 @@ export async function retrievePassageContext(
   // 上面的 try/catch **之后**才执行的——手搓或损坏的索引若在这里抛出去，调用方看到的
   // 是异常，而不是契约承诺的「降级到词法模式」。产品路径由 `parsePassageIndex` 拦住
   // 这两种不自洽，但本模块的入参类型不保证它来过。
+  //
+  // 还要查**来源**（R31）：记录写了 `embedderId` 就必须与本次的模型一致。只查维度与
+  // 数组长度挡不住同维模型互换——两边向量各自成型、点积有值，排名看似合理实为乱序。
+  // 来源不一致时连 `embedQuery` 都不该发出（省下这次模型调用，直接按词法降级）；
+  // 记录没写 `embedderId`（阶段① 记录、手搓 fixture）时保持原判据不变。
   const vectorDim = index.vectorDim ?? 0
-  const passagesUsable = index.passageVectors !== undefined
+  const embedderMatches = index.embedderId === undefined || opts.embedder?.id === index.embedderId
+  const passagesUsable = embedderMatches
+    && index.passageVectors !== undefined
     && vectorDim > 0
     && index.passageVectors.length === passages.length
   let queryVector: Float32Array | undefined
