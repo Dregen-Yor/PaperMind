@@ -245,7 +245,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { useChatStore, PROMPT_TEMPLATES, type LLMProfile } from '../stores/chat'
@@ -261,6 +261,10 @@ const indexProfileIdLocal = ref(indexProfileId.value)
 const abstractTokenLocal = ref(abstractToken.value)
 const treeEnabledLocal = ref(treeEnabled.value)
 const rebuildingTrees = ref(false)
+
+// 本地镜像必须跟着 store 走：视图挂载时 store 往往还没 init（init 在 App 的 onMounted 里），
+// 一次性快照会把「已存开启」显示成关闭（默认关闭后的新方向），诱使用户再拨一次
+watch(treeEnabled, value => { treeEnabledLocal.value = value })
 
 // ── Dialog state ──
 const dialogVisible = ref(false)
