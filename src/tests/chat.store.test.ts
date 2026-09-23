@@ -545,7 +545,9 @@ describe('语义树默认值', () => {
     vi.clearAllMocks()
     vi.mocked(window.db.chat.listConversations).mockResolvedValue([])
     vi.mocked(window.db.index.list).mockResolvedValue([])
-    vi.mocked(window.db.settings.get).mockResolvedValue(undefined)
+    // 没有这一行时真实桥返回的是 null（electron/db/index.ts：`row ? JSON.parse(row.value) : null`），
+    // 不是 undefined——mock 成 undefined 会走一条生产不存在的分支
+    vi.mocked(window.db.settings.get).mockResolvedValue(null)
   })
 
   it('未存过偏好时 treeEnabled 默认 false', async () => {
@@ -556,7 +558,7 @@ describe('语义树默认值', () => {
 
   it('存过 true 时不被强制覆盖', async () => {
     vi.mocked(window.db.settings.get).mockImplementation(async (key: string) =>
-      key === 'semantic_tree_enabled' ? 'true' : undefined)
+      key === 'semantic_tree_enabled' ? 'true' : null)
     const store = useChatStore()
     await store.init()
     expect(store.treeEnabled).toBe(true)
@@ -566,7 +568,7 @@ describe('语义树默认值', () => {
     // settings.get 在 IPC 那头是 JSON.parse(row.value)：setTreeEnabled(true) 写进去的是布尔，
     // 读回来也是布尔。只认字符串 'true' 会让开关在重启后被自己的默认值悄悄吃掉。
     vi.mocked(window.db.settings.get).mockImplementation(async (key: string) =>
-      key === 'semantic_tree_enabled' ? true : undefined)
+      key === 'semantic_tree_enabled' ? true : null)
     const store = useChatStore()
     await store.init()
     expect(store.treeEnabled).toBe(true)
@@ -638,5 +640,66 @@ describe('向量模型生命周期与提问热路径', () => {
     expect(reply).toBe('Answer')
     // 少了这条断言：把 embedder 从检索依赖里漏掉也照样全绿（检索静默退回词法）
     expect(fakeEmbedder.embedQuery).toHaveBeenCalled()
+  })
+
+  it('模型就绪后续写（continueMessage）同样走向量混合检索：依赖真的到了那条路径', async () => {
+    // 与上一条同构，但换到另一条真实回答路径：`continueMessage` 漏接 passageDeps 时，
+    // 上一条用例照样全绿（它只钉住 generateReply 那一处调用点）
+    vi.mocked(window.db.index.get).mockResolvedValue(null)
+    const store = useChatStore()
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+    const write = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    const stage1 = JSON.parse(write[1] as string) as { passages: unknown[] }
+    const dense = JSON.stringify({
+      ...stage1, stage: 2, embedderId: EMBEDDER_ID, vectorDim: 3,
+      passageVectors: encodeVectors(stage1.passages.map(() => new Float32Array([1, 0, 0]))),
+    })
+    vi.mocked(window.db.index.get).mockResolvedValue({ indexJson: dense, pagesJson: write[2] as string })
+    vi.mocked(createTransformersEmbedder).mockResolvedValue(fakeEmbedder)
+    await store.init()
+    await vi.waitFor(() => expect(store.vectorModelState).toBe('ready'))
+    // 续写走非流式：改写与生成都是 JSON 应答（不带 stream）
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: '，这是续写部分。' } }] }),
+    }) as never
+
+    const conv = await store.newConversation('c', ['paper-1'])
+    conv.messages.push(
+      { id: 'u1', role: 'user', content: '这篇论文用了什么方法？', timestamp: 1 },
+      { id: 'a1', role: 'assistant', content: '半截回答', timestamp: 2, truncated: true },
+    )
+    await store.continueMessage(conv.id, 'a1')
+
+    expect(conv.messages[1].content).toBe('半截回答，这是续写部分。')
+    // 续写这条路也必须把实例交给检索：没接上就静默退回词法，embedQuery 不会被调用
+    expect(fakeEmbedder.embedQuery).toHaveBeenCalled()
+  })
+
+  it('模型仍在下载时续写：不等模型，续写照常落库', async () => {
+    // 续写若改成 await 模型，本用例会一直挂到超时（与「提问不等待」同一条 R35 约束）
+    vi.mocked(createTransformersEmbedder).mockImplementation(() => new Promise(() => {}) as never)
+    const store = useChatStore()
+    await store.init()
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+    const write = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    vi.mocked(window.db.index.get).mockResolvedValue({
+      indexJson: write[1] as string, pagesJson: write[2] as string,
+    })
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: '，这是续写部分。' } }] }),
+    }) as never
+
+    const conv = await store.newConversation('c', ['paper-1'])
+    conv.messages.push(
+      { id: 'u1', role: 'user', content: '这篇论文用了什么方法？', timestamp: 1 },
+      { id: 'a1', role: 'assistant', content: '半截回答', timestamp: 2, truncated: true },
+    )
+    await store.continueMessage(conv.id, 'a1')
+
+    expect(conv.messages[1].content).toBe('半截回答，这是续写部分。')
+    // 模型自始至终没就绪：这一次续写就是按词法模式服务的
+    expect(store.vectorModelState).toBe('loading')
   })
 })
