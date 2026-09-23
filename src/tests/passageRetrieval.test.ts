@@ -9,7 +9,7 @@ import {
   DEFAULT_HYBRID_OPTIONS, fillPassageBudget, retrievePassageContext,
 } from '../utils/passageRetrieval'
 import { encodeVectors } from '../utils/embedder'
-import { CONTEXT_GROUP_SEPARATOR } from '../utils/contextTrace'
+import { CONTEXT_GROUP_SEPARATOR, materializeContext } from '../utils/contextTrace'
 import type { Passage } from '../utils/passages'
 
 const counter = createEstimatingTokenCounter()
@@ -179,6 +179,22 @@ describe('retrievePassageContext（模式判定与组装）', () => {
     expect(result.contextGroups.length).toBeGreaterThan(0)
   })
 
+  it('向量不自洽时降级而不抛错（查询向量维度不符 / 段落向量数不齐）', async () => {
+    const { index, embedder } = fakeIndex()
+    // 3 长度的查询向量（索引是 4 维）：没有长度判定的话，dense 路会在 `cosineSimilarity`
+    // 里抛「向量维度不一致」——而它在 `fusePassageCandidates` 内部执行，已经过了 embedder 的
+    // try/catch，异常会直接冒给调用方，而不是落回词法模式
+    const wrongDim: Embedder = { ...embedder, embedQuery: async () => new Float32Array([1, 1, 0]) }
+    const mismatched = await retrievePassageContext(index, 'corpus', { embedder: wrongDim })
+    expect(mismatched.hybrid.retrievalMode).toBe('bm25+card-lexical')
+    expect(mismatched.contextGroups.length).toBeGreaterThan(0)
+    // 段落向量比段落少一个：`passageVectors[passage.order]` 会取到 undefined
+    const shortIndex: PassageIndex = { ...index, passageVectors: (index.passageVectors as Float32Array[]).slice(0, 3) }
+    const shortVectors = await retrievePassageContext(shortIndex, 'corpus', { embedder })
+    expect(shortVectors.hybrid.retrievalMode).toBe('bm25+card-lexical')
+    expect(shortVectors.contextGroups.length).toBeGreaterThan(0)
+  })
+
   it('任意输入下上下文 token 总数（含分隔符）不超过预算', async () => {
     const { index, embedder } = fakeIndex()
     for (const budget of [1, 5, 10, 4096]) {
@@ -232,6 +248,42 @@ describe('retrievePassageContext（模式判定与组装）', () => {
     // 收紧到只放得下 3 号（约 11 token）后选中段落不以 0 号开头，第二张卡片的标题才会出现
     const result = await retrievePassageContext(index, 'MultiUN results', { embedder, maxTokens: 15 })
     expect(result.sources.some(source => /^Pages \d+–\d+: MultiUN results$/.test(source))).toBe(true)
+  })
+
+  it('预算放得下两段不相邻段落时，组装出两个组、两个真实页区间', async () => {
+    const { index, embedder } = fakeIndex()
+    // 0 号（页 1）与 2 号（页 3）各放得下、1 号（页 2）放不下：选中段落页序不连续，
+    // 于是两个 ContextGroup、两个真实页区间，中间必须落一个分隔符。
+    // 预算由 fixture 自己的 tokenCount 算出（0 + 2 + 一个分隔符），不依赖分词细节
+    const budget = index.passages[0].tokenCount + index.passages[2].tokenCount + index.separatorTokens
+    const result = await retrievePassageContext(index, 'corpus', { embedder, maxTokens: budget })
+    expect(result.contextGroups).toHaveLength(2)
+    expect(result.hybrid.selectedPassageIds).toEqual([index.passages[0].id, index.passages[2].id])
+    expect(result.context).toContain(CONTEXT_GROUP_SEPARATOR)
+    expect(result.context).toBe([index.passages[0].text, index.passages[2].text].join(CONTEXT_GROUP_SEPARATOR))
+    expect(result.selected).toHaveLength(2)
+    expect(result.sources).toHaveLength(2)
+    expect(new Set(result.sources).size).toBe(2)
+    expect(result.selected[0].endPage).toBeLessThan(result.selected[1].startPage)
+  })
+
+  it('填充的预算记法与物化同口径（R29）：预算扫描下 materializeContext 从不截断', async () => {
+    const { index, embedder } = fakeIndex()
+    // 与建索引用的估算器逐字同口径的分词器（非空文本都是 max(1, round(len/4)) 个 token）：
+    // 两边数出的 token 必须一样，「填充保证不截断」才是可证的（见 passageRetrieval.ts 文件头）
+    const exact = { tokenize: (text: string) => (text.length === 0 ? [] : Array(Math.max(1, Math.round(text.length / 4))).fill('x')) }
+    const total = index.passages.reduce((sum, passage) => sum + passage.tokenCount, 0)
+    const multiGroupBudgets: number[] = []
+    for (let budget = 1; budget <= total + index.separatorTokens + 1; budget++) {
+      const result = await retrievePassageContext(index, 'corpus', { embedder, maxTokens: budget })
+      const materialized = materializeContext(result.contextGroups, exact, budget)
+      expect(materialized.truncated, `budget=${budget}`).toBe(false)
+      expect(materialized.tokenCount, `budget=${budget}`).toBeLessThanOrEqual(budget)
+      if (result.contextGroups.length >= 2) multiGroupBudgets.push(budget)
+    }
+    // 扫描里必须至少出现一个多组预算：组间分隔符那一项只在多组时非零，单组扫描等于
+    // 没检验「填充的 run 规则与组装的分组规则同规则」——而那正是本证明的承重部分
+    expect(multiGroupBudgets.length).toBeGreaterThan(0)
   })
 
   it('空段落索引返回空上下文而不抛错', async () => {
@@ -316,15 +368,32 @@ describe('fillPassageBudget', () => {
   })
 
   it('不跨小节扩展：不同 subsection 的邻段不入选', () => {
-    const split = buildPassages(['Methods\nonly para here', 'Experiments\nanother para here'], counter, { minTokens: 1 })
+    // 三小节各一段（真标题），页序相邻但小节互不相同 → 没有合法的邻段可扩。
+    // 2 号用 tokenCount 覆盖成放不下（与上面两例同法）：**预算必须放得下 0 与 1 两段**
+    // （= 两段 token 之和，两段页序相邻、无分隔符），否则 1 号会因预算被拒，
+    // 判定就落回「无论有没有同小节守卫都选不进 1 号」的空转。
+    // 而「整篇放得下」的短路也必须绕开——总 token 里那 10_000 让它不成立：
+    // 若预算等于总 token，fill 直接返回全部段落，这条用例同样与守卫无关。
+    // 有守卫时：0 号入选，1 号只能靠自己的候选分 0.1 入选，neighbourOrders 为空；
+    // 没有守卫时：0 号入选会以 10 × 0.5 = 5 把 1 号当邻段塞进堆（压过 0.1），
+    // 1 号就会记为邻段选中。
+    const split = buildPassages(
+      ['Methods\nonly para here', 'Experiments\nanother para here', 'Discussion\na third para here'],
+      counter,
+      { minTokens: 1 },
+    ).map((passage, order) => (order === 2 ? { ...passage, tokenCount: 10_000 } : passage))
     const fill = fillPassageBudget({
       ...base,
       passages: split,
-      candidates: [{ order: 0, score: 10, fromNeighbour: false }, { order: 1, score: 0.1, fromNeighbour: false }],
+      candidates: [
+        { order: 0, score: 10, fromNeighbour: false },
+        { order: 1, score: 0.1, fromNeighbour: false },
+        { order: 2, score: 3, fromNeighbour: false },
+      ],
       separatorTokens: 0,
-      maxTokens: split[0].tokenCount,   // 只放得下 0 号
+      maxTokens: split[0].tokenCount + split[1].tokenCount,   // 恰好放得下 0 与 1 号
     })
-    expect(fill.selectedOrders).toEqual([0])
+    expect(fill.selectedOrders).toEqual([0, 1])
     expect(fill.neighbourOrders).toEqual([])
   })
 

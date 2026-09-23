@@ -2,14 +2,23 @@
  * 段落级混合检索（方案 §4）：三路加权 RRF 融合 → 4096 预算填充 + 同小节邻段扩展
  * → 原文顺序组装。查询阶段零 LLM 调用（`llmCalled: false`）。
  *
- * 关键口径：预算判定必须与 `materializeContext` 的计法一致——「已用 + 新组分隔符 +
- * 段落 token ≤ 预算」，这样最终物化永不截断（`contextTruncated === false`）。
+ * 关键口径：预算判定与 `materializeContext` 的计法一致——「已用 + 新组分隔符 +
+ * 段落 token ≤ 预算」。**这个等式只在计数同源时成立**，成立时最终物化永不截断
+ * （`contextTruncated === false`）。
+ *
+ * 同源不是自动的：填充读的是**建索引时**写下的 `Passage.tokenCount` 与
+ * `PassageIndex.separatorTokens`，填充自己不分词；而 `materializeContext` 只认
+ * **调用方传进去的那个分词器**。`PassageIndex` 上没有任何字段记录当时用的计数器
+ * （`separatorTokens` 只是数目，不是计数器身份），所以拿估算器建的索引配冻结的
+ * BGE-M3 分词器物化时，填充按估算数超额放段、物化真实截断——不报错，静默丢原文。
+ * 调用方必须让三者同源：建索引的计数器 → 落盘的 `Passage.tokenCount` /
+ * `separatorTokens` → 交给 `materializeContext` 的分词器（见 `PassageRetrievalOptions.countTokens`）。
  */
 import { buildBm25Scorer } from './bm25'
 import { cardEmbedText, cosineSimilarity, type Embedder } from './embedder'
 import { CONTEXT_GROUP_SEPARATOR, type ContextGroup } from './contextTrace'
 import type { IndexNode, RetrievalResult } from './pageIndex'
-import { createEstimatingTokenCounter, type Passage, type TokenCounter } from './passages'
+import type { Passage, TokenCounter } from './passages'
 import type { PassageIndex } from './passageIndex'
 import { createMaxHeap } from './priorityQueue'
 import { reciprocalRankFusion, type RankedItem } from './rrf'
@@ -73,7 +82,13 @@ export type PassageRetrievalResult = RetrievalResult & { hybrid: HybridPassageDi
 
 export interface PassageRetrievalOptions {
   embedder?: Embedder
-  /** 段落 token 计数器；bench 注入冻结的 BGE-M3 分词器，产品用估算器 */
+  /**
+   * 段落 token 计数器。**填充阶段不读这个选项**：预算判定只用索引里建库时写下的
+   * `Passage.tokenCount` 与 `PassageIndex.separatorTokens`，二者才是权威口径
+   * （填充自己不做任何分词）。这个选项存在，是为了让调用方（bench 注入冻结的
+   * BGE-M3 分词器）与建索引共用同一个计数器，并把同一个计数器交给
+   * `materializeContext`；三者不同源时「物化永不截断」不成立（见文件头注释）。
+   */
   countTokens?: TokenCounter
   maxTokens?: number
   rrfK?: number
@@ -219,7 +234,7 @@ export async function retrievePassageContext(
   const sectionWeight = opts.sectionWeight ?? DEFAULT_HYBRID_OPTIONS.sectionWeight
   const neighbourFactor = opts.neighbourFactor ?? DEFAULT_HYBRID_OPTIONS.neighbourFactor
   const skipLimit = opts.skipLimit ?? DEFAULT_HYBRID_OPTIONS.skipLimit
-  const countTokens = opts.countTokens ?? createEstimatingTokenCounter()
+  // `opts.countTokens` 在这里**故意不读**（填充只用索引里落盘的计数），别再引入一个本地计数器
   const passages = index.passages
   if (passages.length === 0) return emptyResult('bm25')
 
@@ -228,7 +243,15 @@ export async function retrievePassageContext(
 
   // 查询向量是唯一需要 await 的一步。模型不可用**不发异常给调用方**：
   // 这一次提问按可用信号降级即可，下一次模型就绪后自然恢复（方案 §8）
-  const passagesUsable = index.passageVectors !== undefined && (index.vectorDim ?? 0) > 0
+  //
+  // 判定里带上数组长度与维度：`cosineSimilarity` 对维度不符会抛错，而 dense 路是在
+  // 上面的 try/catch **之后**才执行的——手搓或损坏的索引若在这里抛出去，调用方看到的
+  // 是异常，而不是契约承诺的「降级到词法模式」。产品路径由 `parsePassageIndex` 拦住
+  // 这两种不自洽，但本模块的入参类型不保证它来过。
+  const vectorDim = index.vectorDim ?? 0
+  const passagesUsable = index.passageVectors !== undefined
+    && vectorDim > 0
+    && index.passageVectors.length === passages.length
   let queryVector: Float32Array | undefined
   if (opts.embedder && passagesUsable) {
     try {
@@ -237,7 +260,7 @@ export async function retrievePassageContext(
       queryVector = undefined
     }
   }
-  const denseAvailable = queryVector !== undefined && passagesUsable
+  const denseAvailable = queryVector !== undefined && passagesUsable && queryVector.length === vectorDim
 
   const bm25 = buildBm25Scorer(passages.map(passage => passage.searchText))
 
