@@ -17,8 +17,8 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 }))
 
 // indexPaper 一进来就 `void ensureEmbedder()`（段落索引的阶段②）：真实实现会动态 import
-// transformers，在 jsdom 里意味着一次权重下载尝试与 indexedDB 访问。单测里模型一律缺席，
-// 阶段① 与卡片路径都不依赖它。
+// transformers 并真的发起权重下载（取缓存时还会碰 jsdom 未实现的 indexedDB）。
+// 单测里模型一律缺席，阶段① 与卡片路径都不依赖它。
 vi.mock('../utils/transformersEmbedder', () => ({
   createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
 }))

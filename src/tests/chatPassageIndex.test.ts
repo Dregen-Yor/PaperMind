@@ -10,8 +10,8 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   GlobalWorkerOptions: { workerSrc: '' },
 }))
 
-// R10：indexPaper 第一件事就是 `void ensureEmbedder()`，真实实现会动态 import transformers
-// 并在 jsdom 里尝试下载权重（createIdbStore 还会碰未实现的 indexedDB）
+// R10：indexPaper 第一件事就是 `void ensureEmbedder()`，而真实实现会动态 import transformers
+// 并真的发起权重下载（取缓存时还会碰 jsdom 未实现的 indexedDB）。单测里模型一律缺席。
 vi.mock('../utils/transformersEmbedder', () => ({
   createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
 }))
