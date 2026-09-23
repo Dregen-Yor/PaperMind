@@ -45,6 +45,9 @@ describe('indexPaper 的代次保护', () => {
     capturedPersist = undefined
     vi.mocked(window.db.paper.readFile).mockResolvedValue('BASE64')
     vi.mocked(window.db.index.get).mockResolvedValue(null)
+    // 索引配置变更会顺带启动重建队列（它先遍历论文表）：本组用例不涉及重建，给个空表，
+    // 也免得上一个用例的实现泄漏过来
+    vi.mocked(window.db.paper.list).mockResolvedValue([])
   })
 
   it('正对照：没有失效时 persist 确实写盘', async () => {
@@ -68,6 +71,17 @@ describe('indexPaper 的代次保护', () => {
     await store.indexPaper('paper-1')
     const stalePersist = capturedPersist!
     await store.updateProfile(store.indexProfileId, { model: 'another-model' })
+    // 先让旧代次写：此刻没有任何新一代开始（否则「新一代的 begin」也会让旧代次作废，
+    // 这个断言就证明不了「切换 profile 本身会作废在途构建」）
+    await stalePersist(finalIndex, 3)
+    expect(window.db.index.set).not.toHaveBeenCalled()
+  })
+
+  it('切换索引配置（setIndexProfileId）同样让在途代次的写入作废', async () => {
+    const store = useChatStore()
+    await store.indexPaper('paper-1')
+    const stalePersist = capturedPersist!
+    await store.setIndexProfileId('another-profile')
     await stalePersist(finalIndex, 3)
     expect(window.db.index.set).not.toHaveBeenCalled()
   })
