@@ -48,6 +48,16 @@ describe('buildPassages', () => {
     for (const passage of passages) expect(passage.tokenCount).toBeLessThanOrEqual(120)
   })
 
+  it('没有句子边界的超长单行走字符预算兜底：逐字无损且每段不超 maxTokens', () => {
+    // 单页、单行、无空行、无标题行：整页就是一个原子，切分只可能来自字符预算兜底。
+    // 前半段带空格（切口回退到空白之后的路径），后半段是没有任何空白的中文连续串（硬切的最坏情况）。
+    const page = `${'the quick brown fox '.repeat(10)}${'这是一段没有任何空白字符的连续中文正文'.repeat(20)}`
+    const passages = buildPassages([page], counter, { minTokens: 20, maxTokens: 40 })
+    expect(passages.length).toBeGreaterThan(1)
+    expect(passages.map(p => p.text).join('')).toBe(page)
+    for (const passage of passages) expect(passage.tokenCount).toBeLessThanOrEqual(40)
+  })
+
   it('跨页自然段按页分片，pieces 页号递增且连续', () => {
     const pages = ['Abstract\nA sentence that continues', 'onto the next page.']
     const passages = buildPassages(pages, counter, { minTokens: 1 })

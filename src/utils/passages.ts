@@ -22,7 +22,10 @@ export interface Passage {
   text: string
   /** 仅供打分与向量使用的轻度清洗文本（去页眉页脚/页码、复原断词） */
   searchText: string
-  /** 由注入的 token 计数器给出，按 piece 累加（与 materializeContext 的计法一致） */
+  /**
+   * 由注入的 token 计数器给出，按 piece 累加（与 materializeContext 的计法一致）；
+   * 含每个 piece 内原子的 `\n`/`\n\n` 分隔符，故可能略高于 `maxTokens`。
+   */
   tokenCount: number
   prevId: string | null
   nextId: string | null
@@ -35,7 +38,15 @@ export type TokenCounter = (text: string) => number
 export interface PassageOptions {
   /** 自然段低于此 token 数即向后合并，直到达标或遇到小节边界。默认 120 */
   minTokens?: number
-  /** 自然段超过此 token 数即在句子边界切开。默认 350 */
+  /**
+   * 切分判据：自然段超过此 token 数即在句子边界切开（必要时按字符预算硬切）。默认 350。
+   *
+   * 它不是 `Passage.tokenCount` 的上界：切分决策按原子文本（不含分片分隔符）估算，
+   * 而 `tokenCount` 是对 `pieces` 逐片计数后求和，piece 内每多一个原子就多带一个
+   * `\n` / `\n\n` 分隔符（本模块估算口径下约 1 token），小原子很多时 `tokenCount`
+   * 可接近 `maxTokens` 的 2 倍。下游预算判断一律用 `tokenCount`，不得用 `maxTokens`
+   * 当段落上界。
+   */
   maxTokens?: number
 }
 
