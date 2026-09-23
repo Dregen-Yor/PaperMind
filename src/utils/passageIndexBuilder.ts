@@ -101,9 +101,11 @@ function reuseStage1(existing: PassageIndex | undefined, plan: PassageIndexBuild
  * 与向量所依据的段落是同一个数组）这些向量依然有效，不该扔。
  *
  * 三元组必须**一起**搬，不能只搬数组：少了 `embedderId` 记录就自相矛盾（有向量却说不出是谁
- * 算的），而且下次换一个 embedder 构建时 `planPassageIndexRebuild` 是拿 `undefined` 去比 id，
- * 判断纯属撞运气。任何一处不自洽都不搬——向量数 ≠ 段落数、某条向量长度不等于 `vectorDim`
- * （落盘格式不带每行长度，错位的向量只会在检索时静默算错）——降级到词法检索是可接受的代价。
+ * 算的），而且 `planPassageIndexRebuild` 的向量判定正是 `stored.embedderId !== args.embedderId`
+ * ——id 缺席时它恒为「要重算」，于是「同一个模型可以复用」与「换了模型必须重算」这两种情况
+ * 再也分不开，每次构建都得白算一遍。任何一处不自洽都不搬——向量数 ≠ 段落数、某条向量长度
+ * 不等于 `vectorDim`（落盘格式不带每行长度，错位的向量只会在检索时静默算错）——降级到词法
+ * 检索是可接受的代价。
  */
 function carryStoredPassageVectors(
   existing: PassageIndex | undefined,
