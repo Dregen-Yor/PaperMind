@@ -451,6 +451,8 @@ describe('retrieveRagContext 的段落路径', () => {
       {},
     )
     expect(retrieval.llmCalls).toBe(0)
+    // 计数器之外再钉一次真实入参：只凭它，漏计数的分支仍会绿
+    expect(llm).not.toHaveBeenCalled()
     expect(retrieval.retrievals[0].hybrid?.retrievalMode).toBe('bm25')
     expect(retrieval.retrievals[0].context).toContain('Europarl')
   })
@@ -488,5 +490,29 @@ describe('retrieveRagContext 的段落路径', () => {
       {},
     )
     expect(retrieval.retrievalQuery).not.toBe('and the datasets?')
+    // 改写输出要真的流回检索链路，而不是靠 mock 的回落分支或空串通过
+    expect(retrieval.retrievalQuery).toBe('rewritten query')
+  })
+
+  it('混合论文逐篇分派：有段落索引的走段落路径，没有的仍走旧路径', async () => {
+    // 过渡态：一篇已重建（v2 段落索引）、一篇仍是旧平面索引，各自按手上的索引分派
+    const llm = vi.fn(async () => '[{"id":0,"score":9},{"id":1,"score":2}]')
+    const retrieval = await retrieveRagContext(
+      [
+        { tree: passageIndex.tree, pages: passagePages, passageIndex },
+        { tree: cardsToIndexNodes(cards, passages), pages: passagePages },
+      ],
+      'Europarl datasets',
+      [],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.retrievals).toHaveLength(2)
+    expect(retrieval.retrievals[0].hybrid).toBeDefined()
+    expect(retrieval.retrievals[1].hybrid).toBeUndefined()
+    // 只有旧路径那篇发出打分请求：段落那篇检索阶段零 LLM 调用
+    expect(retrieval.llmCalls).toBe(1)
+    expect(retrieval.treeRouted).toBe(false)
   })
 })
