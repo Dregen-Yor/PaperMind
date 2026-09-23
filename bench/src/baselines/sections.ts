@@ -1,11 +1,13 @@
 import type { TextTokenizer } from '../traditionalRag/types'
+import { isHeadingLine } from '../../../src/utils/sectionHeadings'
 import { buildTokenStream, spanPages, type PageToken } from './tokenStream'
 
 /**
  * 长章节基线的确定性章节边界提取（计划 §2.3：只依赖 canonical 文本中已有的标题，
  * 无 LLM 调用，保留全部原始页号映射）。
- * 识别规则刻意保守：Markdown 标题、短编号标题、已知英文节名、中文「第X章/节」与「一、」
- * ；编号行过长或过长句式的「标题样」假阳性一律不当作标题。
+ * 标题行识别已移入 `src/utils/sectionHeadings.ts`，本文件只再导出：段落切分与章节
+ * 区域必须共用同一份规则。规则本身刻意保守（Markdown 标题、短编号标题、已知英文
+ * 节名、中文「第X章/节」与「一、」），编号行过长或过长句式的假阳性一律不当作标题。
  */
 export interface Section {
   title: string
@@ -16,31 +18,12 @@ export interface Section {
   endPage: number
 }
 
-const MARKDOWN_HEADING = /^#{1,6}\s+(.+)$/
-const NUMBERED_HEADING = /^(\d+(?:\.\d+)*)\.?\s+(.+)$/
-const KNOWN_ENGLISH_HEADING = /^(abstract|introduction|background|related work|preliminaries|motivation|methods?|methodology|approach|model|experiments?|experimental setup|evaluation|results?( and discussion)?|discussion|analysis|conclusions?|limitations?|references|acknowledg(e)?ments?|appendix|appendices)$/i
-const CN_CHAPTER = /^(第[一二三四五六七八九十百\d]+[章节部分])\s*\S{0,60}$/
-const CN_ENUMERATED = /^[一二三四五六七八九十]+、\s*\S{1,60}$/
-
-/** 编号「标题」的内容部分长度/词数上限：超过即按正文处理（假阳性防线）。 */
-const MAX_HEADING_CHARS = 100
-const MAX_HEADING_WORDS = 20
-
-export function isHeadingLine(text: string): string | null {
-  const trimmed = text.trim()
-  if (!trimmed) return null
-  const markdown = MARKDOWN_HEADING.exec(trimmed)
-  if (markdown) return markdown[1].trim()
-  const cn = CN_CHAPTER.exec(trimmed) ?? CN_ENUMERATED.exec(trimmed)
-  if (cn) return trimmed
-  if (KNOWN_ENGLISH_HEADING.test(trimmed)) return trimmed
-  const numbered = NUMBERED_HEADING.exec(trimmed)
-  if (numbered) {
-    const rest = numbered[2].trim()
-    if (rest.length > 0 && rest.length <= MAX_HEADING_CHARS && rest.split(/\s+/).length <= MAX_HEADING_WORDS && !/[。;；]$/.test(rest)) return rest
-  }
-  return null
-}
+/**
+ * 标题行识别已移入 `src/utils/sectionHeadings.ts`：段落切分与本章节边界必须
+ * 共用同一份规则，否则同一条标题在两处会有不同判定。这里只做再导出，
+ * 保持 bench 内部既有的 import 路径不变。
+ */
+export { isHeadingLine }
 
 /**
  * 章节列表首尾相接覆盖整个 token 流：首个标题之前是 title 为空的 preamble 节。
