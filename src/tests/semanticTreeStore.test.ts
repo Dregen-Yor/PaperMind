@@ -92,11 +92,16 @@ const KEYED_PROFILE = [{
 
 /**
  * settings.get：给出填好 Key 的配置，其余键返回 null（与无保存设置等价）。
+ * 语义树必须显式返回 true：自方案 §6.3 起它默认关闭，而这一组用例验证的正是
+ * 「用户把开关打开后」的建树/检索行为——不显式开启的话它们只会撞上总开关的短路。
  * 每次返回新的数组与对象：init 拿到的就是 store 自己的副本，
  * 用例里的 updateProfile 才不会把模块级常量改掉、泄漏给后面的用例。
  */
-const keyedSettings = (key: string) =>
-  Promise.resolve(key === 'llm_profiles' ? KEYED_PROFILE.map(profile => ({ ...profile })) : null)
+const keyedSettings = (key: string) => {
+  if (key === 'llm_profiles') return Promise.resolve(KEYED_PROFILE.map(profile => ({ ...profile })))
+  if (key === 'semantic_tree_enabled') return Promise.resolve(true)
+  return Promise.resolve(null)
+}
 
 /** 默认索引配置（provider openai / model gpt-4o）下、指定模型对应的建树配置指纹。 */
 const configHashFor = (model: string) => semanticTreeConfigHash({
@@ -124,10 +129,10 @@ describe('useChatStore — 语义树开关与状态', () => {
     global.fetch = fakeFetch() as any
   })
 
-  it('默认开启语义树（无需任何已保存设置）', async () => {
+  it('treeEnabled 默认关闭（方案 §6.3，无需任何已保存设置）', async () => {
     const store = useChatStore()
     await store.init()
-    expect(store.treeEnabled).toBe(true)
+    expect(store.treeEnabled).toBe(false)
   })
 
   it('恢复已保存的关闭状态', async () => {

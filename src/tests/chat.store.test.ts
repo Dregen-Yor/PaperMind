@@ -534,3 +534,109 @@ describe('向量模型就绪后的补建', () => {
     expect(vi.mocked(window.db.paper.readFile)).not.toHaveBeenCalledWith('p-dense')
   })
 })
+
+/**
+ * 语义树退出默认路径（方案 §6.3）：默认关闭，只有显式存过「开」才开启。
+ * 设置页开关与建树代码都保留，变的只是默认值与加载判据。
+ */
+describe('语义树默认值', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    vi.mocked(window.db.chat.listConversations).mockResolvedValue([])
+    vi.mocked(window.db.index.list).mockResolvedValue([])
+    vi.mocked(window.db.settings.get).mockResolvedValue(undefined)
+  })
+
+  it('未存过偏好时 treeEnabled 默认 false', async () => {
+    const store = useChatStore()
+    await store.init()
+    expect(store.treeEnabled).toBe(false)
+  })
+
+  it('存过 true 时不被强制覆盖', async () => {
+    vi.mocked(window.db.settings.get).mockImplementation(async (key: string) =>
+      key === 'semantic_tree_enabled' ? 'true' : undefined)
+    const store = useChatStore()
+    await store.init()
+    expect(store.treeEnabled).toBe(true)
+  })
+
+  it('存过布尔 true（设置页写入的真实编码）同样不被强制覆盖', async () => {
+    // settings.get 在 IPC 那头是 JSON.parse(row.value)：setTreeEnabled(true) 写进去的是布尔，
+    // 读回来也是布尔。只认字符串 'true' 会让开关在重启后被自己的默认值悄悄吃掉。
+    vi.mocked(window.db.settings.get).mockImplementation(async (key: string) =>
+      key === 'semantic_tree_enabled' ? true : undefined)
+    const store = useChatStore()
+    await store.init()
+    expect(store.treeEnabled).toBe(true)
+  })
+})
+
+/**
+ * 向量模型生命周期（方案 §6.3 / §8）：启动点火、但任何一条提问路径都不等它加载。
+ */
+describe('向量模型生命周期与提问热路径', () => {
+  beforeEach(passageBuildEnv)
+
+  it('init 在后台点火加载向量模型：下载还没回来也不阻塞启动', async () => {
+    // 下载永不返回：init 只负责点火（模型在启动时就开始下，而不是等到第一次导入）
+    vi.mocked(createTransformersEmbedder).mockImplementation(() => new Promise(() => {}) as never)
+    const store = useChatStore()
+
+    await store.init()
+
+    expect(vi.mocked(createTransformersEmbedder)).toHaveBeenCalledTimes(1)
+    expect(store.loaded).toBe(true)
+    expect(store.vectorModelState).toBe('loading')
+  })
+
+  it('模型仍在下载时提问：不等待模型，按词法模式照常回答', async () => {
+    // 阶段① 与提问都不依赖模型：这两条路径一旦 await 了它，本用例会直接超时
+    vi.mocked(createTransformersEmbedder).mockImplementation(() => new Promise(() => {}) as never)
+    const store = useChatStore()
+    await store.init()
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+    const write = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    vi.mocked(window.db.index.get).mockResolvedValue({
+      indexJson: write[1] as string, pagesJson: write[2] as string,
+    })
+    // 卡片调用（阶段③）挂起不管；生成请求按 SSE 返回
+    global.fetch = vi.fn((_url: string, init: any) =>
+      JSON.parse(init.body).stream ? Promise.resolve(sse(['Answer'])) : new Promise(() => {})) as never
+
+    const conv = await store.newConversation('c', ['paper-1'])
+    const reply = await store.sendMessage(conv.id, '这篇论文的核心机制是什么？')
+
+    expect(reply).toBe('Answer')
+    // 模型自始至终没就绪：这一次提问就是按词法模式服务的
+    expect(store.vectorModelState).toBe('loading')
+  })
+
+  it('模型就绪后提问走向量混合检索（实例真的注入到检索依赖里）', async () => {
+    vi.mocked(window.db.index.get).mockResolvedValue(null)
+    const store = useChatStore()
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+    // 阶段① 记录由 store 自己写（形态与生产逐字一致），再补成「向量就是这个模型算的」
+    const write = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    const stage1 = JSON.parse(write[1] as string) as { passages: unknown[] }
+    const dense = JSON.stringify({
+      ...stage1, stage: 2, embedderId: EMBEDDER_ID, vectorDim: 3,
+      passageVectors: encodeVectors(stage1.passages.map(() => new Float32Array([1, 0, 0]))),
+    })
+    vi.mocked(window.db.index.get).mockResolvedValue({ indexJson: dense, pagesJson: write[2] as string })
+    // 模型这次加载成功：init 的点火会把实例留在 store 里
+    vi.mocked(createTransformersEmbedder).mockResolvedValue(fakeEmbedder)
+    await store.init()
+    await vi.waitFor(() => expect(store.vectorModelState).toBe('ready'))
+    global.fetch = vi.fn((_url: string, init: any) =>
+      JSON.parse(init.body).stream ? Promise.resolve(sse(['Answer'])) : new Promise(() => {})) as never
+
+    const conv = await store.newConversation('c', ['paper-1'])
+    const reply = await store.sendMessage(conv.id, '这篇论文用了什么方法？')
+
+    expect(reply).toBe('Answer')
+    // 少了这条断言：把 embedder 从检索依赖里漏掉也照样全绿（检索静默退回词法）
+    expect(fakeEmbedder.embedQuery).toHaveBeenCalled()
+  })
+})

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { extractPages, type IndexNode } from '../utils/pageIndex'
-import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
+import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex, type RagPipelineDeps } from '../utils/ragPipeline'
 import { buildEvidenceBlocks, hasExactPagePartition, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
 import { createBuildGeneration } from '../utils/buildGeneration'
 import type { Embedder } from '../utils/embedder'
@@ -115,7 +115,10 @@ export interface TreeRebuildSummary {
 
 const NEW_CONVERSATION_TITLE = '新对话'
 const LEGACY_CONVERSATION_TITLE = /^对话\s+\d+$/
-/** 语义树开关的持久化键；缺省为开启（方案 §8.2 要求关闭时功能仍完全可用）。 */
+/**
+ * 语义树开关的持久化键。语义树自方案 §6.3 起**默认关闭**（退出默认检索路径）：
+ * 只有显式存过「开」才开启；设置页开关与建树代码保留，是否删除另议。
+ */
 const TREE_ENABLED_KEY = 'semantic_tree_enabled'
 
 function isUntitledConversation(title: string): boolean {
@@ -351,8 +354,11 @@ export const useChatStore = defineStore('chat', () => {
   const indexingPapers = ref<Set<string>>(new Set())
   const indexedPapers = ref<Set<string>>(new Set())
   const abstractToken = ref('')
-  /** 轻量语义树总开关；关闭时全部检索退回现有平面路径 */
-  const treeEnabled = ref(true)
+  /**
+   * 轻量语义树总开关；默认关闭（方案 §6.3：语义树退出默认检索路径）。
+   * 用户显式开启后功能完全可用，代码与设置页开关都保留。
+   */
+  const treeEnabled = ref(false)
   /** 已有可用语义树的论文 */
   const treeReadyPapers = ref<Set<string>>(new Set())
   /** 正在后台建树的论文 */
@@ -425,12 +431,19 @@ export const useChatStore = defineStore('chat', () => {
     const ids = await window.db.index.list()
     indexedPapers.value = new Set(ids)
     abstractToken.value = (await window.db.settings.get('huggingface_token')) ?? ''
-    // 语义树默认开启；只有显式存过 false 才关闭
-    treeEnabled.value = (await window.db.settings.get(TREE_ENABLED_KEY)) !== false
+    // 语义树默认关闭（方案 §6.3）：只有显式存过「开」才开启，未存过一律保持关闭。
+    // 值经 IPC 边界 JSON 往返（settings.get 是 JSON.parse(row.value)），设置页写入的是
+    // 布尔、历史或外部来源可能是字符串，两种编码都认——只认其中一种会把用户的开启吞掉
+    const storedTreeEnabled = await window.db.settings.get(TREE_ENABLED_KEY)
+    if (storedTreeEnabled !== undefined) {
+      treeEnabled.value = storedTreeEnabled === true || storedTreeEnabled === 'true'
+    }
     // 只把「当前构建配置下能直接复用」的记录算作已就绪：模型或提示词换过之后
     // 仍留在集合里，UI 会谎报可用树的篇数（真正的校验在 parseTreeRecord）
     await refreshTreeReadyPapers()
     loaded.value = true
+    // 向量模型在启动时就点火下载（不阻塞启动）：等第一次导入才下载等于让首个用户白等一轮
+    void ensureEmbedder()
   }
 
   // ---------- Profile CRUD ----------
@@ -634,6 +647,19 @@ export const useChatStore = defineStore('chat', () => {
   /** 触发下载但不阻塞调用方（init / indexPaper / 切换索引 profile 时各调一次）。 */
   function ensureEmbedder(): Promise<Embedder | undefined> {
     return currentEmbedder()
+  }
+
+  /**
+   * 段落混合检索的注入项（`deps.passage`）：模型**已就绪就用**，没就绪这次提问就按
+   * 可用信号降级（词法模式）。
+   *
+   * 写成函数而不是常量：实例是随加载进度出现的，取用的那一刻才是它是否就绪的答案。
+   * **绝不 await**（R35）——提问不等待模型下载，否则冷启动的第一问会被 35 MB 下载挡住。
+   */
+  function passageDeps(): RagPipelineDeps {
+    return embedderInstance
+      ? { passage: { embedder: embedderInstance, countTokens: COUNT_TOKENS } }
+      : { passage: { countTokens: COUNT_TOKENS } }
   }
 
   /** 构建代次保护（方案 §8）：写盘前复核，过期的一代整体丢弃。 */
@@ -1260,6 +1286,8 @@ export const useChatStore = defineStore('chat', () => {
       generate,
       chatProfile.value.systemPrompt,
       { externalContext: context },
+      // 向量模型只在这里注入（不等它）：已就绪就走向量混合检索，没就绪按词法降级（R35）
+      passageDeps(),
     )
     // 来源只在这里构造一次，首次提问与重试两条写回分支共用。
     // `retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐
@@ -1359,6 +1387,8 @@ export const useChatStore = defineStore('chat', () => {
       priorTurns,
       (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
       userMessage.context ? { externalContext: userMessage.context } : {},
+      // 续写与首答同一条检索口径：向量模型已就绪就用，不等它（R35）
+      passageDeps(),
     )
     const messages = buildAnswerMessages(
       retrieval.context,
