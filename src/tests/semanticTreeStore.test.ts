@@ -16,6 +16,13 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   })),
 }))
 
+// indexPaper 一进来就 `void ensureEmbedder()`（段落索引的阶段②）：真实实现会动态 import
+// transformers，在 jsdom 里意味着一次权重下载尝试与 indexedDB 访问。单测里模型一律缺席，
+// 阶段① 与卡片路径都不依赖它。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
+
 import { useChatStore } from '../stores/chat'
 import {
   hashTreeSource, semanticTreeConfigHash, SEMANTIC_TREE_SCHEMA_VERSION,
@@ -497,14 +504,19 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
-  it('indexPaper 完成后在后台触发建树，不阻塞返回', async () => {
+  it('indexPaper 不再触发建树（语义树退出默认路径 §6.3），论文索引照常落盘', async () => {
     mockDb().paper.readFile.mockResolvedValue(btoa('fake pdf bytes'))
+    mockDb().index.get.mockResolvedValue(null)
     const store = useChatStore()
     await store.init()
 
     await store.indexPaper('p1')
-    // 平面索引已写盘时建树可能仍在进行 —— 用 waitFor 等后台任务落地
-    await vi.waitFor(() => expect(mockDb().tree.set).toHaveBeenCalledTimes(1))
+
+    // 段落索引照常落盘：阶段① 与阶段③ 各一次（阶段② 无向量模型，不写盘）
+    expect(mockDb().index.set).toHaveBeenCalledTimes(2)
+    // 建树不再由索引构建顺带触发：卡片阶段才是冷启动那唯一一次 LLM 调用，
+    // 每篇再建一次树等于把每篇的成本翻倍（方案 §6.3）
+    expect(mockDb().tree.set).not.toHaveBeenCalled()
   })
 })
 

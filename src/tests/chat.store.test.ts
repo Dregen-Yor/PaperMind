@@ -8,6 +8,20 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   GlobalWorkerOptions: { workerSrc: '' },
 }))
 
+// indexPaper 一进来就 `void ensureEmbedder()`：真实实现会动态 import transformers，
+// 在 jsdom 里意味着一次 35MB 的权重下载（createIdbStore 还会碰未实现的 indexedDB）。
+// 单测里向量模型一律缺席——阶段① 与卡片路径都不依赖它。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
+
+// 段落管线整篇替换了平面索引：extractPages 给出确定的页面文本（含标题行与小节），
+// 让切段、卡片与落盘都用真实实现跑
+vi.mock('../utils/pageIndex', async importOriginal => ({
+  ...(await importOriginal<typeof import('../utils/pageIndex')>()),
+  extractPages: async () => ['Abstract\nA short abstract.', 'Methods\nWe use BM25.'],
+}))
+
 import { useChatStore } from '../stores/chat'
 
 /** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
@@ -297,5 +311,47 @@ describe('useChatStore', () => {
     expect(body.max_tokens).toBe(4096)
     expect(body.messages.every((m: any) => m.role !== 'system')).toBe(true)
     expect(body.system).toContain('学术论文阅读助手')
+  })
+})
+
+describe('段落索引的分阶段构建', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    // 调用历史必须逐用例清空：下面「后台重建已启动」是拿 readFile 的调用当证据的
+    vi.clearAllMocks()
+    vi.mocked(window.db.paper.readFile).mockResolvedValue('BASE64')
+    vi.mocked(window.db.index.get).mockResolvedValue(null)
+  })
+
+  it('indexPaper 落盘阶段① 后即可用，不等卡片调用', async () => {
+    // 卡片调用永不返回：只有「阶段① 先落盘、提问路径不等卡片」的实现才能在这里拿到记录，
+    // 老实现（等 LLM 建完平面索引再写盘）会让这个用例直接超时
+    global.fetch = vi.fn(() => new Promise(() => {})) as never
+    const store = useChatStore()
+
+    await store.indexPaper('paper-1', { syncStage1Only: true })
+
+    const saved = vi.mocked(window.db.index.set).mock.calls.at(-1)!
+    const index = JSON.parse(saved[1] as string)
+    expect(index.version).toBe(2)
+    expect(index.passages.length).toBeGreaterThan(0)
+    // 只写了阶段① 这一次：②③ 还在后台（卡片调用甚至没有返回）
+    expect(vi.mocked(window.db.index.set)).toHaveBeenCalledTimes(1)
+  })
+
+  it('旧版（v1）索引不被解析为段落索引，且触发后台重建', async () => {
+    vi.mocked(window.db.index.get).mockResolvedValue({
+      indexJson: JSON.stringify({ title: 'Paper', nodeId: 'root', startPage: 0, endPage: 1, summary: '', nodes: [] }),
+      pagesJson: JSON.stringify(['page one']),
+    })
+    // 重建的第一步就是读原文；这里让它失败，正好证明「本次提问不依赖重建完成」
+    vi.mocked(window.db.paper.readFile).mockResolvedValue(null)
+    const store = useChatStore()
+
+    const papers = await store.collectIndexedPapers({ id: 'c1', paperIds: ['paper-1'] } as never)
+
+    expect(papers.papers[0].passageIndex).toBeUndefined()
+    expect(papers.papers[0].tree.nodeId).toBe('root')
+    expect(vi.mocked(window.db.paper.readFile)).toHaveBeenCalledWith('paper-1')
   })
 })
