@@ -57,16 +57,21 @@ describe('indexPaper 的代次保护', () => {
     expect(window.db.index.set).toHaveBeenCalledTimes(1)
   })
 
-  it('同一篇被重新触发构建后，旧代次的写入被丢弃', async () => {
+  it('同一篇被重新触发构建后，旧代次的写入被丢弃（新一代照常写盘）', async () => {
     const store = useChatStore()
     await store.indexPaper('paper-1')
     const stalePersist = capturedPersist!
     await store.indexPaper('paper-1')          // 新一代，旧代次随即作废
+    const freshPersist = capturedPersist!      // 新一代交给管线的 persist
     await stalePersist(finalIndex, 3)
     expect(window.db.index.set).not.toHaveBeenCalled()
+    // 正对照：新一代的写盘照常生效——证明「旧代次被丢弃」不是「这个键被永久弄坏」，
+    // 否则「一次都没写」也会让上面的断言通过
+    await freshPersist(finalIndex, 3)
+    expect(window.db.index.set).toHaveBeenCalledTimes(1)
   })
 
-  it('切换索引 profile 后，在途代次的写入被丢弃', async () => {
+  it('切换索引 profile 后，在途代次的写入被丢弃（换代之后照常写盘）', async () => {
     const store = useChatStore()
     await store.indexPaper('paper-1')
     const stalePersist = capturedPersist!
@@ -75,6 +80,11 @@ describe('indexPaper 的代次保护', () => {
     // 这个断言就证明不了「切换 profile 本身会作废在途构建」）
     await stalePersist(finalIndex, 3)
     expect(window.db.index.set).not.toHaveBeenCalled()
+
+    // 正对照：换 profile 之后重新构建的一代照常写盘——「一次都没写」不能证明守卫在起作用
+    await store.indexPaper('paper-1')
+    await capturedPersist!(finalIndex, 3)
+    expect(window.db.index.set).toHaveBeenCalledTimes(1)
   })
 
   it('切换索引配置（setIndexProfileId）同样让在途代次的写入作废', async () => {
@@ -84,6 +94,11 @@ describe('indexPaper 的代次保护', () => {
     await store.setIndexProfileId('another-profile')
     await stalePersist(finalIndex, 3)
     expect(window.db.index.set).not.toHaveBeenCalled()
+
+    // 正对照：换代之后重新构建的一代照常写盘（见上一个用例的说明）
+    await store.indexPaper('paper-1')
+    await capturedPersist!(finalIndex, 3)
+    expect(window.db.index.set).toHaveBeenCalledTimes(1)
   })
 })
 
