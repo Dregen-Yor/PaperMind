@@ -622,4 +622,75 @@ describe('retrieveRagContext 的段落路径', () => {
     expect(cardPriorOn.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01'])
     expect(llm).not.toHaveBeenCalled()
   })
+
+  it('转发 neighbourFactor：邻段扩展的系数真的改变融合选段（R42 补充）', async () => {
+    // 手工索引：4 段各 40 token、分隔符 2、预算 90 → 恰好放得下两段（80 ≤ 90；
+    // 任意三段 120，或先隔一段放两段再补第三段 82 + 40 也超预算）。
+    // 名字：查询 'alpha' 的 BM25 名次 P01 > P03 > P02 > P04（P01 命中两次、P03 一次，
+    // 另外两段无命中），卡片词法名次同样是 P01 > P03 > P02 > P04；
+    // 于是融合名次为 P01 > P03 > P02 > P04，且只有 P01/P02 同属 'Overview' 小节。
+    // 填充先取第 1 名 P01，再把同小节邻居 P02 以「P01 分 × neighbourFactor」入队：
+    // neighbourFactor=1 时入队分等于第 1 名，压过第 2 名的 P03 → 第二段选 P02；
+    // neighbourFactor=0 时入队分 0 无法替换 P02 自己的候选分（offer 只在更高分时覆盖）
+    // → 第二段回到 P03。两次检索的入参只差 neighbourFactor（其余旋钮显式冻结，
+    // 不依赖默认值），结果不同只可能来自这条转发。
+    const makePassage = (order: number, text: string, subsection: string): Passage => ({
+      id: `P${String(order + 1).padStart(2, '0')}`,
+      order,
+      pieces: [{ page: order, text }],
+      text,
+      searchText: text,
+      // 预算恰好放得下两段：40 + 40 ≤ 90，40 + 2 + 40 = 82 ≤ 90，三段放不下
+      tokenCount: 40,
+      prevId: order > 0 ? `P${String(order).padStart(2, '0')}` : null,
+      nextId: order < 3 ? `P${String(order + 2).padStart(2, '0')}` : null,
+      subsection,
+    })
+    const neighbourPassages = [
+      makePassage(0, 'alpha alpha ranking protocol overview', 'Overview'),
+      makePassage(1, 'notes on the baseline protocol', 'Overview'),
+      makePassage(2, 'we evaluate the alpha dataset', 'Evaluation'),
+      makePassage(3, 'ablation details and caveats', 'Metrics'),
+    ]
+    const neighbourCards: StructureCard[] = [
+      { id: 'S1', range: ['P01', 'P01'], title: 'Alpha overview', summary: '', keyTerms: [] },
+      { id: 'S2', range: ['P03', 'P03'], title: 'Alpha evaluation', summary: '', keyTerms: [] },
+      { id: 'S3', range: ['P02', 'P02'], title: 'Beta baseline', summary: '', keyTerms: [] },
+      { id: 'S4', range: ['P04', 'P04'], title: 'Caveats notes', summary: '', keyTerms: [] },
+    ]
+    const neighbourIndex: PassageIndex = {
+      version: PASSAGE_INDEX_VERSION,
+      stage: 3,
+      passages: neighbourPassages,
+      cards: neighbourCards,
+      tree: cardsToIndexNodes(neighbourCards, neighbourPassages),
+      passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+      separatorTokens: 2,
+    }
+    const paper = {
+      tree: neighbourIndex.tree,
+      pages: neighbourPassages.map(passage => passage.text),
+      passageIndex: neighbourIndex,
+    }
+    const llm = vi.fn(async () => 'should not be called')
+    const frozenKnobs = { maxTokens: 90, rrfK: 60, sectionWeight: 0.5 }
+
+    const noNeighbour = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { ...frozenKnobs, neighbourFactor: 0 } },
+    )
+    const withNeighbour = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { ...frozenKnobs, neighbourFactor: 1 } },
+    )
+
+    // 卡片路真的在（否则两次都退化成裸 bm25，断言的是另一条路径）
+    expect(noNeighbour.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(withNeighbour.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(noNeighbour.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01', 'P03'])
+    expect(withNeighbour.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01', 'P02'])
+    // `neighbourSelectedIds` 直接读填充阶段的 `offered` 记账：只有邻段路真的把这一段
+    // 抬进选中集时才非空——系数只是被读掉、却没改变任何选择时，这里会同时露出来
+    expect(noNeighbour.retrievals[0].hybrid?.neighbourSelectedIds).toEqual([])
+    expect(withNeighbour.retrievals[0].hybrid?.neighbourSelectedIds).toEqual(['P02'])
+    expect(llm).not.toHaveBeenCalled()
+  })
 })
