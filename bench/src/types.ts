@@ -49,6 +49,18 @@ export interface SemanticTreeParams {
   maxInputChars: number
 }
 
+/** 段落混合检索的 embedder 身份：必须显式 pin，禁止环境默认（与强基线同一原则）。 */
+export interface PassageEmbedderParams {
+  model: string
+  revision: string
+  dtype: string
+  dim: number
+}
+
+export interface PassageRuntimeParams {
+  embedder: PassageEmbedderParams
+}
+
 export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externalContext'> {
   name: string
   /**
@@ -58,6 +70,21 @@ export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externa
   kind?: 'papermind' | 'semantic-tree'
   /** kind === 'semantic-tree' 时必填 */
   semanticTree?: SemanticTreeParams
+  /**
+   * 段落级混合检索（方案 §7）：提供即走该路径。
+   * 只放不可消融的 embedder 身份；可调旋钮在顶层，好让 matrix 直接消融。
+   */
+  passage?: PassageRuntimeParams
+  /** 切段：不足 minTokens 向后合并 */
+  minTokens?: number
+  /** 切段：超过 maxTokens 在句子边界切开 */
+  maxTokens?: number
+  /** 卡片输入字符上限 */
+  maxInputChars?: number
+  rrfK?: number
+  sectionWeight?: number
+  neighbourFactor?: number
+  skipLimit?: number
 }
 
 export interface TraditionalEmbeddingConfig {
@@ -119,8 +146,10 @@ export interface ConfigFile {
   kind?: 'papermind' | 'semantic-tree'
   /** kind === 'semantic-tree' 时必填 */
   semanticTree?: SemanticTreeParams
+  /** 段落混合检索块（不可消融），由 expandMatrix 原样带到每个展开点 */
+  passage?: PassageRuntimeParams
   /** 键收敛到 BenchConfig 的可调字段，防止拼错的键静默失效 */
-  matrix: Partial<Record<Exclude<keyof PaperMindConfig, 'name' | 'kind' | 'semanticTree'>, Array<number | boolean>>>
+  matrix: Partial<Record<Exclude<keyof PaperMindConfig, 'name' | 'kind' | 'semanticTree' | 'passage'>, Array<number | boolean>>>
 }
 
 export interface SampleError {
@@ -192,6 +221,26 @@ export interface PaperTimingRecord {
   treeBuildLatencyMs?: number
   /** 1 = 本篇建树失败并已降级到平面检索 */
   treeBuildFailed?: number
+  /** —— 段落混合检索冷启动（方案 §7）；仅 passage 配置的论文写入 —— */
+  coldStartPassageMs?: number
+  coldStartEmbedPassagesMs?: number
+  coldStartStructureCallMs?: number
+  /** 1 = 卡片调用命中缓存，不计入 structureCall 耗时统计 */
+  coldStartStructureCacheHit?: number
+  coldStartStructureInputTokens?: number
+  coldStartStructureOutputTokens?: number
+  /** 1 = token 数为估算值（服务商 usage 未透传） */
+  coldStartStructureTokensEstimated?: number
+  coldStartEmbedCardsMs?: number
+  /** 1 = 本篇段落向量计算失败，检索降级为 bm25*（整轮据此判不可比） */
+  coldStartEmbedFailed?: number
+  coldStartTotalMs?: number
+  /** 卡片回落原因；未回落时不写 */
+  coldStartStructureFallback?: string
+  coldStartCardCount?: number
+  coldStartPassageCount?: number
+  /** 1 = 本篇建索引失败 */
+  coldStartFailed?: number
 }
 
 /** 逐样本记录，用于错误分析——聚合分数只说好不好，这里说为什么。 */
@@ -206,6 +255,8 @@ export interface PerSampleRecord {
   speed?: QuerySpeedRecord
   /** QA 专有 */
   retrievalQuery?: string
+  /** 段落混合检索实际使用的模式（bm25 / bm25+dense / full / full-title-fallback / bm25+card-lexical） */
+  retrievalMode?: string
   /**
    * 诊断专用：被选中候选的页区间包络（去重升序）。
    * 它包含「仅被选中、但可能被最终预算截掉」的页，**不是**生成模型实际读到的页集合，
@@ -260,7 +311,7 @@ export interface BenchResult {
     generationMaxTokens?: number
     refusalPatternVersion?: string
     rubricVersion?: string
-    retrievalAlgorithm?: 'papermind-llm' | 'semantic-tree' | 'cosine' | 'bm25' | 'jaccard' | 'none' | 'hybrid-rerank' | 'long-section-rag'
+    retrievalAlgorithm?: 'papermind-llm' | 'semantic-tree' | 'cosine' | 'bm25' | 'jaccard' | 'none' | 'hybrid-rerank' | 'long-section-rag' | 'hybrid-passage'
     /** 基线家族（报表分组用），新基线必须标注，旧配置缺省由报表按 kind 推断 */
     baselineFamily?: BaselineFamily
     /** 候选/上下文粒度自证：如 '512-token passage'、'contiguous section region'、'structure node' */

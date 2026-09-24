@@ -18,6 +18,8 @@ import { runTraditionalRagQaTask } from './runner/traditionalRagQa'
 import { runHybridRerankQaTask } from './runner/hybridRerankQa'
 import { runLongSectionQaTask } from './runner/longSectionQa'
 import { runSemanticTreeQaTask } from './runner/semanticTreeQa'
+import { createPassageIndexHook, type HybridKnobs } from './runner/passageIndexHook'
+import { errorMessage } from './runner/support'
 import { runSummaryTask } from './runner/summary'
 import { renderReport, renderComparison } from './report'
 import { benchPath } from './paths'
@@ -26,6 +28,9 @@ import type { PaperMindConfig } from './types'
 import type { LlmClient } from './llmClient'
 import type { StrongBaselineQaArgs, StrongGenerationSettings } from './runner/strongBaselineQa'
 import { materializeContext, type ContextGroup } from '../../src/utils/contextTrace'
+import type { Embedder } from '../../src/utils/embedder'
+import { createTransformersEmbedder } from '../../src/utils/transformersEmbedder'
+import { applyHfEndpoint } from './hub'
 import { MATH_FORMAT_INSTRUCTION } from '../../src/utils/ragPipeline'
 import {
   buildEvaluationContract,
@@ -176,7 +181,12 @@ if ((args.task === 'summary' || args.task === 'all') && configs.some(config => c
   throw new Error('summary task 只接受 PaperMind 配置')
 }
 // full-context 模式绕过检索配置，只对 PaperMind 管线有意义；检索型基线（传统 RAG
-// 与强基线）在 full-context 下跑出的数字与自身配置无关，必须拒绝而非静默跑错对象
+// 与强基线）在 full-context 下跑出的数字与自身配置无关，必须拒绝而非静默跑错对象。
+// 段落混合配置同样没有检索路径可走，单独先判：矩阵展开会把 PaperMind 的 kind 剥成空，
+// 落到下面那条通用断言只会报「不是 PaperMind 配置」——名义指向了错误的原因
+if (args.mode === 'full-context' && configs.some(config => 'passage' in config && config.passage !== undefined)) {
+  throw new Error('--mode full-context 不支持段落混合配置：全文直投没有检索路径，混用会产出无意义的对照')
+}
 if (args.mode === 'full-context' && configs.some(config => config.kind !== 'papermind')) {
   throw new Error('--mode full-context 只接受 PaperMind 配置；检索型基线请直接用对应 --config')
 }
@@ -408,6 +418,66 @@ for (const config of configs) {
             onProgress: strongProgress(config),
             ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })
+        } else if (config.passage) {
+          // 冷启动全部发生在逐题计时之前（query-timeline-v2）：hook 内部 await 到阶段③。
+          // 向量模型按配置显式 pin 加载，失败不中断本轮——降级为 bm25* 并标为不可比，
+          // 因为「模型没下下来」和「检索不行」是两件事，混在一起读会得出错误结论
+          let passageEmbedder: Embedder | undefined
+          try {
+            // 与其它 runner 同一下载口径：transformers.js 不读 HF_ENDPOINT，需显式设 remoteHost
+            applyHfEndpoint(await import('@huggingface/transformers'))
+            passageEmbedder = await createTransformersEmbedder({
+              model: config.passage.embedder.model,
+              revision: config.passage.embedder.revision,
+              dtype: config.passage.embedder.dtype,
+              // 配置 pin 的维度就是断言依据：不传则缺省 384，m3 配置（1024）会死在
+              // 第一趟前向传播上，配置里那行 dim 成了没人读的说明
+              dim: config.passage.embedder.dim,
+              // 权重落 bench/cache/models/（与契约词表同一目录，各 runner 的 modelCacheDir 亦同）。
+              // Node 下没有 indexedDB，自定义缓存只会静默全部未命中：不指目录就永远重新下载，
+              // 离线时每轮都停在 embedderUnavailable（R43）
+              cacheDir: MODEL_CACHE_DIR(),
+            })
+          } catch (error) {
+            console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
+          }
+          const knobs: HybridKnobs = {
+            minTokens: config.minTokens as number,
+            maxTokens: config.maxTokens as number,
+            maxInputChars: config.maxInputChars as number,
+            rrfK: config.rrfK as number,
+            sectionWeight: config.sectionWeight as number,
+            neighbourFactor: config.neighbourFactor as number,
+            skipLimit: config.skipLimit as number,
+          }
+          // 契约分词器只有 tokenize：计数口径必须与 materializeContext 完全一致，
+          // 否则预算填充放得下的段落会在物化时被截断
+          const countTokens = (text: string) => contractTokenizer.tokenize(text).length
+          result = await runQaTask({
+            ...common, ...controlled, config,
+            passage: {
+              hook: createPassageIndexHook({
+                knobs,
+                client,
+                embedder: passageEmbedder,
+                countTokens,
+                modelIdentity: env.model,
+              }),
+              embedder: passageEmbedder,
+              countTokens,
+              // 上下文预算与切分上限是两个数：前者是冻结的 4096（与物化器同源），
+              // 后者是 knobs.maxTokens（切段），字段名分开写，避免未来被对调
+              contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
+              // 方案 §4 融合旋钮：本配置唯一的消融轴（sectionWeight 0/0.5/1）靠这四行
+              // 走到检索；漏一条，三次运行就产出三份一样的数字而各自声称不同口径
+              rrfK: knobs.rrfK,
+              sectionWeight: knobs.sectionWeight,
+              neighbourFactor: knobs.neighbourFactor,
+              skipLimit: knobs.skipLimit,
+              embedderUnavailable: passageEmbedder === undefined,
+            },
+            ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
+          })
         } else if (config.kind === 'semantic-tree') {
           result = await runSemanticTreeQaTask({
             ...common, ...controlled, config,
@@ -420,8 +490,8 @@ for (const config of configs) {
           })
         }
         // 显式资格声明：受控预算下产出的四个检索指标可进入横向比较。
-        // full-context 分支由它自己的 runner 写 false + 原因，这里不覆盖也不代填
-        result.meta.comparisonEligible = true
+        // runner 已自行声明 false（full-context 的生成上限、embedder-unavailable）时不得覆盖
+        if (result.meta.comparisonEligible !== false) result.meta.comparisonEligible = true
       }
       // --no-cache 与 speed answer-cache bypass 都只跳过读缓存，不覆写已有缓存文件，如实记录口径。
       result.meta.cacheMode = cachePolicy.answerUseCache ? 'normal' : 'bypass'

@@ -4,6 +4,7 @@
 
 **变更记录**
 - 2026-09-24: 设置页 Max Tokens 增加「不限制」开关（0 = 不限制，滑块禁用、量程放宽到 `MAX_TOKENS_LIMIT`），新建配置默认不限制；关掉开关时还原本次编辑里用户设过的最后一个有限值（`lastCappedTokens`，随开窗重置），不再一律跳回 8192
+- 2026-09-24: 段落混合检索上线后的界面口径——SettingsView 的「语义树检索」总开关**默认关闭**（2026-09-15 的默认开启作废，方案 §6.3），要用需显式打开；LibraryView 导入后预建的是**段落索引**（阶段① 本地切分落盘即放行提问，②③ 在后台），不再是 PageIndex 预建
 - 2026-09-21: LibraryView 增加删除撤销条（5 秒）、重复导入查重确认（`skipped` 终态）与导入面板自动收起；ReaderView / ChatView 支持来源芯片跳页（`?page=` 定位 + 目标页闪烁）与空对话丢弃；SettingsView 导出改为保存对话框（默认脱敏、可勾选明文）、重建失败文案带 `firstReason`、唯一配置的删除按钮加 tooltip
 - 2026-09-15: SettingsView 增加「语义树检索」卡片——总开关（默认开启，关闭后全部检索回到平面路径）与已建树论文数
 - 2026-08-02T15:49:42: 补记 LibraryView 导入进度面板 + 索引模型选择、ChatView 索引状态/建索引入口、SettingsView 多 profile CRUD Dialog + HF token
@@ -31,7 +32,7 @@
 - **重复导入查重**（#10）：按 `meta.fileHash` 命中已有论文时弹确认——「打开现有条目」跳到该论文（循环结束统一 `router.push`），「跳过」把该项置为 `skipped`（`skipped` 计为终态，进度条才会走完）
 - **删除撤销条**（#11）：删除先把卡片移出列表并显示底部撤销条（5 秒），到期才 `removePaper` 落库；点「撤销」按原位置插回；未到期又删下一篇则前一篇立即落库。关应用不执行未到期的删除
 - 导入完成后约 2.5 秒导入面板自动收起（含失败项时保留，需手动关闭；再次导入会重置计时器）
-- 导入成功后**后台** `chatStore.indexPaper(id).catch(()=>{})` 预建 PageIndex，不阻塞
+- 导入成功后**后台** `chatStore.indexPaper(id).catch(()=>{})` 预建段落索引（阶段① 本地切分 + 落盘，<1 秒；段落向量与卡片调用在后台继续），不阻塞
 - 当 `profiles.length > 1` 时，顶栏显示「索引模型」选择器（`setIndexProfileId`）
 - 新建知识库 Dialog（名称/描述/7 色选择）
 
@@ -53,7 +54,7 @@
 - **LLM 配置列表**：每行显示名称/provider·model + 「对话」「索引」徽标，编辑/删除（≤1 时禁删；禁用的删除按钮外包 `el-tooltip`「至少保留一个配置」，disabled 元素不派发事件故需 `span` 包裹）
 - **新增/编辑 Dialog**：名称、provider（openai/anthropic/ollama）、model、baseUrl、apiKey（ollama 隐藏）、temperature/maxTokens/topK 滑块、系统提示词 + `PROMPT_TEMPLATES` 快填。Max Tokens 旁有「不限制」开关（`maxTokens = 0`，滑块随之禁用并按 `CAPPED_MAX_TOKENS_DEFAULT` 显示位置；关掉开关回到本次编辑中设过的最后一个有限值，没有才用默认值），提示文案按 provider 区分——Anthropic 的 `max_tokens` 必填，只能说清「按 8192 发送」而不能谎称完全不上限
 - **默认使用配置**：对话 / 论文索引两个下拉（`setChatProfileId` / `setIndexProfileId`）
-- **语义树检索**：`el-switch` 绑定 `treeEnabledLocal`，`@change` → `chatStore.setTreeEnabled`（方案 §8.2 要求有关闭开关）；旁注已建好语义树的论文数量（`treeReadyPapers.size`）；「重建全部语义树」按钮 → `ElMessageBox.confirm` → `chatStore.rebuildAllTrees()`，给缓存键覆盖不到的场景（就是想换一棵树）一条显式路径；提示按 `{ attempted, rebuilt, failed, skipped, firstReason }` 分档——全失败报 `ElMessage.error`、部分失败报 `warning`、全跳过才报「没有可重建的论文」，失败文案带上首个原因（#13）
+- **语义树检索**：`el-switch` 绑定 `treeEnabledLocal`（**默认关闭**，段落混合检索是默认检索路径），`@change` → `chatStore.setTreeEnabled`（方案 §8.2 要求有关闭开关）；旁注已建好语义树的论文数量（`treeReadyPapers.size`）；「重建全部语义树」按钮 → `ElMessageBox.confirm` → `chatStore.rebuildAllTrees()`，给缓存键覆盖不到的场景（就是想换一棵树）一条显式路径；提示按 `{ attempted, rebuilt, failed, skipped, firstReason }` 分档——全失败报 `ElMessage.error`、部分失败报 `warning`、全跳过才报「没有可重建的论文」，失败文案带上首个原因（#13）
 - **论文摘要模型**：展示 `ABSTRACT_MODEL`，输入并保存 Hugging Face token（`setAbstractToken`）
 - **数据管理**：导出 JSON 备份走「导出备份」对话框——勾选「包含 API Key（明文，分享前请谨慎）」后 `window.db.data.exportFile({ includeApiKey })` 弹系统保存对话框（默认 `papermind-backup-<日期>.json`，取消给出 info toast）；清空数据（二次确认，reload）
 

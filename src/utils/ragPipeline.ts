@@ -4,8 +4,11 @@ import {
   routeWithSemanticTree,
   type SemanticRouteDiagnostics,
 } from './semanticRoute'
+import { retrievePassageContext, type HybridPassageDiagnostics } from './passageRetrieval'
 import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type MaterializedContext } from './contextTrace'
 import type { EvidenceBlock } from './evidenceBlock'
+import type { Embedder } from './embedder'
+import type { PassageIndex } from './passageIndex'
 import type { SemanticTree } from './semanticTree'
 import type { ChatLLMFn, LLMFn } from './llm'
 import { buildAnswerMessages } from './answerMessages'
@@ -28,9 +31,14 @@ export interface SemanticPaperIndex {
 
 /**
  * 单篇论文的检索结果。走语义树路由时额外带 `semantic` 诊断，
- * 评测据此统计 `treeUsed` / `treeDegraded` / `selectedNodeCount`（§11.4）。
+ * 走段落混合检索时额外带 `hybrid` 诊断；评测据此统计
+ * `treeUsed` / `treeDegraded` / `selectedNodeCount`（§11.4）与段落检索模式。
  */
-export type PipelineRetrieval = RetrievalResult & { semantic?: SemanticRouteDiagnostics }
+export type PipelineRetrieval = RetrievalResult & {
+  semantic?: SemanticRouteDiagnostics
+  /** 走段落混合检索时的诊断（retrievalMode / 选中段落） */
+  hybrid?: HybridPassageDiagnostics
+}
 
 /** 已建好索引的单篇论文。 */
 export interface IndexedPaper {
@@ -41,6 +49,11 @@ export interface IndexedPaper {
    * 两者消耗同样数量的串行 LLM 调用。
    */
   semantic?: SemanticPaperIndex
+  /**
+   * 段落级混合索引。提供时检索走段落混合路径（回答前零 LLM 调用），
+   * 否则回落语义树路由或平面 scoreAndSelect。
+   */
+  passageIndex?: PassageIndex
 }
 
 export interface RagOptions extends ScoreOptions {
@@ -69,10 +82,29 @@ export interface PipelineTiming {
 /**
  * 注入式依赖：`now` 供单测注入单调时钟（返回预设序列而非真实 sleep）；生产默认 Date.now。
  * `materialize` 供 benchmark 注入受控 token 预算（§5）；生产不注入时上下文沿用字符预算。
+ * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器、预算与四个融合旋钮），
+ * 只对带 `passageIndex` 的论文生效；全部缺席时段落路径按词法模式工作、不碰模型。
  */
 export interface RagPipelineDeps {
   now?: () => number
   materialize?: (groups: ContextGroup[]) => MaterializedContext
+  /**
+   * 段落混合检索的注入：查询向量模型与 token 计数器（bench 注入冻结分词器）。
+   *
+   * `rrfK` / `sectionWeight` / `neighbourFactor` / `skipLimit` 是方案 §4 的融合旋钮，
+   * 只对带 `passageIndex` 的论文生效；缺席时各自沿用 `DEFAULT_HYBRID_OPTIONS`
+   * （生产路径一个都不传，行为与接入旋钮前逐字一致）。评测的消融矩阵按配置注入它们，
+   * 因此这里的转发是「配置里的旋钮真的到达检索」的唯一通路。
+   */
+  passage?: {
+    embedder?: Embedder
+    countTokens?: (text: string) => number
+    maxTokens?: number
+    rrfK?: number
+    sectionWeight?: number
+    neighbourFactor?: number
+    skipLimit?: number
+  }
 }
 
 /**
@@ -156,6 +188,10 @@ export interface RagResult {
 /**
  * 检索阶段（纯函数）：查询改写 → 逐篇评分多选 → 合并上下文。
  *
+ * 逐篇检索按论文手上已有的索引分派：`paper.passageIndex` → 段落混合检索（本地打分，
+ * 检索阶段零 LLM 调用）；否则 `paper.semantic` → 语义树路由；都没有 → 平面 scoreAndSelect。
+ * 后两路与接入段落路径之前逐字一致。
+ *
  * 不注入 `deps.materialize` 时完全沿用产品的字符预算路径（`maxContextChars` 截断）；
  * 注入时改用 materializer 在受控 token 预算内物化上下文，并同步产出页序与 token 数。
  * 传入 `opts.externalContext`（用户划选原文）时优先级最高：跳过改写与检索，
@@ -196,20 +232,37 @@ export async function retrieveRagContext(
     rewritten = retrievalQuery !== query
   }
 
-  // Call 2（每篇论文，单叶节点或单节点树时短路不发请求）：评分多选
+  // Call 2（每篇论文，段落索引 / 单叶节点 / 单节点树时短路不发请求）：评分多选
   const retrievals: PipelineRetrieval[] = []
   let treeRouted = false
   if (!skipRetrieval) {
     for (const paper of papers) {
+      // 分派优先级：段落索引（零 LLM 调用）→ 语义树（一次判断）→ 平面 scoreAndSelect。
+      // 后两路的判据与选项逐字不变，不带 `passageIndex` 的论文行为与接入前逐字一致。
+      //
       // 有语义树时整棵小树在一次判断里用掉，调用数与平面路径相同（§10.1）。
       // 平面叶节点一并交给树路由打分：树取不到证据时才能在同一次调用里就地回落（§9）。
-      const result = paper.semantic
-        ? await routeWithSemanticTree(paper.semantic.tree, paper.semantic.blocks, retrievalQuery, llm, {
-            ...scoreOpts,
-            ...(maxContextChars !== undefined ? { maxContextChars } : {}),
-            flat: { leaves: collectLeafNodes(paper.tree), pages: paper.pages },
+      const result = paper.passageIndex
+        ? await retrievePassageContext(paper.passageIndex, retrievalQuery, {
+            ...(deps.passage?.embedder ? { embedder: deps.passage.embedder } : {}),
+            ...(deps.passage?.countTokens ? { countTokens: deps.passage.countTokens } : {}),
+            // 数值选项一律按 `!== undefined` 判缺席：0 是 sectionWeight / neighbourFactor 的
+            // 合法取值（关掉该路权重），按真值转发会把「显式归零」静默变成「用默认值」
+            ...(deps.passage?.maxTokens !== undefined ? { maxTokens: deps.passage.maxTokens } : {}),
+            ...(deps.passage?.rrfK !== undefined ? { rrfK: deps.passage.rrfK } : {}),
+            ...(deps.passage?.sectionWeight !== undefined ? { sectionWeight: deps.passage.sectionWeight } : {}),
+            ...(deps.passage?.neighbourFactor !== undefined ? { neighbourFactor: deps.passage.neighbourFactor } : {}),
+            ...(deps.passage?.skipLimit !== undefined ? { skipLimit: deps.passage.skipLimit } : {}),
           })
-        : await scoreAndSelect(paper.tree, paper.pages, retrievalQuery, llm, scoreOpts)
+        : paper.semantic
+          ? await routeWithSemanticTree(paper.semantic.tree, paper.semantic.blocks, retrievalQuery, llm, {
+              ...scoreOpts,
+              ...(maxContextChars !== undefined ? { maxContextChars } : {}),
+              flat: { leaves: collectLeafNodes(paper.tree), pages: paper.pages },
+            })
+          : await scoreAndSelect(paper.tree, paper.pages, retrievalQuery, llm, scoreOpts)
+      // 只认 `paper.semantic`：段落分支不是树路由，而带 `passageIndex` 的论文不带 `semantic`
+      // （Task 10 保持两者互斥），所以这一行不需要按分支细分
       if (paper.semantic) treeRouted = true
       if (result.llmCalled) llmCalls++
       retrievals.push(result)

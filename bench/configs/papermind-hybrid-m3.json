@@ -1,0 +1,20 @@
+{
+  "name": "papermind-hybrid-m3",
+  "kind": "papermind",
+  "passage": {
+    "embedder": { "model": "Xenova/bge-m3", "revision": "4de13258303883538bd53b696b452bf8099f0858", "dtype": "q8", "dim": 1024 }
+  },
+  "matrix": {
+    "topK": [4],
+    "minScore": [6],
+    "maxContextChars": [24000],
+    "enableRewrite": [false],
+    "minTokens": [120],
+    "maxTokens": [350],
+    "maxInputChars": [120000],
+    "rrfK": [60],
+    "sectionWeight": [0.5],
+    "neighbourFactor": [0.5],
+    "skipLimit": [20]
+  }
+}

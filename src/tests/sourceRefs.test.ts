@@ -3,6 +3,12 @@ import { setActivePinia, createPinia } from 'pinia'
 
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ default: {}, GlobalWorkerOptions: { workerSrc: '' } }))
 
+// 旧路径（v1 平面索引）会在后台触发 indexPaper 重建，而它一进来就 `void ensureEmbedder()`：
+// 真实实现会动态 import transformers 并在 jsdom 里尝试加载权重。单测里模型一律缺席。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
+
 import { useChatStore } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb

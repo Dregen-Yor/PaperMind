@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IndexNode } from '../utils/pageIndex'
 import type { ChatTurn } from '../utils/queryRewrite'
+import type { Passage } from '../utils/passages'
+import type { PassageIndex } from '../utils/passageIndex'
+import type { StructureCard } from '../utils/structureCards'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -17,6 +20,9 @@ const {
 } =
   await import('../utils/ragPipeline')
 const { materializeContext } = await import('../utils/contextTrace')
+const { buildPassages, createEstimatingTokenCounter } = await import('../utils/passages')
+const { buildTitleCards, cardsToIndexNodes } = await import('../utils/structureCards')
+const { PASSAGE_INDEX_VERSION, passageConfigHash } = await import('../utils/passageIndex')
 
 /** 与 contextTrace.test.ts 同款分词器：按空白切词并渲染为 ▁word。 */
 const tokenizer = {
@@ -419,5 +425,272 @@ describe('RAG 阶段拆分', () => {
     ).rejects.toThrow('generation failed')
 
     expect(JSON.stringify(retrieval)).toBe(before)
+  })
+})
+
+describe('retrieveRagContext 的段落路径', () => {
+  const counter = createEstimatingTokenCounter()
+  const passagePages = ['Abstract\nWe study retrieval on Europarl.', 'Methods\nWe use BM25 and dense encoders.']
+  const passages = buildPassages(passagePages, counter, { minTokens: 1 })
+  const cards = buildTitleCards(passages)
+  const passageIndex: PassageIndex = {
+    version: PASSAGE_INDEX_VERSION,
+    stage: 1,
+    passages,
+    tree: cardsToIndexNodes(cards, passages),
+    passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+    separatorTokens: 2,
+  }
+
+  it('有 passageIndex 时走段落检索且检索阶段零 LLM 调用', async () => {
+    const llm = vi.fn(async () => 'should not be called')
+    const retrieval = await retrieveRagContext(
+      [{ tree: passageIndex.tree, pages: passagePages, passageIndex }],
+      'Europarl datasets',
+      [],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.llmCalls).toBe(0)
+    // 计数器之外再钉一次真实入参：只凭它，漏计数的分支仍会绿
+    expect(llm).not.toHaveBeenCalled()
+    expect(retrieval.retrievals[0].hybrid?.retrievalMode).toBe('bm25')
+    expect(retrieval.retrievals[0].context).toContain('Europarl')
+  })
+
+  it('没有 passageIndex 时仍走旧路径（scoreAndSelect）', async () => {
+    const llm = vi.fn(async () => JSON.stringify({ scores: [{ nodeId: 'root', score: 9 }] }))
+    const retrieval = await retrieveRagContext(
+      [{ tree: cardsToIndexNodes(cards, passages), pages: passagePages }],
+      'Europarl',
+      [],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.llmCalls).toBeGreaterThan(0)
+    expect(retrieval.retrievals[0].hybrid).toBeUndefined()
+  })
+
+  it('多轮历史仍触发查询改写（段落路径不例外）', async () => {
+    // 改写提示词（queryRewrite.ts）是全英文的，判据取它真实包含的 `Latest question:`，
+    // 与生成提示词（含「参考内容：」）区分；llm 的入参是字符串，不是消息数组
+    const llm = vi.fn(async (prompt: string) =>
+      prompt.includes('Latest question:') ? 'rewritten query' : 'answer')
+    const retrieval = await retrieveRagContext(
+      [{ tree: passageIndex.tree, pages: passagePages, passageIndex }],
+      'and the datasets?',
+      [
+        { role: 'user', content: 'What is this paper about?' },
+        { role: 'assistant', content: 'It studies retrieval.' },
+        { role: 'user', content: 'Which datasets?' },
+        { role: 'assistant', content: 'Europarl.' },
+      ],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.retrievalQuery).not.toBe('and the datasets?')
+    // 改写输出要真的流回检索链路，而不是靠 mock 的回落分支或空串通过
+    expect(retrieval.retrievalQuery).toBe('rewritten query')
+  })
+
+  it('混合论文逐篇分派：有段落索引的走段落路径，没有的仍走旧路径', async () => {
+    // 过渡态：一篇已重建（v2 段落索引）、一篇仍是旧平面索引，各自按手上的索引分派
+    const llm = vi.fn(async () => '[{"id":0,"score":9},{"id":1,"score":2}]')
+    const retrieval = await retrieveRagContext(
+      [
+        { tree: passageIndex.tree, pages: passagePages, passageIndex },
+        { tree: cardsToIndexNodes(cards, passages), pages: passagePages },
+      ],
+      'Europarl datasets',
+      [],
+      llm,
+      {},
+      {},
+    )
+    expect(retrieval.retrievals).toHaveLength(2)
+    expect(retrieval.retrievals[0].hybrid).toBeDefined()
+    expect(retrieval.retrievals[1].hybrid).toBeUndefined()
+    // 只有旧路径那篇发出打分请求：段落那篇检索阶段零 LLM 调用
+    expect(retrieval.llmCalls).toBe(1)
+    expect(retrieval.treeRouted).toBe(false)
+  })
+
+  it('只有注入 deps.passage.embedder 才走得到依赖向量的 full 模式', async () => {
+    // 同一篇论文、同一份索引：段落向量与卡片向量都在，差别只在 deps.passage 有没有被转发下去。
+    // 少了这条用例，把 `deps.passage.embedder` 从转发里漏掉也照样全绿（检索静默退回词法）
+    const dim = 4
+    const unit = (seed: number) => {
+      const vector = new Float32Array(dim)
+      vector[seed % dim] = 1
+      return vector
+    }
+    const embedder = {
+      id: 'test-embedder',
+      embedQuery: vi.fn(async () => unit(0)),
+      embedPassages: vi.fn(async (texts: string[]) => texts.map((_, index) => unit(index))),
+    }
+    const denseIndex: PassageIndex = {
+      ...passageIndex,
+      stage: 3,
+      embedderId: embedder.id,
+      vectorDim: dim,
+      passageVectors: passages.map((_, index) => unit(index)),
+      cards,
+      cardVectors: cards.map((_, index) => unit(index)),
+    }
+    const paper = { tree: denseIndex.tree, pages: passagePages, passageIndex: denseIndex }
+    const llm = vi.fn(async () => 'should not be called')
+
+    const dense = await retrieveRagContext(
+      [paper], 'Europarl datasets', [], llm, {}, { passage: { embedder } },
+    )
+    expect(dense.retrievals[0].hybrid?.retrievalMode).toBe('full')
+    // 模式名之外再钉一次入参：模型真的被调用过，而不是模式名碰巧对上
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+
+    // 正对照：同一篇论文不注入 deps 时一路向量都不读。卡片在索引里，所以词法模式是
+    // 「BM25 + 卡片文本 BM25」（方案 §4 的降级表），而不是裸 bm25
+    const lexical = await retrieveRagContext([paper], 'Europarl datasets', [], llm, {}, {})
+    expect(lexical.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('转发 sectionWeight：卡片先验的权重真的改变融合选段（R42）', async () => {
+    // 手工索引：4 段各 40 token、预算 45 → 只有融合第一名放得下，选段结果就是融合名次的直接读数。
+    // 两路名次故意错开：BM25（查询 'alpha'）为 P02 > P01 > P03 > P04（只有 P02 命中该词），
+    // 卡片词法先验为 P01 > P03 > P04 > P02（卡片标题里 alpha 分别出现 3 / 1 / 1 / 0 次）。
+    // 于是 sectionWeight=0 时卡片路不计权（等于关掉卡片先验）→ BM25 第一名 P02 胜出；
+    // sectionWeight=1 时 P01 的卡片第 1 名压过 P02 的卡片第 4 名，把 BM25 第 2 名抬成融合第一。
+    // 两次检索的入参只差 sectionWeight，结果不同只可能来自这条转发（未转发时两次都吃默认 0.5）。
+    const makePassage = (order: number, text: string, subsection: string): Passage => {
+      const id = `P${String(order + 1).padStart(2, '0')}`
+      return {
+        id,
+        order,
+        pieces: [{ page: order, text }],
+        text,
+        searchText: text,
+        // 预算只放得下一段：40 ≤ 45，任意两段 40 + 2 + 40 > 45
+        tokenCount: 40,
+        prevId: order > 0 ? `P${String(order).padStart(2, '0')}` : null,
+        nextId: order < 3 ? `P${String(order + 2).padStart(2, '0')}` : null,
+        subsection,
+      }
+    }
+    const fusionPassages = [
+      makePassage(0, 'Overview of the ranking protocol.', 'Overview'),
+      makePassage(1, 'We evaluate on the alpha dataset.', 'Evaluation'),
+      makePassage(2, 'Notes on the evaluation metrics.', 'Metrics'),
+      makePassage(3, 'Ablation details and caveats.', 'Ablation'),
+    ]
+    const fusionCards: StructureCard[] = [
+      { id: 'S1', range: ['P01', 'P01'], title: 'Alpha alpha alpha retrieval', summary: '', keyTerms: [] },
+      { id: 'S2', range: ['P03', 'P03'], title: 'Alpha notes', summary: '', keyTerms: [] },
+      { id: 'S3', range: ['P04', 'P04'], title: 'Alpha caveats', summary: '', keyTerms: [] },
+      { id: 'S4', range: ['P02', 'P02'], title: 'Beta baseline', summary: '', keyTerms: [] },
+    ]
+    const fusionIndex: PassageIndex = {
+      version: PASSAGE_INDEX_VERSION,
+      stage: 3,
+      passages: fusionPassages,
+      cards: fusionCards,
+      tree: cardsToIndexNodes(fusionCards, fusionPassages),
+      passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+      separatorTokens: 2,
+    }
+    const paper = {
+      tree: fusionIndex.tree,
+      pages: fusionPassages.map(passage => passage.text),
+      passageIndex: fusionIndex,
+    }
+    const llm = vi.fn(async () => 'should not be called')
+
+    const cardPriorOff = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { maxTokens: 45, sectionWeight: 0 } },
+    )
+    const cardPriorOn = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { maxTokens: 45, sectionWeight: 1 } },
+    )
+
+    // 卡片路真的在（否则 sectionWeight 只是一个被忽略的数字），且两次真的走了同一条融合路径
+    expect(cardPriorOff.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(cardPriorOn.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(cardPriorOff.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P02'])
+    expect(cardPriorOn.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01'])
+    expect(llm).not.toHaveBeenCalled()
+  })
+
+  it('转发 neighbourFactor：邻段扩展的系数真的改变融合选段（R42 补充）', async () => {
+    // 手工索引：4 段各 40 token、分隔符 2、预算 90 → 恰好放得下两段（80 ≤ 90；
+    // 任意三段 120，或先隔一段放两段再补第三段 82 + 40 也超预算）。
+    // 名字：查询 'alpha' 的 BM25 名次 P01 > P03 > P02 > P04（P01 命中两次、P03 一次，
+    // 另外两段无命中），卡片词法名次同样是 P01 > P03 > P02 > P04；
+    // 于是融合名次为 P01 > P03 > P02 > P04，且只有 P01/P02 同属 'Overview' 小节。
+    // 填充先取第 1 名 P01，再把同小节邻居 P02 以「P01 分 × neighbourFactor」入队：
+    // neighbourFactor=1 时入队分等于第 1 名，压过第 2 名的 P03 → 第二段选 P02；
+    // neighbourFactor=0 时入队分 0 无法替换 P02 自己的候选分（offer 只在更高分时覆盖）
+    // → 第二段回到 P03。两次检索的入参只差 neighbourFactor（其余旋钮显式冻结，
+    // 不依赖默认值），结果不同只可能来自这条转发。
+    const makePassage = (order: number, text: string, subsection: string): Passage => ({
+      id: `P${String(order + 1).padStart(2, '0')}`,
+      order,
+      pieces: [{ page: order, text }],
+      text,
+      searchText: text,
+      // 预算恰好放得下两段：40 + 40 ≤ 90，40 + 2 + 40 = 82 ≤ 90，三段放不下
+      tokenCount: 40,
+      prevId: order > 0 ? `P${String(order).padStart(2, '0')}` : null,
+      nextId: order < 3 ? `P${String(order + 2).padStart(2, '0')}` : null,
+      subsection,
+    })
+    const neighbourPassages = [
+      makePassage(0, 'alpha alpha ranking protocol overview', 'Overview'),
+      makePassage(1, 'notes on the baseline protocol', 'Overview'),
+      makePassage(2, 'we evaluate the alpha dataset', 'Evaluation'),
+      makePassage(3, 'ablation details and caveats', 'Metrics'),
+    ]
+    const neighbourCards: StructureCard[] = [
+      { id: 'S1', range: ['P01', 'P01'], title: 'Alpha overview', summary: '', keyTerms: [] },
+      { id: 'S2', range: ['P03', 'P03'], title: 'Alpha evaluation', summary: '', keyTerms: [] },
+      { id: 'S3', range: ['P02', 'P02'], title: 'Beta baseline', summary: '', keyTerms: [] },
+      { id: 'S4', range: ['P04', 'P04'], title: 'Caveats notes', summary: '', keyTerms: [] },
+    ]
+    const neighbourIndex: PassageIndex = {
+      version: PASSAGE_INDEX_VERSION,
+      stage: 3,
+      passages: neighbourPassages,
+      cards: neighbourCards,
+      tree: cardsToIndexNodes(neighbourCards, neighbourPassages),
+      passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+      separatorTokens: 2,
+    }
+    const paper = {
+      tree: neighbourIndex.tree,
+      pages: neighbourPassages.map(passage => passage.text),
+      passageIndex: neighbourIndex,
+    }
+    const llm = vi.fn(async () => 'should not be called')
+    const frozenKnobs = { maxTokens: 90, rrfK: 60, sectionWeight: 0.5 }
+
+    const noNeighbour = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { ...frozenKnobs, neighbourFactor: 0 } },
+    )
+    const withNeighbour = await retrieveRagContext(
+      [paper], 'alpha', [], llm, {}, { passage: { ...frozenKnobs, neighbourFactor: 1 } },
+    )
+
+    // 卡片路真的在（否则两次都退化成裸 bm25，断言的是另一条路径）
+    expect(noNeighbour.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(withNeighbour.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
+    expect(noNeighbour.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01', 'P03'])
+    expect(withNeighbour.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01', 'P02'])
+    // `neighbourSelectedIds` 直接读填充阶段的 `offered` 记账：只有邻段路真的把这一段
+    // 抬进选中集时才非空——系数只是被读掉、却没改变任何选择时，这里会同时露出来
+    expect(noNeighbour.retrievals[0].hybrid?.neighbourSelectedIds).toEqual([])
+    expect(withNeighbour.retrievals[0].hybrid?.neighbourSelectedIds).toEqual(['P02'])
+    expect(llm).not.toHaveBeenCalled()
   })
 })

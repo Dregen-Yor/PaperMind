@@ -1,8 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { extractPages, buildPageIndex } from '../utils/pageIndex'
-import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex } from '../utils/ragPipeline'
+import { extractPages, type IndexNode } from '../utils/pageIndex'
+import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex, type RagPipelineDeps } from '../utils/ragPipeline'
 import { buildEvidenceBlocks, hasExactPagePartition, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
+import { createBuildGeneration } from '../utils/buildGeneration'
+import type { Embedder } from '../utils/embedder'
+import {
+  PASSAGE_INDEX_SCHEMA_VERSION, PASSAGE_INDEX_VERSION,
+  parsePassageIndex, serializePassageIndex,
+  passageConfigHash, structureHash, type PassageIndex,
+} from '../utils/passageIndex'
+import { startPassagePipeline } from '../utils/passageIndexBuilder'
+import { createEstimatingTokenCounter, DEFAULT_PASSAGE_OPTIONS } from '../utils/passages'
+import { STRUCTURE_CARD_PROMPT_VERSION } from '../utils/structureCards'
+import { createTransformersEmbedder } from '../utils/transformersEmbedder'
 import {
   buildSemanticTree,
   validateSemanticTree,
@@ -147,6 +158,15 @@ export interface TreeBuildOutcome {
   reason?: string
 }
 
+/** 索引构建选项。导入路径与提问路径共用 `indexPaper`，差别只在等不等得到后台阶段。 */
+export interface IndexPaperOptions {
+  /**
+   * 只等阶段①（本地切段 + 落盘）就返回。提问路径用：卡片调用是每篇一次计费的 LLM 请求，
+   * 不该把用户的问题挡在后面（方案 §6.1）。
+   */
+  syncStage1Only?: boolean
+}
+
 /** 强制重建的结果摘要。分开计数是为了不让「全部失败」在 UI 上退化成「没有论文」。 */
 export interface TreeRebuildSummary {
   /** 真正尝试建树的篇数（不含跳过） */
@@ -161,7 +181,10 @@ export interface TreeRebuildSummary {
 
 const NEW_CONVERSATION_TITLE = '新对话'
 const LEGACY_CONVERSATION_TITLE = /^对话\s+\d+$/
-/** 语义树开关的持久化键；缺省为开启（方案 §8.2 要求关闭时功能仍完全可用）。 */
+/**
+ * 语义树开关的持久化键。语义树自方案 §6.3 起**默认关闭**（退出默认检索路径）：
+ * 只有显式存过「开」才开启；设置页开关与建树代码保留，是否删除另议。
+ */
 const TREE_ENABLED_KEY = 'semantic_tree_enabled'
 
 function isUntitledConversation(title: string): boolean {
@@ -331,6 +354,74 @@ function treeFailureReason(error: unknown): string {
   return error instanceof Error ? `未知错误：${error.message.slice(0, 80)}` : '未知错误'
 }
 
+/** 段落 token 计数用估算器：产品不引入真分词器（bench 才注入冻结的 BGE-M3）。 */
+const COUNT_TOKENS = createEstimatingTokenCounter()
+
+/**
+ * 索引模型身份：端点 + 模型名（模型换了语义就换了，卡片必须重做）。
+ *
+ * 刻意比语义树的 `modelIdentity`（`provider:model@baseUrl`）**窄**：卡片只取决于
+ * 「哪个模型、在哪个端点」——同一个模型挂在同一个端点上，无论 profile 标签叫 openai
+ * 还是别的，产出的卡片逐字相同。把 provider 也拼进来，改一个标签就会让全部论文的
+ * `structureHash` 失效，每篇重付一次卡片调用（R33）。
+ *
+ * **apiKey 绝不进指纹**：它会随 `paper_indexes.index_json` 落盘、也会进 bench 结果 JSON
+ * （全局约束第 6 条）。
+ */
+function indexModelIdentity(profile: LLMProfile): string {
+  return `${profile.baseUrl ?? ''}|${profile.model ?? ''}`
+}
+
+/**
+ * 本节两个指纹是**产品侧自己的失效令牌**，bench 的 `runner/passageIndexHook.ts` 也有一对同名概念。
+ *
+ * 两侧的指纹值**永远不可比、也永远不该被比较**：它们由各自侧的输入算出（产品是默认切段参数 +
+ * `baseUrl|model`，bench 是配置旋钮 + `env.model`），两侧的 token 计数器（产品的估算器 / bench 冻结的
+ * BGE-M3）不进哈希——哈希只覆盖输入里被显式写进去的那几项，所以「数值相等」既不能推出「两侧口径
+ * 相同」，也不能推出「这份索引在对面可用」。
+ * 哪天真需要跨侧核对，比的是**输入**（schemaVersion / 切段参数 / maxInputChars / 模型身份），
+ * 而不是这两个摘要。
+ */
+
+/** 当前切段配置指纹。产品不传 `segmentation`（管线用同一份默认值），两处必须同源。 */
+function currentPassageConfigHash(): string {
+  return passageConfigHash({ schemaVersion: PASSAGE_INDEX_SCHEMA_VERSION, segmentation: DEFAULT_PASSAGE_OPTIONS })
+}
+
+/** 当前卡片配置指纹：切段 + 提示词版本 + 输入上限 + 索引模型（端点与模型名）。 */
+function currentStructureHash(profile: LLMProfile): string {
+  return structureHash({
+    schemaVersion: PASSAGE_INDEX_SCHEMA_VERSION,
+    passageConfigHash: currentPassageConfigHash(),
+    promptVersion: STRUCTURE_CARD_PROMPT_VERSION,
+    maxInputChars: DEFAULT_MAX_INPUT_CHARS,
+    model: indexModelIdentity(profile),
+  })
+}
+
+/**
+ * 记录是否**自称**段落索引（`version === 2`）。
+ *
+ * `parsePassageIndex` 的 `undefined` 有两种含义，处理方式相反：旧版（v1 平面）记录还能
+ * 按旧路径服务，而「自称 v2 却解析失败」的记录绝不能当平面树用——`PassageIndex` 没有
+ * `nodes`，下游的 `.length` / `.map` 会抛异常，正确处置是让这篇走后台重建。
+ */
+function claimsPassageIndex(raw: unknown): boolean {
+  return typeof raw === 'object' && raw !== null
+    && (raw as { version?: unknown }).version === PASSAGE_INDEX_VERSION
+}
+
+/**
+ * 存量段落索引是否缺向量：只有「向量与当前模型同源且自洽」才算不缺。
+ *
+ * 判据与 `planPassageIndexRebuild` 的向量项逐字一致（来源模型不一致 / 没有向量 / 阶段不到 2），
+ * 刻意不另立一套口径：两处一旦分叉，补建要么漏掉本该重算的那批（换了模型仍被判为「有向量」），
+ * 要么每次模型就绪都白跑一遍。
+ */
+function lacksPassageVectors(index: PassageIndex, embedderId: string): boolean {
+  return index.embedderId !== embedderId || index.passageVectors === undefined || index.stage < 2
+}
+
 export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([])
   const profiles = ref<LLMProfile[]>([{ ...DEFAULT_PROFILE }])
@@ -340,8 +431,11 @@ export const useChatStore = defineStore('chat', () => {
   const indexingPapers = ref<Set<string>>(new Set())
   const indexedPapers = ref<Set<string>>(new Set())
   const abstractToken = ref('')
-  /** 轻量语义树总开关；关闭时全部检索退回现有平面路径 */
-  const treeEnabled = ref(true)
+  /**
+   * 轻量语义树总开关；默认关闭（方案 §6.3：语义树退出默认检索路径）。
+   * 用户显式开启后功能完全可用，代码与设置页开关都保留。
+   */
+  const treeEnabled = ref(false)
   /** 已有可用语义树的论文 */
   const treeReadyPapers = ref<Set<string>>(new Set())
   /** 正在后台建树的论文 */
@@ -426,12 +520,19 @@ export const useChatStore = defineStore('chat', () => {
     const ids = await window.db.index.list()
     indexedPapers.value = new Set(ids)
     abstractToken.value = (await window.db.settings.get('huggingface_token')) ?? ''
-    // 语义树默认开启；只有显式存过 false 才关闭
-    treeEnabled.value = (await window.db.settings.get(TREE_ENABLED_KEY)) !== false
+    // 语义树默认关闭（方案 §6.3）：只有显式存过「开」才开启，未存过一律保持关闭。
+    // 值经 IPC 边界 JSON 往返（settings.get 是 JSON.parse(row.value)），设置页写入的是
+    // 布尔、历史或外部来源可能是字符串，两种编码都认——只认其中一种会把用户的开启吞掉
+    const storedTreeEnabled = await window.db.settings.get(TREE_ENABLED_KEY)
+    if (storedTreeEnabled !== undefined) {
+      treeEnabled.value = storedTreeEnabled === true || storedTreeEnabled === 'true'
+    }
     // 只把「当前构建配置下能直接复用」的记录算作已就绪：模型或提示词换过之后
     // 仍留在集合里，UI 会谎报可用树的篇数（真正的校验在 parseTreeRecord）
     await refreshTreeReadyPapers()
     loaded.value = true
+    // 向量模型在启动时就点火下载（不阻塞启动）：等第一次导入才下载等于让首个用户白等一轮
+    void ensureEmbedder()
   }
 
   // ---------- Profile CRUD ----------
@@ -454,10 +555,14 @@ export const useChatStore = defineStore('chat', () => {
     if (idx === -1) return
     profiles.value[idx] = { ...profiles.value[idx], ...patch }
     await persistProfiles()
-    // 改的若是当前索引配置的模型/端点，已建好的树随即失效，就绪集合要重算；
-    // 拖温度或输出上限滑块不必付一次 tree.list 的 IPC 开销
+    // 改的若是当前索引配置的模型/端点（`TREE_CONFIG_PATCH_KEYS`，即建树与段落索引指纹的组成），
+    // 已建好的树随即失效，就绪集合要重算；拖温度或输出上限滑块不必付一次 tree.list 的 IPC 开销
     if (id === indexProfileId.value && TREE_CONFIG_PATCH_KEYS.some(key => key in patch)) {
+      // 段落索引同理：在途构建按旧端点算出的结构卡片与 structureHash 已经不对了，
+      // 作废让它们停止写盘（方案 §8），再把受影响的论文重新入队
+      buildGeneration.invalidateAll()
       await refreshTreeReadyPapers()
+      void reindexStalePapers().catch(() => {})
     }
   }
 
@@ -478,8 +583,12 @@ export const useChatStore = defineStore('chat', () => {
   async function setIndexProfileId(id: string) {
     indexProfileId.value = id
     await window.db.settings.set('llm_profile_index', id)
-    // 换了索引配置就直接换了一套建树配置：就绪集合必须跟着重算
+    // 换了索引配置就直接换了一套建树配置：就绪集合必须跟着重算。
+    // 段落索引同理（与 updateProfile 的同一分支等价）：在途构建按旧端点算出的结构卡片
+    // 与 structureHash 已经不对了，作废让它们停止写盘（方案 §8），再把受影响的论文重新入队
+    buildGeneration.invalidateAll()
     await refreshTreeReadyPapers()
+    void reindexStalePapers().catch(() => {})
   }
 
   async function setAbstractToken(token: string) {
@@ -624,25 +733,211 @@ export const useChatStore = defineStore('chat', () => {
     return (await requestCompletion(messages, profileOrId)).content
   }
 
-  // ---------- Index Paper ----------
+  // ---------- Passage Index (Staged Build) ----------
 
-  async function indexPaper(paperId: string): Promise<void> {
+  /** 向量模型状态：设置页与诊断可读；失败只是没有向量，不影响阶段① */
+  const vectorModelState = ref<'idle' | 'loading' | 'ready' | 'failed'>('idle')
+  let embedderInstance: Embedder | undefined
+  let embedderPromise: Promise<Embedder | undefined> | undefined
+
+  /**
+   * 取向量模型。问答热路径**不 await** 它（提问不等待模型加载）：
+   * 已就绪就用，没就绪这次问题就按可用信号降级。
+   */
+  async function currentEmbedder(): Promise<Embedder | undefined> {
+    if (embedderInstance) return embedderInstance
+    embedderPromise ??= loadEmbedder()
+    return embedderPromise
+  }
+
+  async function loadEmbedder(): Promise<Embedder | undefined> {
+    vectorModelState.value = 'loading'
+    try {
+      embedderInstance = await createTransformersEmbedder({ wasmPaths: './ort/' })
+      vectorModelState.value = 'ready'
+      // 模型刚就绪：此前按词法降级建好的论文还缺向量，补建一次（卡片复用，无 LLM 调用）
+      void backfillPassageVectors().catch(() => {})
+      return embedderInstance
+    } catch {
+      // 下载失败 / 离线无缓存：停留阶段①，下次导入或切换索引配置时重试
+      vectorModelState.value = 'failed'
+      embedderPromise = undefined
+      return undefined
+    }
+  }
+
+  /** 触发下载但不阻塞调用方（init / indexPaper / 切换索引 profile 时各调一次）。 */
+  function ensureEmbedder(): Promise<Embedder | undefined> {
+    return currentEmbedder()
+  }
+
+  /**
+   * 段落混合检索的注入项（`deps.passage`）：模型**已就绪就用**，没就绪这次提问就按
+   * 可用信号降级（词法模式）。
+   *
+   * 写成函数而不是常量：实例是随加载进度出现的，取用的那一刻才是它是否就绪的答案。
+   * **绝不 await**（R35）——提问不等待模型下载，否则冷启动的第一问会被 35 MB 下载挡住。
+   */
+  function passageDeps(): RagPipelineDeps {
+    return embedderInstance
+      ? { passage: { embedder: embedderInstance, countTokens: COUNT_TOKENS } }
+      : { passage: { countTokens: COUNT_TOKENS } }
+  }
+
+  /** 构建代次保护（方案 §8）：写盘前复核，过期的一代整体丢弃。 */
+  const buildGeneration = createBuildGeneration()
+
+  /**
+   * 在途构建的两个里程碑。`indexingPapers` 只回答「有没有在途构建」，这里回答
+   * 「阶段① 落盘了没有」与「整轮跑完没有」：提问路径等前者（不等卡片调用），
+   * 重建队列等后者（等在途构建结束，才能以新一代重新入队）。
+   */
+  const inFlightBuilds = new Map<string, { stage1: Promise<void>; build: Promise<void> }>()
+
+  async function indexPaper(paperId: string, opts: IndexPaperOptions = {}): Promise<void> {
     if (indexingPapers.value.has(paperId)) return
     indexingPapers.value.add(paperId)
+    const token = buildGeneration.begin(paperId)
+    // 构建一开始就把模型下载的「火」点起来（不 await，也不阻塞阶段①）；
+    // 这次构建若正好赶上模型就绪，`loadEmbedder` 的补建会把缺向量的论文一起收走
+    void ensureEmbedder()
+    let markStage1!: () => void
+    const stage1 = new Promise<void>(resolve => { markStage1 = resolve })
+    // 先挂里程碑再开跑：构建体第一行就有 await，不会抢在挂载之前写盘
+    const build = runIndexBuild(paperId, token, markStage1, opts)
+    inFlightBuilds.set(paperId, { stage1, build })
+    try {
+      await build
+    } finally {
+      inFlightBuilds.delete(paperId)
+      indexingPapers.value.delete(paperId)
+    }
+  }
+
+  /** `indexPaper` 的构建体（拆出来只为让代次快照、里程碑与收尾各有唯一出口）。 */
+  async function runIndexBuild(
+    paperId: string,
+    token: number,
+    markStage1: () => void,
+    opts: IndexPaperOptions,
+  ): Promise<void> {
     try {
       const base64 = await window.db.paper.readFile(paperId)
-      if (!base64) throw new Error('paper file not found')
+      if (!base64) throw new Error('论文文件缺失')
       const pages = await extractPages(base64)
-      const llmFn = (prompt: string) =>
-        callLLM([{ role: 'user', content: prompt }], indexProfileId.value)
-      const tree = await buildPageIndex(pages, llmFn)
-      await window.db.index.set(paperId, JSON.stringify(tree), JSON.stringify(pages))
-      indexedPapers.value = new Set([...indexedPapers.value, paperId])
-      // 语义树在后台构建：不阻塞导入、阅读与首次提问（§8.2）。
-      // 失败/超时/输出非法都只是没有树，检索自动回落平面路径。
-      void buildPaperTree(paperId, pages).catch(() => {})
+      // 配置快照：整轮构建（含阶段③ 的卡片调用）都用开始这一刻的 profile，
+      // 中途切 profile 只会让这一代作废（见 persist 里的代次复核）
+      const buildProfile: LLMProfile = { ...indexProfile.value }
+      const stored = await window.db.index.get(paperId)
+      const existing = stored ? parsePassageIndex(stored.indexJson) : undefined
+      // 只用**已经加载好**的向量模型实例，绝不 await：冷启动时它可能要下载 35 MB，
+      // 阶段①（本地切段 + 标题卡片 + 落盘）不能被它挡在前面——「阶段① <1 秒即可提问」
+      // 与「提问不等待卡片调用」是同一件事的两面。模型缺席是**受支持的降级态**：
+      // 阶段① 与卡片照常产出、记录按词法模式服务，模型就绪后由 `backfillPassageVectors` 补齐
+      const embedder = embedderInstance
+
+      const { rest } = await startPassagePipeline(
+        pages,
+        {
+          llm: prompt => callLLM([{ role: 'user', content: prompt }], buildProfile),
+          countTokens: COUNT_TOKENS,
+          ...(embedder ? { embedder } : {}),
+          passageConfigHash: currentPassageConfigHash(),
+          structureHash: currentStructureHash(buildProfile),
+          maxInputChars: DEFAULT_MAX_INPUT_CHARS,
+          // 产品不传 `segmentation`：管线回落到与 `passageConfigHash` 同源的那份默认值
+          persist: (next: PassageIndex) => {
+            // 期间切了索引 profile 或这一篇被重新触发构建：这一代结果整体丢弃，不写盘。
+            // 注意是「整体」——不能只丢卡片而把段落写进去，混合代数会让索引
+            // 与它自称的 structureHash 对不上
+            if (!buildGeneration.isCurrent(paperId, token)) return
+            return window.db.index.set(paperId, JSON.stringify(serializePassageIndex(next)), JSON.stringify(pages))
+          },
+        },
+        { existing },
+      )
+      // 阶段① 已落盘（上一步的 persist 与这里用同一个代次复核）：放行等里程碑的提问路径
+      markStage1()
+      // 写盘被代次守卫拦下时这一代什么都没落盘，绝不能把这篇记进「已建立索引」：
+      // 那个集合是索引徽标与「重建全部语义树」的目标列表，谎报会去重建一篇没有索引的论文
+      if (buildGeneration.isCurrent(paperId, token)) {
+        indexedPapers.value = new Set([...indexedPapers.value, paperId])
+      }
+      // 阶段②③ 继续在后台跑：提问路径（`syncStage1Only`）只等阶段①，不等待卡片调用（方案 §6.1）
+      void rest.catch(() => {})
+      if (!opts.syncStage1Only) await rest.catch(() => {})
     } finally {
-      indexingPapers.value.delete(paperId)
+      // 失败或提前返回都要放行等里程碑的人：否则提问会一直等一篇永远写不出记录的论文
+      markStage1()
+    }
+  }
+
+  /**
+   * 让某篇论文的阶段① 落盘，供提问路径在「读不到记录」时补齐（方案 §6.1）。
+   *
+   * - 已有在途构建（导入构建 / 后台重建）→ 等它的阶段① 里程碑就返回：提问**不等待卡片调用**，
+   *   也绝不因为 `indexingPapers` 去重让 `indexPaper` 立刻返回、再读一行还空着的记录，
+   *   就把这篇论文从回答里静默丢掉；
+   * - 没有在途构建 → 同步跑一次阶段①（本地切段 + 落盘，不碰模型、不碰 LLM）。
+   */
+  async function waitForStage1(paperId: string): Promise<void> {
+    const pending = inFlightBuilds.get(paperId)
+    if (pending) return pending.stage1
+    await indexPaper(paperId, { syncStage1Only: true })
+    // 这一次可能刚好被在途构建去重挡回（别的构建抢先开始）：再认一次它的里程碑
+    await inFlightBuilds.get(paperId)?.stage1
+  }
+
+  /**
+   * 重新入队：先等在途构建跑完，再以**新一代**重建这篇论文。
+   *
+   * 在途构建恰恰是「刚被作废」的那一批（配置一变 `invalidateAll` 就丢掉了它的写盘），
+   * 而 `indexPaper` 对在途论文直接返回（去重）——不等就跑等于把这篇漏掉，它手里那条
+   * 旧哈希的记录永远等不到重建。旧构建结束、`indexingPapers` 清空之后，新一代才起得来。
+   */
+  async function reindexPaper(paperId: string): Promise<void> {
+    await inFlightBuilds.get(paperId)?.build
+    await indexPaper(paperId)
+  }
+
+  /**
+   * 索引 profile 变了（端点 / 模型）→ 每篇论文的 structureHash 随之改变 → 卡片与卡片向量全部过期。
+   * 逐个重新入队，**串行**（`await` 每一篇）而不是并发铺开：阶段③ 是要计费的 LLM 调用，
+   * 一次导入几十篇论文时并发会把服务商打爆。调用方用 `void` 脱离，不阻塞设置页。
+   * 具体重建到哪一阶段交给 `planPassageIndexRebuild` 判断（结构没变时只重算向量）。
+   */
+  async function reindexStalePapers(): Promise<void> {
+    const papers = (await window.db.paper.list()) as Array<{ id: string }>
+    for (const paper of papers) {
+      try {
+        await reindexPaper(paper.id)
+      } catch {
+        // 单篇失败不影响其余论文：与 collectIndexedPapers 的容错口径一致
+      }
+    }
+  }
+
+  /**
+   * 向量模型就绪后补齐「只有词法层」的论文：逐篇读记录，只重建确实缺向量的那些。
+   *
+   * 判据沿用 `planPassageIndexRebuild` 的向量规则（见 `lacksPassageVectors`），不另立一套口径。
+   * 结构哈希没变 → 卡片原样复用，这次补齐**不产生任何 LLM 调用**；串行且逐篇容错
+   * （与 `reindexStalePapers` 同口径），调用方用 `void` 脱离。
+   */
+  async function backfillPassageVectors(): Promise<void> {
+    const embedder = embedderInstance
+    if (!embedder) return
+    const papers = (await window.db.paper.list()) as Array<{ id: string }>
+    for (const paper of papers) {
+      try {
+        const stored = await window.db.index.get(paper.id)
+        const index = stored ? parsePassageIndex(stored.indexJson) : undefined
+        // 没有记录 / 记录根本解析不出来：那不是「缺向量」，交给导入与提问路径各自重建
+        if (!index || !lacksPassageVectors(index, embedder.id)) continue
+        await reindexPaper(paper.id)
+      } catch {
+        // 单篇失败不影响其余论文：与 reindexStalePapers 的容错口径一致
+      }
     }
   }
 
@@ -999,20 +1294,47 @@ export const useChatStore = defineStore('chat', () => {
     const paperIds: string[] = []
     for (const paperId of conv.paperIds) {
       let stored = await window.db.index.get(paperId)
-      // 兜底：导入时后台预处理未完成（LLM未配置等），首次对话时按需构建
       if (!stored) {
+        // 没有记录：导入时后台预处理未完成（LLM 未配置等），或这一篇正在构建中。
+        // 前者同步补阶段①（本地切段，<1 秒）；后者等它的阶段① 里程碑再重读——
+        // 绝不因为 `indexingPapers` 去重让 `indexPaper` 立刻返回、再读到一行空记录
+        // 就把这篇论文从回答里静默丢掉（方案 §6.1）。两条路径都只等阶段①：
+        // ②③ 继续在后台跑，提问不等待卡片调用
         try {
-          await indexPaper(paperId)
+          await waitForStage1(paperId)
           stored = await window.db.index.get(paperId)
         } catch { /* ignore — no index available for this paper */ }
       }
       if (!stored) continue
+
+      const pages: string[] = JSON.parse(stored.pagesJson)
+      let rawIndex: unknown
+      try {
+        rawIndex = JSON.parse(stored.indexJson)
+      } catch {
+        rawIndex = undefined
+      }
+      const passageIndex = parsePassageIndex(rawIndex)
+      if (passageIndex) {
+        // 段落路径：`tree` 用卡片/标题推导的那棵，检索交由 `passageIndex`。
+        // D57：这里**不挂 `semantic`**——两者互斥是 `treeRouted` 保持诚实的前提
+        papers.push({ tree: passageIndex.tree, pages, passageIndex })
+        paperIds.push(paperId)
+        continue
+      }
+
+      // 到此为止都拿不到可用的 v2 索引。两种记录必须分开处置（R25）：
+      // 旧版（v1 平面）索引自己还能用，先按旧路径服务，同时后台重建——重建完成前
+      // 绝不静默切换路径（方案 §6.2 的失效规则）；而「自称 v2 却解析失败」（或连平面
+      // 树都拼不出来）的记录绝不能塞进 `tree`：`PassageIndex` 没有 `nodes`，下游的
+      // `.length` / `.map` 会抛异常，本次跳过该篇、让后台重建补齐
+      const usableAsFlatTree = !claimsPassageIndex(rawIndex)
+        && Array.isArray((rawIndex as { nodes?: unknown } | undefined)?.nodes)
+      void indexPaper(paperId, { syncStage1Only: true }).catch(() => {})
+      if (!usableAsFlatTree) continue
+
       const semantic = await loadSemanticIndex(paperId)
-      papers.push({
-        tree: JSON.parse(stored.indexJson),
-        pages: JSON.parse(stored.pagesJson),
-        ...(semantic ? { semantic } : {}),
-      })
+      papers.push({ tree: rawIndex as IndexNode, pages, ...(semantic ? { semantic } : {}) })
       paperIds.push(paperId)
     }
     return { papers, paperIds }
@@ -1086,6 +1408,8 @@ export const useChatStore = defineStore('chat', () => {
       generate,
       chatProfile.value.systemPrompt,
       { externalContext: context },
+      // 向量模型只在这里注入（不等它）：已就绪就走向量混合检索，没就绪按词法降级（R35）
+      passageDeps(),
     )
     // 来源只在这里构造一次，首次提问与重试两条写回分支共用。
     // `retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐
@@ -1185,6 +1509,8 @@ export const useChatStore = defineStore('chat', () => {
       priorTurns,
       (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
       userMessage.context ? { externalContext: userMessage.context } : {},
+      // 续写与首答同一条检索口径：向量模型已就绪就用，不等它（R35）
+      passageDeps(),
     )
     const messages = buildAnswerMessages(
       retrieval.context,
@@ -1203,7 +1529,7 @@ export const useChatStore = defineStore('chat', () => {
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
     loaded, indexingPapers, indexedPapers, abstractToken,
-    treeEnabled, treeReadyPapers, treeIndexingPapers,
+    treeEnabled, treeReadyPapers, treeIndexingPapers, vectorModelState,
     init,
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,

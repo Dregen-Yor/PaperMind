@@ -16,6 +16,13 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   })),
 }))
 
+// indexPaper 一进来就 `void ensureEmbedder()`（段落索引的阶段②）：真实实现会动态 import
+// transformers 并真的发起权重下载（取缓存时还会碰 jsdom 未实现的 indexedDB）。
+// 单测里模型一律缺席，阶段① 与卡片路径都不依赖它。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
+
 import { useChatStore } from '../stores/chat'
 import {
   hashTreeSource, semanticTreeConfigHash, SEMANTIC_TREE_SCHEMA_VERSION,
@@ -85,11 +92,16 @@ const KEYED_PROFILE = [{
 
 /**
  * settings.get：给出填好 Key 的配置，其余键返回 null（与无保存设置等价）。
+ * 语义树必须显式返回 true：自方案 §6.3 起它默认关闭，而这一组用例验证的正是
+ * 「用户把开关打开后」的建树/检索行为——不显式开启的话它们只会撞上总开关的短路。
  * 每次返回新的数组与对象：init 拿到的就是 store 自己的副本，
  * 用例里的 updateProfile 才不会把模块级常量改掉、泄漏给后面的用例。
  */
-const keyedSettings = (key: string) =>
-  Promise.resolve(key === 'llm_profiles' ? KEYED_PROFILE.map(profile => ({ ...profile })) : null)
+const keyedSettings = (key: string) => {
+  if (key === 'llm_profiles') return Promise.resolve(KEYED_PROFILE.map(profile => ({ ...profile })))
+  if (key === 'semantic_tree_enabled') return Promise.resolve(true)
+  return Promise.resolve(null)
+}
 
 /** 默认索引配置（provider openai / model gpt-4o）下、指定模型对应的建树配置指纹。 */
 const configHashFor = (model: string) => semanticTreeConfigHash({
@@ -117,15 +129,18 @@ describe('useChatStore — 语义树开关与状态', () => {
     global.fetch = fakeFetch() as any
   })
 
-  it('默认开启语义树（无需任何已保存设置）', async () => {
+  it('treeEnabled 默认关闭（方案 §6.3，无需任何已保存设置）', async () => {
     const store = useChatStore()
     await store.init()
-    expect(store.treeEnabled).toBe(true)
+    expect(store.treeEnabled).toBe(false)
   })
 
-  it('恢复已保存的关闭状态', async () => {
+  it('已保存的非开启值（字符串 false）同样保持关闭', async () => {
+    // 存的是字符串编码：加载判据在 true 一侧刻意接受 'true'，它的同胞 'false' 就绝不能被
+    // 当成真值。用布尔 false 测不出这一点——布尔 false 恰好等于新默认值，
+    // 把加载点整个删掉也照样绿（存在性/真值判据的实现才会在这里露馅）
     mockDb().settings.get.mockImplementation((key: string) =>
-      Promise.resolve(key === 'semantic_tree_enabled' ? false : null))
+      Promise.resolve(key === 'semantic_tree_enabled' ? 'false' : null))
     const store = useChatStore()
     await store.init()
     expect(store.treeEnabled).toBe(false)
@@ -497,14 +512,19 @@ describe('useChatStore — 后台建树（§8.2）', () => {
     expect(mockDb().tree.set).toHaveBeenCalledTimes(1)
   })
 
-  it('indexPaper 完成后在后台触发建树，不阻塞返回', async () => {
+  it('indexPaper 不再触发建树（语义树退出默认路径 §6.3），论文索引照常落盘', async () => {
     mockDb().paper.readFile.mockResolvedValue(btoa('fake pdf bytes'))
+    mockDb().index.get.mockResolvedValue(null)
     const store = useChatStore()
     await store.init()
 
     await store.indexPaper('p1')
-    // 平面索引已写盘时建树可能仍在进行 —— 用 waitFor 等后台任务落地
-    await vi.waitFor(() => expect(mockDb().tree.set).toHaveBeenCalledTimes(1))
+
+    // 段落索引照常落盘：阶段① 与阶段③ 各一次（阶段② 无向量模型，不写盘）
+    expect(mockDb().index.set).toHaveBeenCalledTimes(2)
+    // 建树不再由索引构建顺带触发：卡片阶段才是冷启动那唯一一次 LLM 调用，
+    // 每篇再建一次树等于把每篇的成本翻倍（方案 §6.3）
+    expect(mockDb().tree.set).not.toHaveBeenCalled()
   })
 })
 
