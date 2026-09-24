@@ -65,6 +65,7 @@ function buildInitialIndex(
   countTokens: TokenCounter,
   segmentation: PassageOptions,
   passageConfigHash: string,
+  structureHash: string,
   now: () => number,
   onStage?: (event: PassageStageEvent) => void,
 ): PassageIndex {
@@ -79,6 +80,12 @@ function buildInitialIndex(
     passages,
     tree,
     passageConfigHash,
+    // 阶段① 就写下本轮构建的卡片指纹：这一代已经拥有它（阶段③ 的产物由它标识），
+    // 少了它，若阶段③ 的写盘被代次守卫丢弃或进程正好死在这一窗口，落盘的记录会
+    // 对自己所属的卡片代次一无所知，而下一轮只能靠 `stage < 3` 重新判一次「要重做卡片」。
+    // 复用语义不变：阶段① 记录 stage 恒为 1 且没有 `cards`，`planPassageIndexRebuild`
+    // 的另两项判定必然要求重做卡片，故这里的哈希比对不会让任何记录被误判为「卡片可用」。
+    structureHash,
     separatorTokens: countTokens(CONTEXT_GROUP_SEPARATOR),
   }
 }
@@ -156,7 +163,7 @@ export async function startPassagePipeline(
       structureHash: deps.structureHash,
     }
   } else {
-    index = buildInitialIndex(pages, countTokens, deps.segmentation ?? {}, deps.passageConfigHash, now, deps.onStage)
+    index = buildInitialIndex(pages, countTokens, deps.segmentation ?? {}, deps.passageConfigHash, deps.structureHash, now, deps.onStage)
   }
 
   // 阶段① 立即落盘：此后提问即可用 BM25，不等待任何模型

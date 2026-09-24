@@ -99,6 +99,12 @@ export interface PassageIndexBuildPlan {
 /**
  * 失效规则（方案 §6.2）：`passageConfigHash` 变 → 全部重建；`structureHash` 变 →
  * 只重做阶段③；`embedderId` 变 → 只重算向量。三者独立，任何一项都不能越界。
+ *
+ * `vectors: true` **不等于**「配了 embedder」。两侧都有 `embedderId === undefined` 的合法场景
+ * （产品在模型没就绪时构建、bench 未注入 embedder），此时 `stored.embedderId ('x') !== undefined`
+ * 恒成立，于是**每一篇没有向量的记录无论重建多少次都报 `vectors: true`**——它表达的是
+ * 「存档里的向量与本次要用的模型不同源（或压根没有）」，不是「有模型可用」。
+ * 调用方不得据此推断 embedder 存在（阶段② 在无 embedder 时第一行就返回，不产出向量）。
  */
 export function planPassageIndexRebuild(args: {
   stored?: PassageIndex
