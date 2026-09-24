@@ -7,6 +7,8 @@
  */
 import type { EvidenceBlock } from '../../src/utils/evidenceBlock'
 import type { SemanticTree } from '../../src/utils/semanticTree'
+import type { Passage } from '../../src/utils/passages'
+import type { StructureCard } from '../../src/utils/structureCards'
 
 const MAX_QUOTE_CHARS = 160
 
@@ -55,5 +57,45 @@ export function renderTreeReport(entries: TreeInspectionEntry[]): string {
     }
     lines.push(renderTreeOutline(entry.outcome.tree, entry.outcome.blocks), '')
   }
+  return lines.join('\n')
+}
+
+export interface CardInspectEntry {
+  paperId: string
+  title: string
+  passages: Passage[]
+  cards: StructureCard[]
+  /** 卡片回落原因；未回落则不传 */
+  fallback?: string
+  paper?: { title: string; summary: string }
+}
+
+/**
+ * 卡片划分的人工核对报告（方案 §7「结构抽查」）：范围、标题、keyTerms 逐张列出，
+ * 供人工判断「主题划分是否合理」——这一步无法由程序校验。
+ */
+export function renderCardReport(entry: CardInspectEntry): string {
+  const byId = new Map(entry.passages.map(passage => [passage.id, passage]))
+  const lines: string[] = []
+  lines.push(`## ${entry.title}（${entry.paperId}）`)
+  lines.push('')
+  if (entry.fallback) lines.push(`> 卡片回落：\`${entry.fallback}\`（标题卡片，无 summary / keyTerms）`)
+  if (entry.paper) {
+    lines.push(`- 论文标题：${entry.paper.title}`)
+    lines.push(`- 论文摘要：${entry.paper.summary}`)
+  }
+  lines.push(`- 段落数：${entry.passages.length}，卡片数：${entry.cards.length}`)
+  lines.push('')
+  lines.push('| 卡片 | 范围 | 页区间 | 标题 | keyTerms |')
+  lines.push('| --- | --- | --- | --- | --- |')
+  for (const card of entry.cards) {
+    const first = byId.get(card.range[0])
+    const last = byId.get(card.range[1])
+    // 页区间用原始 1-based（与 `pageIndex.formatSource` 的「Pages N–N」同一口径、同一个 en dash），
+    // 人工核对时与 PDF 页码直接对上
+    const pages = first && last ? `${first.pieces[0].page + 1}–${last.pieces[last.pieces.length - 1].page + 1}` : '—'
+    lines.push(`| ${card.id} | ${card.range[0]}–${card.range[1]} | ${pages} | ${card.title} | ${card.keyTerms.join(', ') || '—'} |`)
+  }
+  lines.push('')
   return lines.join('\n')
 }

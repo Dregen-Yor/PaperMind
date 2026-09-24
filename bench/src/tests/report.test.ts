@@ -6,6 +6,9 @@ import {
   RETRIEVAL_SECTION_METRICS, RETRIEVAL_EXEMPT_METRICS, TIMING_SECTION_METRICS, TREE_SECTION_METRICS,
 } from '../report'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
+import { renderCardReport } from '../treeInspect'
+import { buildPassages, createEstimatingTokenCounter } from '../../../src/utils/passages'
+import { buildTitleCards } from '../../../src/utils/structureCards'
 
 function result(name: string, metrics: Record<string, number>, over: Partial<BenchResult> = {}): BenchResult {
   return {
@@ -1110,5 +1113,77 @@ describe('renderReport — 语义树诊断区块（§11.4）', () => {
   it('无树结果时不渲染该区块（不污染既有基线报表）', () => {
     const md = renderReport([result('default', { evidenceRecall: 0.7 })])
     expect(md).not.toContain('### 语义树诊断')
+  })
+})
+
+describe('冷启动成本表', () => {
+  const result = {
+    task: 'qa' as const,
+    config: { name: 'papermind-hybrid', kind: 'papermind' as const },
+    meta: { model: 'm', timestamp: 't', gitSha: 's', completed: 1, total: 1, retrievalAlgorithm: 'hybrid-passage' as const, baselineFamily: 'classic' as const, candidateGranularity: 'paragraph passage' },
+    metrics: { coldStartTotalP50Ms: 4300, coldStartTotalP95Ms: 5200, structureCallP50Ms: 4000, structureCallP95Ms: 4100, structureTokensPerPaper: 8455, structureFallbackRate: 0.1 },
+    perSample: [],
+    errors: [],
+  }
+
+  it('有冷启动指标时渲染独立区块，且不含 Q 列', () => {
+    const report = renderReport([result as never])
+    expect(report).toContain('冷启动成本')
+    expect(report).toContain('4300')
+    expect(report).toContain('8455')
+    // 上面两条数字断言是**空洞通过**的：本 fixture 缺 mrrDefinition 会落进「历史结果」表，
+    // 那张表按原值打印 4300 / 8455。真正证明数值出自新区块的是整行断言
+    // （时长走 fmtDuration，故端到端 P50 渲染为 4.30 s 而不是 4300）。
+    expect(report).toContain('| papermind-hybrid | 4.30 s / 5.20 s | — | — | 4.00 s / 4.10 s | — | 8455 | 10% | — | — |')
+  })
+
+  it('均值列按单值口径渲染，不查 P50/P95 后缀', () => {
+    // 三个均值键直接是值本身（`avgColdStartPassageMs`），没有对应的 `...P50Ms`：
+    // 用两值的 cell 查它们会得到 undefined 并渲染成「—」，真实数据整列消失
+    const withAverages = {
+      ...result,
+      metrics: {
+        ...result.metrics,
+        avgColdStartPassageMs: 150,
+        avgColdStartEmbedPassagesMs: 2500,
+        avgColdStartEmbedCardsMs: 300,
+        avgColdStartCardCount: 4,
+        avgColdStartPassageCount: 34,
+      },
+    }
+    const report = renderReport([withAverages as never])
+    expect(report).toContain('| papermind-hybrid | 4.30 s / 5.20 s | 150 ms | 2.50 s | 4.00 s / 4.10 s | 300 ms | 8455 | 10% | 4.000 | 34 |')
+  })
+
+  it('全部命中缓存（无 structureCall 百分位）时卡片调用列渲染「—」而不是 0 ms', () => {
+    // 聚合器对空数组不写 P50/P95（缓存命中的调用耗时接近 0，报 0 会是谎言），
+    // 区块必须跟着渲染「—」：任何一格落成 0 ms 都会把「没有观测」说成「零成本」
+    const allCacheHit = {
+      ...result,
+      metrics: { coldStartTotalP50Ms: 900, coldStartTotalP95Ms: 1200, structureTokensPerPaper: 9000, structureFallbackRate: 0 },
+    }
+    const report = renderReport([allCacheHit as never])
+    expect(report).toContain('| papermind-hybrid | 900 ms / 1.20 s | — | — | — | — | 9000 | 0% | — | — |')
+  })
+
+  it('没有冷启动指标时不渲染（旧报表不被污染）', () => {
+    const plain = { ...result, metrics: {} }
+    expect(renderReport([plain as never])).not.toContain('冷启动成本')
+  })
+})
+
+describe('renderCardReport', () => {
+  it('逐卡片打印范围、标题与 keyTerms', () => {
+    const passages = buildPassages(['Abstract\nShort.', 'Methods\nWe use BM25.'], createEstimatingTokenCounter(), { minTokens: 1 })
+    const markdown = renderCardReport({
+      paperId: 'p1',
+      title: 'Sample paper',
+      passages,
+      cards: buildTitleCards(passages),
+      fallback: 'invalid-json',
+    })
+    // 范围列本身不带方括号（渲染器输出 `P01–P01`），断言只查段落 ID 出现
+    expect(markdown).toContain('P01')
+    expect(markdown).toContain('回落')
   })
 })

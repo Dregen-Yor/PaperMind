@@ -228,6 +228,9 @@ export function renderReport(
   const treeBlock = renderTreeSection(results)
   if (treeBlock.length > 0) lines.push(...treeBlock, '')
 
+  const coldStartBlock = renderColdStartSection(results)
+  if (coldStartBlock.length > 0) lines.push(...coldStartBlock, '')
+
   // 上面三个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
   // length 守卫不是性能优化：区块根本没渲染时若仍然排除，这些数值会从整份报表里消失。
   const sharedSections = new Set<string>()
@@ -673,6 +676,46 @@ function cell(metrics: Record<string, number>, prefix: string): string {
   if (p50 === undefined || p95 === undefined) return '—'
   return `${fmtDuration(p50)} / ${fmtDuration(p95)}`
 }
+
+/**
+ * 「冷启动成本」区块（方案 §7）：与 Q **并列**报告，不进入 Q。
+ * 只在结果里真的出现过冷启动指标时渲染，否则旧基线报表会多出一整块空表
+ * （与 `renderTreeSection` 同一约定）。
+ */
+function renderColdStartSection(results: BenchResult[]): string[] {
+  const hasColdStart = results.some(r => r.metrics.coldStartTotalP50Ms !== undefined || r.metrics.structureTokensPerPaper !== undefined)
+  if (!hasColdStart) return []
+
+  const lines: string[] = []
+  lines.push('### 冷启动成本（不进入 Q）')
+  lines.push('')
+  lines.push('| 配置 | 冷启动端到端 P50 / P95 | 切段均值 | 段落向量均值 | 卡片调用 P50 / P95 | 卡片向量均值 | 卡片 token/篇 | 卡片回落率 | 平均卡片数 | 平均段落数 |')
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |')
+  for (const result of results) {
+    if (result.metrics.coldStartTotalP50Ms === undefined && result.metrics.structureTokensPerPaper === undefined) continue
+    const m = result.metrics
+    // 三个「均值」列各自是单值字段（`avgColdStartPassageMs` 等），没有 `...P50Ms/P95Ms`
+    // 后缀：用两值的 `cell` 查它们会全部落到缺失分支，真实数据整列渲染成「—」。
+    // 真正的百分位列（端到端、卡片调用）才走 `cell`。
+    lines.push(
+      `| ${result.config.name} | ${cell(m, 'coldStartTotal')} | ${avgCell(m, 'avgColdStartPassageMs')} | `
+      + `${avgCell(m, 'avgColdStartEmbedPassagesMs')} | ${cell(m, 'structureCall')} | ${avgCell(m, 'avgColdStartEmbedCardsMs')} | `
+      + `${m.structureTokensPerPaper === undefined ? '—' : fmtTokens(m.structureTokensPerPaper)} | `
+      + `${pctCell(m, 'structureFallbackRate')} | ${numCell(m, 'avgColdStartCardCount')} | ${numCell(m, 'avgColdStartPassageCount')} |`,
+    )
+  }
+  lines.push('')
+  lines.push('> 「卡片调用 P50/P95」只统计**未命中缓存**的调用（命中时耗时接近 0，混进去会把成本稀释成假象）；')
+  lines.push('> 卡片 token 由字符数估算（`LlmClient.complete` 不透传服务商 usage），每篇论文的冷启动只发生**一次**卡片调用。')
+  return lines
+}
+
+/** 单个均值字段渲染；缺失输出「—」。 */
+const avgCell = (metrics: Record<string, number>, name: string): string =>
+  metrics[name] === undefined ? '—' : fmtDuration(metrics[name])
+/** 单个计数/均值字段渲染（非时长口径）；缺失输出「—」。 */
+const numCell = (metrics: Record<string, number>, name: string): string =>
+  metrics[name] === undefined ? '—' : fmt(metrics[name])
 
 /**
  * 分母计数行（`contextPageMrrSampleCount` / `EligibleCount`）：它们的差值抑制与门禁无关，
