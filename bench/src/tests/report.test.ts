@@ -4,8 +4,12 @@ import {
   renderReport, renderComparison, fmtDuration, partitionResults,
   retrievalComparisonIssues,
   RETRIEVAL_SECTION_METRICS, RETRIEVAL_EXEMPT_METRICS, TIMING_SECTION_METRICS, TREE_SECTION_METRICS,
+  COLD_START_SECTION_METRICS,
 } from '../report'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
+import { renderCardReport } from '../treeInspect'
+import { buildPassages, createEstimatingTokenCounter } from '../../../src/utils/passages'
+import { buildTitleCards } from '../../../src/utils/structureCards'
 
 function result(name: string, metrics: Record<string, number>, over: Partial<BenchResult> = {}): BenchResult {
   return {
@@ -59,8 +63,8 @@ function comparableResult(name: string, metaPatch: Partial<BenchResult['meta']> 
 }
 
 const SPEED_META: Partial<BenchResult['meta']> = {
-  speedMetricSchemaVersion: 1,
-  speedDefinition: 'query-timeline-v1',
+  speedMetricSchemaVersion: 2,
+  speedDefinition: 'query-timeline-v2',
   datasetFingerprint: 'speed-dataset-a',
   executedQuestionIdsHash: 'executed-a',
   completedSpeedQuestionIdsHash: 'completed-a',
@@ -763,7 +767,7 @@ describe('partitionResults（§9）', () => {
 describe('renderReport — query-timeline speed', () => {
   it('renders retrieval speed with exactly six time values and one token mean', () => {
     const md = renderReport([speedResult('papermind', { answerF1: 0.5 })])
-    const header = tableHeaderAfter(md, '### 检索方法速度（query-timeline-v1）')
+    const header = tableHeaderAfter(md, '### 检索方法速度（query-timeline-v2）')
 
     expect(header).toEqual([
       '方法',
@@ -772,7 +776,7 @@ describe('renderReport — query-timeline speed', () => {
       'Full Answer P50', 'P95',
       'Avg Online Tokens',
     ])
-    expect(sectionOf(md, '### 检索方法速度（query-timeline-v1）')).toContain(
+    expect(sectionOf(md, '### 检索方法速度（query-timeline-v2）')).toContain(
       '| papermind | 100 ms | 200 ms | 300 ms | 400 ms | 500 ms | 600 ms | 80 |',
     )
 
@@ -797,7 +801,7 @@ describe('renderReport — query-timeline speed', () => {
     ]
 
     const md = renderReport([run])
-    const speed = sectionOf(md, '### 检索方法速度（query-timeline-v1）')
+    const speed = sectionOf(md, '### 检索方法速度（query-timeline-v2）')
     const diagnostics = sectionOf(md, '### Query-timeline 支持计数与失败诊断')
 
     expect(speed).toContain('| papermind | 100 ms | 200 ms | 300 ms | 400 ms | 500 ms | 600 ms | — |')
@@ -816,8 +820,8 @@ describe('renderReport — query-timeline speed', () => {
       speedResult('papermind'),
       fullContextSpeedResult('full-context'),
     ])
-    const retrievalSpeed = sectionOf(md, '### 检索方法速度（query-timeline-v1）')
-    const ceilingSpeed = sectionOf(md, '### 生成上限速度（query-timeline-v1）')
+    const retrievalSpeed = sectionOf(md, '### 检索方法速度（query-timeline-v2）')
+    const ceilingSpeed = sectionOf(md, '### 生成上限速度（query-timeline-v2）')
 
     expect(retrievalSpeed).toContain('| papermind |')
     expect(retrievalSpeed).not.toContain('| full-context |')
@@ -847,13 +851,26 @@ describe('renderReport — query-timeline speed', () => {
     const report = renderReport([legacy])
     expect(report).toContain('### 详细耗时与缓存诊断（Legacy timing）')
     expect(report).toContain('| legacy |')
-    expect(report).not.toContain('### 检索方法速度（query-timeline-v1）')
-    expect(report).toContain('缺少 `speedDefinition: \'query-timeline-v1\'`')
+    expect(report).not.toContain('### 检索方法速度（query-timeline-v2）')
+    expect(report).toContain('缺少 `speedDefinition: \'query-timeline-v2\'`')
 
     const comparison = renderComparison(legacy, speedResult('current'))
     expect(comparison).not.toContain('### Query-timeline 速度对比')
     expect(comparison).not.toContain('Evidence Ready P50')
     expect(comparison).toContain('Legacy timing 不进入 query-timeline 速度 delta')
+  })
+
+  it('reads historical v1 speed results as diagnostics without relabeling them v2', () => {
+    const historical = speedResult('historical', {}, {
+      speedMetricSchemaVersion: 1,
+      speedDefinition: 'query-timeline-v1',
+      startedAt: '2026-09-05T09:30:00.000Z',
+      finishedAt: '2026-09-05T10:00:00.000Z',
+    })
+    const report = renderReport([historical])
+    expect(report).toContain('### 详细耗时与缓存诊断（Legacy timing）')
+    expect(report).not.toContain('### 检索方法速度（query-timeline-v2）')
+    expect(renderComparison(historical, speedResult('current'))).not.toContain('### Query-timeline 速度对比')
   })
 })
 
@@ -862,7 +879,7 @@ describe('renderComparison — query-timeline speed gate', () => {
     ['dataset fingerprint', { datasetFingerprint: 'other' }],
     ['executed IDs', { executedQuestionIdsHash: 'other' }],
     ['completed speed IDs', { completedSpeedQuestionIdsHash: 'other' }],
-    ['speed schema', { speedMetricSchemaVersion: 2 }],
+    ['speed schema', { speedMetricSchemaVersion: 1 }],
     ['answer model', { answerModelIdentity: 'other' }],
     ['answer framing', { answerFramingIdentityHash: 'other' }],
     ['endpoint', { endpointIdentity: 'other' }],
@@ -893,7 +910,7 @@ describe('renderComparison — query-timeline speed gate', () => {
     )
     expect(md).not.toContain('### Query-timeline 速度对比')
     expect(md).not.toContain('Evidence Ready P50')
-    expect(md).toContain('两侧都必须声明 `speedDefinition: \'query-timeline-v1\'`')
+    expect(md).toContain('两侧都必须声明 `speedDefinition: \'query-timeline-v2\'`')
   })
 
   it('rejects unequal speedSampleCount and same-sized cohorts with different completed IDs', () => {
@@ -1097,5 +1114,105 @@ describe('renderReport — 语义树诊断区块（§11.4）', () => {
   it('无树结果时不渲染该区块（不污染既有基线报表）', () => {
     const md = renderReport([result('default', { evidenceRecall: 0.7 })])
     expect(md).not.toContain('### 语义树诊断')
+  })
+})
+
+describe('冷启动成本表', () => {
+  const result = {
+    task: 'qa' as const,
+    config: { name: 'papermind-hybrid', kind: 'papermind' as const },
+    meta: { model: 'm', timestamp: 't', gitSha: 's', completed: 1, total: 1, retrievalAlgorithm: 'hybrid-passage' as const, baselineFamily: 'classic' as const, candidateGranularity: 'paragraph passage' },
+    metrics: { coldStartTotalP50Ms: 4300, coldStartTotalP95Ms: 5200, structureCallP50Ms: 4000, structureCallP95Ms: 4100, structureTokensPerPaper: 8455, structureFallbackRate: 0.1 },
+    perSample: [],
+    errors: [],
+  }
+
+  it('有冷启动指标时渲染独立区块，且不含 Q 列', () => {
+    const report = renderReport([result as never])
+    expect(report).toContain('冷启动成本')
+    expect(report).toContain('4300')
+    expect(report).toContain('8455')
+    // 上面两条数字断言是**空洞通过**的：本 fixture 缺 mrrDefinition 会落进「历史结果」表，
+    // 那张表按原值打印 4300 / 8455。真正证明数值出自新区块的是整行断言
+    // （时长走 fmtDuration，故端到端 P50 渲染为 4.30 s 而不是 4300）。
+    expect(report).toContain('| papermind-hybrid | 4.30 s / 5.20 s | — | — | 4.00 s / 4.10 s | — | 8455 | 10% | — | — |')
+  })
+
+  it('均值列按单值口径渲染，不查 P50/P95 后缀', () => {
+    // 三个均值键直接是值本身（`avgColdStartPassageMs`），没有对应的 `...P50Ms`：
+    // 用两值的 cell 查它们会得到 undefined 并渲染成「—」，真实数据整列消失
+    const withAverages = {
+      ...result,
+      metrics: {
+        ...result.metrics,
+        avgColdStartPassageMs: 150,
+        avgColdStartEmbedPassagesMs: 2500,
+        avgColdStartEmbedCardsMs: 300,
+        avgColdStartCardCount: 4,
+        avgColdStartPassageCount: 34,
+      },
+    }
+    const report = renderReport([withAverages as never])
+    expect(report).toContain('| papermind-hybrid | 4.30 s / 5.20 s | 150 ms | 2.50 s | 4.00 s / 4.10 s | 300 ms | 8455 | 10% | 4.000 | 34 |')
+  })
+
+  it('全部命中缓存（无 structureCall 百分位）时卡片调用列渲染「—」而不是 0 ms', () => {
+    // 聚合器对空数组不写 P50/P95（缓存命中的调用耗时接近 0，报 0 会是谎言），
+    // 区块必须跟着渲染「—」：任何一格落成 0 ms 都会把「没有观测」说成「零成本」
+    const allCacheHit = {
+      ...result,
+      metrics: { coldStartTotalP50Ms: 900, coldStartTotalP95Ms: 1200, structureTokensPerPaper: 9000, structureFallbackRate: 0 },
+    }
+    const report = renderReport([allCacheHit as never])
+    expect(report).toContain('| papermind-hybrid | 900 ms / 1.20 s | — | — | — | — | 9000 | 0% | — | — |')
+  })
+
+  it('schema-v2 行：11 个冷启动指标只由冷启动区块渲染，伴侣表与生成上限表一个都不列', () => {
+    // 上面三条用例的 fixture 都缺 mrrDefinition，会落进「历史结果」表——那张表按原值全量打印，
+    // 因此永远抓不到「同一指标既进冷启动区块、又作为原始列出现在回答质量/生成上限表」的重复。
+    // 只有 schema-v2 行才走这两张按 sharedSections 过滤的表。
+    const coldStartMetrics: Record<string, number> = {
+      coldStartTotalP50Ms: 4300, coldStartTotalP95Ms: 5200,
+      avgColdStartPassageMs: 150, avgColdStartEmbedPassagesMs: 2500,
+      structureCallP50Ms: 4000, structureCallP95Ms: 4100,
+      avgColdStartEmbedCardsMs: 300, structureTokensPerPaper: 8455,
+      structureFallbackRate: 0.1, avgColdStartCardCount: 4, avgColdStartPassageCount: 34,
+    }
+    // answerF1 保证伴侣表非空：表被整块跳过时下面的表头断言会查无此表而假通过
+    const eligible = schemaV2Result('papermind-hybrid', { ...coldStartMetrics, answerF1: 0.43 })
+    // bm25*（comparisonEligible: false）走生成上限表，同样只受 sharedSections 过滤
+    const bm25 = schemaV2Result('papermind-hybrid-bm25', coldStartMetrics, {
+      comparisonEligible: false, comparisonIneligibleReason: 'embedder-unavailable',
+    })
+    const md = renderReport([eligible, bm25])
+
+    // 归属区块真的渲染了——否则「排除」等于把数字删掉，而不是搬家
+    expect(tableHeaderAfter(md, '### 冷启动成本')).toContain('卡片 token/篇')
+    for (const key of Object.keys(coldStartMetrics)) {
+      expect(COLD_START_SECTION_METRICS, `COLD_START_SECTION_METRICS 缺 ${key}`).toContain(key)
+      expect(tableHeaderAfter(md, '### 回答质量'), `回答质量伴侣表仍在列 ${key}`).not.toContain(key)
+      expect(tableHeaderAfter(md, '### 生成上限'), `生成上限表仍在列 ${key}`).not.toContain(key)
+    }
+  })
+
+  it('没有冷启动指标时不渲染（旧报表不被污染）', () => {
+    const plain = { ...result, metrics: {} }
+    expect(renderReport([plain as never])).not.toContain('冷启动成本')
+  })
+})
+
+describe('renderCardReport', () => {
+  it('逐卡片打印范围、标题与 keyTerms', () => {
+    const passages = buildPassages(['Abstract\nShort.', 'Methods\nWe use BM25.'], createEstimatingTokenCounter(), { minTokens: 1 })
+    const markdown = renderCardReport({
+      paperId: 'p1',
+      title: 'Sample paper',
+      passages,
+      cards: buildTitleCards(passages),
+      fallback: 'invalid-json',
+    })
+    // 范围列本身不带方括号（渲染器输出 `P01–P01`），断言只查段落 ID 出现
+    expect(markdown).toContain('P01')
+    expect(markdown).toContain('回落')
   })
 })

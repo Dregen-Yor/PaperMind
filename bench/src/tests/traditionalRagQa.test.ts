@@ -27,8 +27,8 @@ const client = { complete: async () => '', chat: async () => '', stats: () => ({
 
 function speedContract(datasetFingerprint: string): SpeedRunContract {
   return {
-    speedMetricSchemaVersion: 1,
-    speedDefinition: 'query-timeline-v1',
+    speedMetricSchemaVersion: 2,
+    speedDefinition: 'query-timeline-v2',
     datasetFingerprint,
     executedQuestionIdsHash: 'executed-question-ids',
     streaming: true,
@@ -136,7 +136,7 @@ describe('traditional RAG runner', () => {
   })
 
   it('excludes ambiguous evidence from retrieval-quality denominators', async () => {
-    const samples: EvalSample[] = [{ paperId: 'p', title: 'p', pages: ['text'], source: 'qasper', questions: [{ id: 'q', question: 'q', answers: ['a'], evidencePages: [0], evidenceMapping: 'ambiguous', unanswerable: false }] }]
+    const samples: EvalSample[] = [{ paperId: 'p', title: 'p', pages: ['text'], source: 'qasper', questions: [{ id: 'q', question: 'q', answers: ['a'], evidencePages: [0], evidenceMapping: 'ambiguous', unanswerable: false, qualityAnswers: ['a'], qualityDefinition: 'qasper-all-questions-v1' }] }]
     const result = await runTraditionalRagQaTask({
       samples, config: jaccardConfig(2), client, systemPrompt: 's', gitSha: 'x', model: 'm',
       materialize: materialize(4096),

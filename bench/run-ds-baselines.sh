@@ -1,46 +1,37 @@
 #!/usr/bin/env bash
-# 顺序跑传统 RAG 三个基线。凭据只从本机 PaperMind 的 ds profile 读取，不写入日志或结果文件。
+# 按 speed v2 协议顺序跑检索基线，并对 full-context 参考离线算 Q。
+# 参考须先由 run-ds-papermind.sh 产出；可用参数覆盖基线列表，例如：
+#   bench/run-ds-baselines.sh rag-bm25 hybrid-rerank
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib-ds-env.sh"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-db_path="$HOME/Library/Application Support/papermind/papermind.db"
-profile_name="${PAPERMIND_BENCH_PROFILE:-ds}"
-results_dir="$repo_root/bench/results"
+configs=("$@")
+[[ ${#configs[@]} -gt 0 ]] || configs=(rag-bm25 rag-jaccard rag-cosine)
 
-if [[ ! -f "$db_path" ]]; then
-  echo "找不到 PaperMind 配置数据库：$db_path" >&2
-  exit 1
-fi
-
-# 字段以 ASCII Unit Separator 分隔，避免 base URL 中的常见字符产生歧义。
-profile="$({ sqlite3 -separator $'\x1f' "$db_path" "
-  SELECT json_extract(json_each.value, '\$.provider'),
-         json_extract(json_each.value, '\$.model'),
-         json_extract(json_each.value, '\$.baseUrl'),
-         json_extract(json_each.value, '\$.apiKey')
-  FROM settings, json_each(settings.value)
-  WHERE settings.key = 'llm_profiles'
-    AND json_extract(json_each.value, '\$.name') = '$profile_name';
-"; })"
-
-if [[ -z "$profile" ]]; then
-  echo "未找到 LLM profile：$profile_name" >&2
-  exit 1
-fi
-
-IFS=$'\x1f' read -r BENCH_LLM_PROVIDER BENCH_LLM_MODEL BENCH_LLM_BASE_URL BENCH_LLM_API_KEY <<< "$profile"
-if [[ -z "${BENCH_LLM_MODEL:-}" || -z "${BENCH_LLM_BASE_URL:-}" || -z "${BENCH_LLM_API_KEY:-}" ]]; then
-  echo "profile $profile_name 缺少 model、baseUrl 或 apiKey" >&2
-  exit 1
-fi
-export BENCH_LLM_PROVIDER BENCH_LLM_MODEL BENCH_LLM_BASE_URL BENCH_LLM_API_KEY
-
+load_ds_profile
 mkdir -p "$results_dir"
 cd "$repo_root"
+ensure_qasper_dataset
 
-# 单一 QASPER 全集保证 --out 的文件名严格为 qa-full-{algorithm}.json。
-for algorithm in bm25 jaccard cosine; do
-  echo "[$(date '+%F %T')] 开始 rag-$algorithm"
-  npm run bench -- --task qa --dataset qasper --config "rag-$algorithm" --out "$results_dir/qa-full-$algorithm.json"
-  echo "[$(date '+%F %T')] 完成 rag-$algorithm"
+if [[ ! -f "$reference_out" ]]; then
+  echo "缺少 Q 参考 ${reference_out#$repo_root/}，先运行 bench/run-ds-papermind.sh" >&2
+  exit 1
+fi
+
+# 单个基线失败只跳过它，不中断后续基线
+failed=()
+for config in "${configs[@]}"; do
+  out="$results_dir/qa-v2-$config.json"
+  echo "[$(date '+%F %T')] 开始 $config"
+  if run_speed "$out" --config "$config" && run_q "$out" "$results_dir/q-$config.json"; then
+    echo "[$(date '+%F %T')] 完成 $config"
+  else
+    echo "[$(date '+%F %T')] 失败 $config" >&2
+    failed+=("$config")
+  fi
 done
+
+if [[ ${#failed[@]} -gt 0 ]]; then
+  echo "失败的基线：${failed[*]}" >&2
+  exit 1
+fi

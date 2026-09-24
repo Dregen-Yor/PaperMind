@@ -8,8 +8,8 @@ function record(id: string, speed: PerSampleRecord['speed']): PerSampleRecord {
 }
 
 const contract: SpeedRunContract = {
-  speedMetricSchemaVersion: 1,
-  speedDefinition: 'query-timeline-v1',
+  speedMetricSchemaVersion: 2,
+  speedDefinition: 'query-timeline-v2',
   datasetFingerprint: 'dataset',
   executedQuestionIdsHash: 'executed',
   streaming: true,

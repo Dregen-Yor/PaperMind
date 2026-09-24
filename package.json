@@ -27,7 +27,6 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
-    "@huggingface/transformers": "^3.8.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^26.4.1",
@@ -48,6 +47,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@huggingface/transformers": "^3.8.1",
     "better-sqlite3": "^13.0.3",
     "dompurify": "^3.4.12",
     "element-plus": "^2.14.1",

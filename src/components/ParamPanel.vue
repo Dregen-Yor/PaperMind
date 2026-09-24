@@ -64,14 +64,18 @@
       <div class="param-section">
         <label>
           回答长度上限（Max Tokens）
-          <span class="val tabular-nums">{{ chatProfile?.maxTokens ?? 4096 }}</span>
+          <span class="val tabular-nums">{{ unlimitedTokens ? '不限制' : chatProfile?.maxTokens }}</span>
         </label>
         <el-slider
-          :model-value="chatProfile?.maxTokens ?? 4096"
+          :model-value="chatProfile?.maxTokens || CAPPED_MAX_TOKENS_DEFAULT"
           @update:model-value="updateCurrent('maxTokens', $event)"
-          :min="256" :max="8192" :step="256"
+          :min="256" :max="MAX_TOKENS_LIMIT" :step="256"
+          :disabled="unlimitedTokens"
         />
-        <p class="hint">长回答（表格、推导）建议 ≥4096</p>
+        <div class="unlimited-row">
+          <el-switch v-model="unlimitedTokens" size="small" />
+          <span class="hint">{{ unlimitedHint }}</span>
+        </div>
       </div>
 
       <el-divider />
@@ -86,14 +90,38 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { DArrowRight, Setting } from '@element-plus/icons-vue'
-import { useChatStore } from '../stores/chat'
+import { useChatStore, UNLIMITED_MAX_TOKENS, CAPPED_MAX_TOKENS_DEFAULT, MAX_TOKENS_LIMIT } from '../stores/chat'
 import { storeToRefs } from 'pinia'
 
 defineEmits<{ (e: 'close'): void }>()
 
 const chatStore = useChatStore()
 const { profiles, chatProfileId, chatProfile } = storeToRefs(chatStore)
+
+/** 关掉「不限制」时用来还原的上限（按 profile 记），避免手滑把 1024 变成 8192。 */
+const lastCappedTokens = new Map<string, number>()
+
+/** 「不限制」开关与 maxTokens 的双向映射：0 = 不限制，关掉开关回到用户上次设过的有限上限。 */
+const unlimitedTokens = computed({
+  get: () => (chatProfile.value?.maxTokens ?? UNLIMITED_MAX_TOKENS) === UNLIMITED_MAX_TOKENS,
+  set: (unlimited: boolean) => {
+    const profile = chatProfile.value
+    if (!profile) return
+    if (unlimited) {
+      if (profile.maxTokens > UNLIMITED_MAX_TOKENS) lastCappedTokens.set(profile.id, profile.maxTokens)
+      updateCurrent('maxTokens', UNLIMITED_MAX_TOKENS)
+      return
+    }
+    updateCurrent('maxTokens', lastCappedTokens.get(profile.id) ?? CAPPED_MAX_TOKENS_DEFAULT)
+  },
+})
+
+/** Anthropic 的 max_tokens 必填，不能真的「什么都不发」，提示里要说清楚。 */
+const unlimitedHint = computed(() => chatProfile.value?.provider === 'anthropic'
+  ? `Anthropic 的 max_tokens 必填，按 ${CAPPED_MAX_TOKENS_DEFAULT} 发送（老模型上限更低时自动降级）`
+  : '不向上游发送输出上限，由模型自身决定')
 
 function updateCurrent(key: 'temperature' | 'topK' | 'maxTokens', value: number) {
   if (!chatProfile.value) return
@@ -154,6 +182,12 @@ function updateCurrent(key: 'temperature' | 'topK' | 'maxTokens', value: number)
   color: var(--text-muted);
   margin-top: 4px;
 }
+.unlimited-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.unlimited-row .hint { margin-top: 0; }
 
 /* profile meta chips */
 .profile-badge-row {

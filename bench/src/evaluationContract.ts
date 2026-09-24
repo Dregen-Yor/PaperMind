@@ -52,7 +52,7 @@ const sha256 = (value: unknown): string =>
  * 与 runQaTask / traditionalRagQa / strongBaselineQa 的切片语义逐字一致，
  * 否则指纹会覆盖到未执行的题目，横向比较就失去意义。
  */
-function executedQuestions(
+export function executedQuestions(
   samples: EvalSample[],
   limit?: number,
 ): Array<{ sample: EvalSample; question: QaQuestion }> {
@@ -90,6 +90,8 @@ export function buildEvaluationContract(samples: EvalSample[], limit?: number): 
     evidencePages: question.evidencePages,
     unanswerable: question.unanswerable,
     evidenceMapping: question.evidenceMapping ?? null,
+    qualityAnswers: question.qualityAnswers ?? null,
+    qualityDefinition: question.qualityDefinition ?? null,
   }))
   const eligibleIds = executed
     .filter(({ question }) => isRetrievalEligible(question))

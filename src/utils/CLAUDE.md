@@ -3,6 +3,7 @@
 # src/utils/ — 工具函数与 RAG 检索
 
 **变更记录**
+- 2026-09-24: 新增**段落混合检索链路**（方案 §1–§7）——`passages` / `sectionHeadings` / `bm25` / `lexicalTokenizer` / `rrf` / `priorityQueue` / `structureCards` / `passageIndex` / `passageIndexBuilder` / `passageRetrieval` / `embedder` / `transformersEmbedder` / `modelCache` / `buildGeneration`，即「段落级 BM25 + 向量 + 卡片先验三路加权 RRF」替换整章 `scoreAndSelect` 的检索路径（详见下文）
 - 2026-09-21: 新增三个纯函数模块——`sourceRef.ts`（消息来源结构化归一）、`highlightMerge.ts`（划选片段/page 合并与历史碎片合并计划）、`exportSanitize.ts`（导出默认脱敏 + 备份文件名）
 - 2026-09-15: 新增语义树检索链路——`evidenceBlock.ts`（原文证据块）、`semanticTree.ts`（单次调用建树 + 校验 + 诊断 + `semanticTreeConfigHash` 建树配置指纹）、`semanticRoute.ts`（单轮树路由 + 原文取证 + 统一上下文预算 + 平面就地回落）；`ragPipeline.ts` 的 `IndexedPaper` 增加可选 `semantic` 字段，提供时把平面叶节点与树节点放进**同一次**打分判断，因此既满足 §9 的回落要求又不增加查询阶段串行 LLM 调用
 - 2026-08-02T15:49:42: 修正面包屑；新增 `markdown.ts`（Markdown+KaTeX 渲染）与 `abstractSummarizer.ts`（Hugging Face 摘要）文档
@@ -10,7 +11,7 @@
 
 ## 模块职责
 
-无状态工具集合：PDF 元数据解析、PageIndex RAG 检索、轻量语义树（证据块 / 建树 / 树路由）、消息 Markdown/数学渲染、学术长文摘要分块，以及消息来源/高亮/导出三类归一化纯函数（`sourceRef` / `highlightMerge` / `exportSanitize`）。均为纯函数，便于单测。
+无状态工具集合：PDF 元数据解析、PageIndex RAG 检索、轻量语义树（证据块 / 建树 / 树路由）、**段落混合检索链路（切段 / 卡片 / 段落索引 / 融合检索 / 本地向量）**、消息 Markdown/数学渲染、学术长文摘要分块，以及消息来源/高亮/导出三类归一化纯函数（`sourceRef` / `highlightMerge` / `exportSanitize`）。均为纯函数，便于单测。
 
 ---
 
@@ -45,6 +46,33 @@ type LLMFn = (prompt: string) => Promise<string>
 
 > `summarizeRange` / `buildPageIndex` 的 LLM 返回按 `{"title","summary"}` JSON 解析，失败时保留默认标题。
 > ⚠️ 旧 `retrieve` API 已删除，检索统一走 `scoreAndSelect`。
+
+---
+
+## 段落混合检索链路（方案 §1–§7）
+
+第二条检索路径，替换「整章 `scoreAndSelect`」为**段落级**检索：段落 BM25 + 段落向量 + 卡片先验
+三路加权 RRF，回答前零 LLM 调用。各模块职责：
+
+| 模块 | 作用 |
+|------|------|
+| `passages.ts` | 自然段切分（`buildPassages`）：不足 `minTokens` 同小节向后合并、超 `maxTokens` 在句子边界切开；`text` 逐字等于 `pieces` 拼接（`hasPassagePartition` 校验），`searchText` 只喂打分与向量 |
+| `sectionHeadings.ts` | `isHeadingLine` 小节标题判定（自 bench 的 `baselines/sections.ts` 移入，两侧共用） |
+| `bm25.ts` / `lexicalTokenizer.ts` | BM25 打分器与词法切词（自 bench 的 `traditionalRag/` 移入；bench 侧改为薄再导出，口径不可改，否则已记录的分数被静默重标定） |
+| `rrf.ts` | 倒数名次融合（支持加权）；`priorityQueue.ts` 是确定性最大堆，同分按 `order` 升序 |
+| `structureCards.ts` | 冷启动**每篇恰好一次**卡片 LLM 调用（`STRUCTURE_CARD_PROMPT_VERSION`）；校验不过整份作废、**不重试不修补**，回落标题卡片；`cardsToIndexNodes` 把卡片推导成 `IndexNode` 树，UI 与旧代码零改动 |
+| `passageIndex.ts` | v2 落盘结构（`PASSAGE_INDEX_VERSION = 2`，与切段 schema 版本独立演进）+ 三个指纹（`passageConfigHash` / `structureHash` / `embedderId`）+ `planPassageIndexRebuild` 的独立失效范围 + 向量 base64 序列化与逐字段形态校验 |
+| `passageIndexBuilder.ts` | 分阶段管线：① 段落（本地，落盘即返回 `{ index, rest }`）→ ② 段落向量 → ③ 卡片 + 卡片向量；`persist` 由调用方做代次校验 |
+| `passageRetrieval.ts` | 三路加权 RRF → 预算填充 + 同小节邻段扩展 → 原文顺序组装；`DEFAULT_HYBRID_OPTIONS` 是产品默认旋钮（`maxTokens` 与 bench 的 `CONTEXT_BUDGET_TOKENS` 同值） |
+| `embedder.ts` / `transformersEmbedder.ts` / `modelCache.ts` | 向量接口 / 本地 transformers.js 实现（动态 import，`wasmPaths = './ort/'`，资源由 `vite.config.ts` 复制到 `public/ort/`）/ IndexedDB 模型文件缓存（`file://` 页面下 Cache API 不可靠） |
+
+三条硬口径：
+
+- **原文不可改**：进上下文的永远是 `pieces` 拼接出的 `text`；页眉页脚清洗只作用于 `searchText` 与向量输入
+- **回答前零 LLM**：段落路径 `llmCalled: false`；降级链条为 `full` → `full-title-fallback` → `bm25+dense` → `bm25+card-lexical` → `bm25`，由 `retrievalMode` 如实报告
+- **计数必须同源**：建索引用的计数器 → 落盘的 `Passage.tokenCount` / `separatorTokens` → 物化器用的分词器。三者不同源时预算判定会超额放段，`materializeContext` 随即真实截断（不报错，静默丢原文）
+
+`buildGeneration.ts` 提供「写盘前复核代次」的守卫（`begin` / `isCurrent`），构建期间切了索引 profile 的那一代结果整体丢弃。
 
 ---
 
@@ -225,6 +253,7 @@ interface HighlightSegment { page: number; start: number; end: number }  // 页�
 - `semanticRoute.test.ts` — 整树单轮打分、阈值与 topK、相邻扩张、短路与降级、上下文预算、平面就地回落、非连续证据拆区间（35 用例）
 - `ragPipelineSemantic.test.ts` — 树路由接入管线后的调用次数不变量、就地回落与预算裁剪（11 用例）
 - `sourceRef.test.ts` — 旧字符串数组降级、结构化对象保留页区间、脏输入丢弃/降级（3 用例）
+- 段落混合检索链路：`passages.test.ts`（10）/ `passageIndex.test.ts`（19）/ `passageIndexBuilder.test.ts`（15）/ `passageRetrieval.test.ts`（31）/ `embedder.test.ts`（16）/ `transformersEmbedder.test.ts`（19）/ `chatPassageIndex.test.ts`（6）
 - `highlightMerge.test.ts` — 同页合并与缺口保持、乱序输入、碎片计划的时间窗 + 偏移连通 + note 保护 + 仅删不更 + 双簇互不串簇（12 用例）
 - `exportSanitize.test.ts` — `llm_profiles`/`llm_config`/`huggingface_token` 三类凭据脱敏、非 JSON 与非对象原样保留、文件名格式（7 用例）
 

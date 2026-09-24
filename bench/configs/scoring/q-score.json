@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "formula": "weighted-geometric-relative-v1",
+  "baselineMode": "full-context",
+  "weights": {
+    "answerF1": 0.6,
+    "ttftP50": 0.2,
+    "ttftP95": 0.2
+  }
+}

@@ -136,8 +136,8 @@ function answerClient(speed: boolean, complete: LlmClient['complete'] = async ()
 
 function speedContract(datasetFingerprint: string): SpeedRunContract {
   return {
-    speedMetricSchemaVersion: 1,
-    speedDefinition: 'query-timeline-v1',
+    speedMetricSchemaVersion: 2,
+    speedDefinition: 'query-timeline-v2',
     datasetFingerprint,
     executedQuestionIdsHash: 'quality-regression-question-ids',
     streaming: true,
@@ -325,14 +325,14 @@ const expectedFullContextQuality = {
         judgeGroundedness: 3,
       },
       retrievalStatus: undefined,
-      generationStatus: undefined,
-      judgeStatus: undefined,
+      generationStatus: 'completed',
+      judgeStatus: 'completed',
       retrievalQuery: undefined,
       contextPageOrder: undefined,
       contextTokenCount: undefined,
       contextTruncated: undefined,
       selectedPages: undefined,
-      evidencePages: undefined,
+      evidencePages: [0],
       answer: 'answer',
     },
     {
@@ -349,14 +349,14 @@ const expectedFullContextQuality = {
         judgeGroundedness: undefined,
       },
       retrievalStatus: undefined,
-      generationStatus: undefined,
-      judgeStatus: undefined,
+      generationStatus: 'completed',
+      judgeStatus: 'completed',
       retrievalQuery: undefined,
       contextPageOrder: undefined,
       contextTokenCount: undefined,
       contextTruncated: undefined,
       selectedPages: undefined,
-      evidencePages: undefined,
+      evidencePages: [],
       answer: '无法根据给定内容回答。',
     },
   ],
@@ -541,6 +541,51 @@ async function runFullContext(speed: boolean): Promise<BenchResult> {
 }
 
 describe('speed mode quality regression', () => {
+  it('counts online full-context assembly in TTFT but excludes paper preparation', async () => {
+    const measure = async (preparationMs: number, assemblyMs: number) => {
+      let clock = 0
+      const pages = ['paper evidence']
+      const join = pages.join.bind(pages)
+      let prepared = false
+      pages.join = (separator?: string) => {
+        if (!prepared) { clock += preparationMs; prepared = true }
+        return join(separator)
+      }
+      const question = { ...answerableQuestion }
+      let assembled = false
+      Object.defineProperty(question, 'question', {
+        get: () => {
+          if (!assembled) { clock += assemblyMs; assembled = true }
+          return 'evidence'
+        },
+      })
+      const fixture = { ...sample, pages, questions: [question] }
+      const client = answerClient(true) as StreamingLlmClient
+      const result = await runFullContextQaTask({
+        samples: [fixture],
+        config: { name: 'timing', kind: 'papermind' },
+        client,
+        systemPrompt: 'system',
+        gitSha: 'test',
+        model: 'answer-model',
+        now: () => clock,
+        speed: {
+          ...speedOptions(client, 'timing'),
+          now: () => clock,
+          streamAnswer: async (_messages, onVisibleText) => {
+            clock += 3
+            onVisibleText('answer')
+            clock += 2
+            return { content: 'answer' }
+          },
+        },
+      })
+      return result.perSample[0].speed?.timeToFirstTokenMs
+    }
+    expect(await measure(0, 0)).toBe(3)
+    expect(await measure(7, 0)).toBe(3)
+    expect(await measure(0, 7)).toBe(10)
+  })
   it.each([
     ['PaperMind', runPaperMind, expectedRetrievalQuality],
     ['semantic-tree', runSemanticTree, expectedRetrievalQuality],
@@ -560,7 +605,7 @@ describe('speed mode quality regression', () => {
     expect(speedResult.perSample.map(record => record.answer))
       .toEqual(regularResult.perSample.map(record => record.answer))
     expect(regularResult.meta.speedDefinition).toBeUndefined()
-    expect(speedResult.meta.speedDefinition).toBe('query-timeline-v1')
+    expect(speedResult.meta.speedDefinition).toBe('query-timeline-v2')
     expect(speedResult.perSample.every(record => record.speed !== undefined)).toBe(true)
   })
 })

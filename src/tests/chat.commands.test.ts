@@ -3,6 +3,13 @@ import { setActivePinia, createPinia } from 'pinia'
 
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ default: {}, GlobalWorkerOptions: { workerSrc: '' } }))
 
+// init 一进来就 `void ensureEmbedder()`：真实实现会动态 import transformers 并真的发起
+// 权重下载（取缓存时还会碰 jsdom 未实现的 indexedDB）。单测里向量模型一律缺席，
+// 启动与问答路径都不依赖它。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
+
 import { useChatStore } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb

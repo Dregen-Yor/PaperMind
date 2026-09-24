@@ -1,6 +1,7 @@
 # PaperMind
 
 **变更记录**
+- 2026-09-24: 去掉回答输出上限——`LLMProfile.maxTokens` 语义改为「0 = 不限制」：OpenAI 兼容端点与 Ollama 不再发送 `max_tokens` / `num_predict`（`num_predict` 从「从不发送」改为「显式设了上限才发送」；`o` 系 / `gpt-5` 系设了上限时改发 `max_completion_tokens`），Anthropic Messages API 的 `max_tokens` 是必填字段，不限制时退到兜底常量 `CAPPED_MAX_TOKENS_DEFAULT`（8192），被老模型（claude-3-opus / haiku，上限 4096）拒绝时自动降级重试一次并记住该模型的上限；设置页与参数面板加「不限制」开关（滑块量程 `MAX_TOKENS_LIMIT`，关掉开关还原本地上次设过的值），旧落库配置里的出厂值 4096 在 `init()` 一次性迁移为不限制（标记 `llm_max_tokens_unlimited_migrated`，用户之后显式设回 4096 不会被再抹掉）。bench 侧 4096 是冻结的评测契约（`CONTEXT_BUDGET_TOKENS` + `generationContext.maxTokens`），未改
 - 2026-09-15: 轻量语义树索引实验（分支 `exp/tree`）——新增原文证据块（`src/utils/evidenceBlock.ts`）、单次 LLM 调用建树（`src/utils/semanticTree.ts`）、单轮树路由与原文取证（`src/utils/semanticRoute.ts`，树节点与平面叶节点在同一次打分判断里评分，取证不足即就地回落平面，统一 24000 字符上下文预算）；`paper_trees` 表（含 `build_config_hash` 建树配置指纹）+ `tree` IPC 命名空间持久化；`useChatStore` 后台建树（默认开启，设置页可关，并提供「重建全部语义树」）；bench 新增 `semantic-tree` 配置、树诊断指标与 `npm run bench:trees` 人工结构检查
 - 2026-09-09: 移除 `pageindex-adapted` 基线——上游 PageIndex 适配（Python 桥）端到端吞吐过低（推理模型逐题 agentic 检索），决策放弃：删 `bench/adapters/pageindex/`、`runner/pageindexQa.ts`、配置校验与 `upstreamCommit` meta 透传；强基线组保留 `hybrid-rerank` / `long-section-rag`（均已完成 qasper 179 篇全量）
 - 2026-09-08: 强基线矩阵（bench）——新增 `hybrid-rerank`（BM25+BGE-M3→RRF→交叉编码器重排）与 `long-section-rag`（章节内连续阅读）两条可评测基线：`bench/src/baselines/` 原语、共享引擎 `strongBaselineQa.ts`、冻结 4096 上下文预算的严格配置校验、configs/README/CLAUDE.md 同步
@@ -140,7 +141,7 @@ npm run test:ui     # 浏览器 UI
 
 - **修改数据模型**时，需同步更新：`electron/db/schema.ts`、`electron/db/index.ts`（序列化/反序列化）、`src/stores/paper.ts` 或 `src/stores/chat.ts` 中的接口定义、`src/types/db.d.ts`
 - **新增 IPC 通道**：在 `electron/ipc.ts` 注册 handler，在 `electron/preload.ts` 暴露方法，在 `src/types/db.d.ts` 补充类型（4 处保持一致）
-- **LLM 配置为多 profile**：`chat.ts` 维护 `profiles[]` + `chatProfileId` / `indexProfileId`；对话用 `chatProfile`，索引用 `indexProfile`；持久化键 `llm_profiles`、`llm_profile_chat`、`llm_profile_index`（旧单一 `llm_config` 会在 init 时迁移）
+- **LLM 配置为多 profile**：`chat.ts` 维护 `profiles[]` + `chatProfileId` / `indexProfileId`；对话用 `chatProfile`，索引用 `indexProfile`；持久化键 `llm_profiles`、`llm_profile_chat`、`llm_profile_index`（旧单一 `llm_config` 会在 init 时迁移）。`maxTokens` 用 `0` 表示**不限制**（`UNLIMITED_MAX_TOKENS`）：OpenAI 兼容端点与 Ollama 不发送上限参数，Anthropic 因 API 必填退到 `CAPPED_MAX_TOKENS_DEFAULT`（老模型拒绝时自动降级到 `ANTHROPIC_LEGACY_MAX_TOKENS` 并记住）；采样与上限按模型代次由 `generationParams` 决定（`o` 系 / `gpt-5` 系改发 `max_completion_tokens` 且**不发 `temperature`**——非默认温度会被直接拒绝；其余含第三方兼容端点发 `max_tokens` + `temperature`）；截断提示仍由 `finish_reason` 驱动，与是否设上限无关
 - **对话主流程**在 `chat.ts` 的 `sendMessage`：先判 `/abstract` 命令（走 `generateAbstract` → Hugging Face），否则走 RAG 3-call（查询改写 `rewriteQuery`（有历史时）→ 评分多选 `scoreAndSelect` → 生成回答 `callLLM`）
 - **检索/索引逻辑**在 `src/utils/pageIndex.ts`：`buildPageIndex` 构建语义分块索引，`scoreAndSelect` 做评分多选（旧 `retrieve` 已删除）；索引经 `window.db.index.set` 持久化到 `paper_indexes` 表
 - **轻量语义树**（分支 `exp/tree`）在 `src/utils/evidenceBlock.ts` / `semanticTree.ts` / `semanticRoute.ts`：每篇论文**恰好一次** LLM 调用建树（≤16 节点、根外两层），提问时单轮路由回原文证据块取证——查询阶段串行调用数与平面 `scoreAndSelect` 相同（树节点与平面叶节点在同一次判断里打分，取证不足即就地用这批平面打分回落）；树存 `paper_trees`（经 `window.db.tree.*`），缓存键 = 原文指纹 + 构建配置指纹。开关 `treeEnabled` 默认开启，建树失败或关闭时完全回落平面路径

@@ -20,6 +20,12 @@ export interface LlmClientOptions {
   maxTokens?: number
   /** 可选生成温度；OpenAI 兼容接口缺省仍为 0，Ollama 缺省沿用服务端默认。 */
   temperature?: number
+  /** Optional OpenAI-compatible sampling probability; omitted leaves provider default. */
+  topP?: number
+  /** Explicit thinking mode for OpenAI-compatible endpoints. */
+  thinking?: 'enabled' | 'disabled'
+  /** Explicit generation stop sequence(s). */
+  stop?: string | string[]
   /** 可恢复的网络/限流/服务端错误额外重试次数；默认 0，由 benchmark CLI 显式配置。 */
   retryAttempts?: number
   /** 第一次重试的退避毫秒数；后续指数增长并加抖动。 */
@@ -112,7 +118,7 @@ export function resolveEnvConfig(env: Record<string, string | undefined>) {
 
 // key 必须包含 provider 与 baseUrl：同名模型（如 llama3）在不同端点上是不同的被测对象，
 // 否则配置矩阵对比会因跨端点命中缓存而得到错误结论。分隔符用 \0，避免字段内容拼接歧义。
-function cacheKey(provider: string, baseUrl: string, model: string, messages: ChatMessage[], generation: { maxTokens?: number; temperature?: number }): string {
+function cacheKey(provider: string, baseUrl: string, model: string, messages: ChatMessage[], generation: Pick<LlmClientOptions, 'maxTokens' | 'temperature' | 'topP' | 'thinking' | 'stop'>): string {
   const raw = [provider, baseUrl, model, JSON.stringify(messages), JSON.stringify(generation)].join('\0')
   return createHash('sha256').update(raw).digest('hex')
 }
@@ -147,6 +153,12 @@ function requireContent(content: unknown, data: unknown): string {
 
 export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient {
   const env = mergeConfig(opts, readEnvPartial(process.env))
+  if (opts.maxTokens !== undefined && (!Number.isInteger(opts.maxTokens) || opts.maxTokens <= 0)) throw new Error('maxTokens must be a positive integer')
+  if (opts.temperature !== undefined && (!Number.isFinite(opts.temperature) || opts.temperature < 0 || opts.temperature > 2)) throw new Error('temperature must be finite and within [0, 2]')
+  if (opts.topP !== undefined && (!Number.isFinite(opts.topP) || opts.topP < 0 || opts.topP > 1)) throw new Error('topP must be finite and within [0, 1]')
+  if (opts.thinking !== undefined && opts.thinking !== 'enabled' && opts.thinking !== 'disabled') throw new Error('thinking must be enabled or disabled')
+  if (opts.stop !== undefined && !(typeof opts.stop === 'string' || (Array.isArray(opts.stop) && opts.stop.every(value => typeof value === 'string')))) throw new Error('stop must be a string or string array')
+  if (env.provider === 'ollama' && opts.thinking !== undefined) throw new Error('Ollama does not support the explicit thinking option')
   const cacheDir = opts.cacheDir ?? defaultCacheDir()
   const useCache = opts.useCache !== false
   const doFetch = opts.fetchImpl ?? fetch
@@ -164,6 +176,8 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
     const options = {
       ...(opts.maxTokens === undefined ? {} : { num_predict: opts.maxTokens }),
       ...(opts.temperature === undefined ? {} : { temperature: opts.temperature }),
+      ...(opts.topP === undefined ? {} : { top_p: opts.topP }),
+      ...(opts.stop === undefined ? {} : { stop: typeof opts.stop === 'string' ? [opts.stop] : opts.stop }),
     }
     return Object.keys(options).length === 0 ? {} : { options }
   }
@@ -172,6 +186,9 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
     const key = cacheKey(env.provider, env.baseUrl, env.model, messages, {
       maxTokens: opts.maxTokens,
       temperature: opts.temperature,
+      topP: opts.topP,
+      thinking: opts.thinking,
+      stop: opts.stop,
     })
     const cachePath = join(cacheDir, `${key}.json`)
     const callStartedMs = Date.now()
@@ -312,6 +329,9 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
         messages,
         temperature: opts.temperature ?? 0,
         ...(opts.maxTokens === undefined ? {} : { max_tokens: opts.maxTokens }),
+        ...(opts.topP === undefined ? {} : { top_p: opts.topP }),
+        ...(opts.thinking === undefined ? {} : { thinking: { type: opts.thinking } }),
+        ...(opts.stop === undefined ? {} : { stop: opts.stop }),
       }),
       signal,
     })
@@ -369,6 +389,9 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
         stream: true,
         stream_options: { include_usage: true },
         ...(opts.maxTokens === undefined ? {} : { max_tokens: opts.maxTokens }),
+        ...(opts.topP === undefined ? {} : { top_p: opts.topP }),
+        ...(opts.thinking === undefined ? {} : { thinking: { type: opts.thinking } }),
+        ...(opts.stop === undefined ? {} : { stop: opts.stop }),
       }),
       signal,
     })

@@ -53,12 +53,15 @@ describe('speed contract identities', () => {
     expect(plain).toBe(sha256({ provider: 'openai', baseUrl: 'https://api.openai.com/v1' }))
   })
 
-  it('changes generation identity when temperature, max tokens, or stops change', () => {
+  it('changes generation identity for every request setting and distinguishes provider defaults', () => {
     const baseline = generationSettingsHash({ temperature: 0, maxTokens: 128, stop: ['END'] })
-    expect(baseline).toBe(sha256({ temperature: 0, maxTokens: 128, stop: ['END'] }))
+    expect(baseline).toBe(sha256({ temperature: 0, maxTokens: 128, stop: ['END'], topP: 'provider-default', thinking: 'provider-default', timeoutMs: null }))
     expect(generationSettingsHash({ temperature: 0.2, maxTokens: 128, stop: ['END'] })).not.toBe(baseline)
     expect(generationSettingsHash({ temperature: 0, maxTokens: 256, stop: ['END'] })).not.toBe(baseline)
     expect(generationSettingsHash({ temperature: 0, maxTokens: 128, stop: ['STOP'] })).not.toBe(baseline)
+    expect(generationSettingsHash({ temperature: 0, maxTokens: 128, stop: ['END'], topP: 1 })).not.toBe(baseline)
+    expect(generationSettingsHash({ temperature: 0, maxTokens: 128, stop: ['END'], thinking: 'disabled' })).not.toBe(baseline)
+    expect(generationSettingsHash({ temperature: 0, maxTokens: 128, stop: ['END'], timeoutMs: 120_000 })).not.toBe(baseline)
   })
 
   it('hashes only platform, architecture, Node version, and backend for execution identity', () => {
@@ -143,5 +146,12 @@ describe('speed comparison gate', () => {
       comparable('before'),
       comparable('after', { answerFramingIdentityHash: 'different-framing' }),
     )).toContain('answerFramingIdentityHash 不一致')
+  })
+
+  it('reads historical v1 fields while separating v1 from v2 comparisons', () => {
+    const old = comparable('old')
+    const next = comparable('next', { speedMetricSchemaVersion: 2, speedDefinition: 'query-timeline-v2' })
+    expect(old.meta.speedMetricSchemaVersion).toBe(1)
+    expect(speedComparisonIssues(old, next)).toContain('speedMetricSchemaVersion 不一致')
   })
 })

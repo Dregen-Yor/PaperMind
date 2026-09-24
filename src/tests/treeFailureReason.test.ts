@@ -13,6 +13,13 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   })),
 }))
 
+// init 一进来就 `void ensureEmbedder()`：真实实现会动态 import transformers 并真的发起
+// 权重下载（取缓存时还会碰 jsdom 未实现的 indexedDB）。单测里向量模型一律缺席，
+// 启动与建树路径都不依赖它。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
+
 import { useChatStore } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
@@ -23,7 +30,10 @@ describe('语义树重建失败原因（#13）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     mockDb().chat.listConversations.mockResolvedValue([])
-    mockDb().settings.get.mockResolvedValue(null)
+    // 语义树自方案 §6.3 起默认关闭：这一组验证的是「用户开启后」的失败归类，
+    // 不显式开启就只会撞上总开关的短路，测不到 #13 的文案
+    mockDb().settings.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'semantic_tree_enabled' ? true : null))
     mockDb().index.list.mockResolvedValue(['p1'])
     mockDb().index.get.mockResolvedValue({ indexJson: FLAT_INDEX_JSON, pagesJson: JSON.stringify(['一页正文']) })
     mockDb().tree.get.mockResolvedValue(null)
@@ -46,6 +56,7 @@ describe('语义树重建失败原因（#13）', () => {
     mockDb().settings.get.mockImplementation((key: string) => {
       if (key === 'llm_profiles') return Promise.resolve(localProfile)
       if (key === 'llm_profile_index') return Promise.resolve('p1')
+      if (key === 'semantic_tree_enabled') return Promise.resolve(true)
       return Promise.resolve(null)
     })
     global.fetch = vi.fn().mockResolvedValue({
@@ -65,6 +76,7 @@ describe('语义树重建失败原因（#13）', () => {
     mockDb().settings.get.mockImplementation((key: string) => {
       if (key === 'llm_profiles') return Promise.resolve(KEYED_PROFILE)
       if (key === 'llm_profile_index') return Promise.resolve('p1')
+      if (key === 'semantic_tree_enabled') return Promise.resolve(true)
       return Promise.resolve(null)
     })
     global.fetch = vi.fn().mockResolvedValue({

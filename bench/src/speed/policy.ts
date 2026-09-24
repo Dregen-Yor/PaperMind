@@ -17,15 +17,19 @@ export interface BuildSpeedExecutionPolicyArgs {
   baseUrl: string
   retryAttempts: number
   answerSystemPrompt: string
+  temperature?: number
   maxTokens?: number
+  topP?: number
+  thinking?: 'enabled' | 'disabled'
   stop?: string | string[]
+  timeoutMs?: number
   environment: BuildSpeedRunContractArgs['environment']
   localExecution?: boolean
   env?: Record<string, string | undefined>
 }
 
 export interface SpeedExecutionPolicy {
-  answerClientOverrides: Pick<LlmClientOptions, 'useCache' | 'retryAttempts' | 'maxTokens' | 'temperature'>
+  answerClientOverrides: Pick<LlmClientOptions, 'useCache' | 'retryAttempts' | 'maxTokens' | 'temperature' | 'topP' | 'thinking' | 'stop' | 'timeoutMs'>
   generationSettings: SpeedGenerationSettings
   now: () => number
   queryConcurrency: 1
@@ -78,9 +82,12 @@ export function assertStrongSpeedPolicy(args: {
 
 export function buildSpeedExecutionPolicy(args: BuildSpeedExecutionPolicyArgs): SpeedExecutionPolicy {
   const generationSettings: SpeedGenerationSettings = {
-    temperature: 0,
+    temperature: args.temperature ?? 0,
     maxTokens: args.maxTokens,
+    topP: args.topP,
+    thinking: args.thinking,
     stop: args.stop,
+    timeoutMs: args.timeoutMs,
   }
   const contract = buildSpeedRunContract({
     datasetFingerprint: args.evaluationContract.datasetFingerprint,
@@ -99,8 +106,7 @@ export function buildSpeedExecutionPolicy(args: BuildSpeedExecutionPolicyArgs): 
   const answerClientOverrides: SpeedExecutionPolicy['answerClientOverrides'] = {
     useCache: false,
     retryAttempts: args.retryAttempts,
-    maxTokens: args.maxTokens,
-    temperature: generationSettings.temperature,
+    ...generationSettings,
   }
   const now = () => performance.now()
   const runnerOptions: SpeedRunnerOptions = {

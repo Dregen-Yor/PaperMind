@@ -91,6 +91,21 @@ export const TREE_SECTION_METRICS: string[] = [
   'treeUsedRate', 'treeDegradationRate', 'selectedNodeCount',
 ]
 
+/**
+ * 「冷启动成本」区块占用的 13 个键（后两个是降级诊断，只在非零时以脚注呈现），按列序：端到端与卡片调用各展开成 P50/P95 两列
+ * （`coldStartTotal*` / `structureCall*`，见 `summarizeColdStart`），其余为单值键。
+ * 与 `TREE_SECTION_METRICS` 同一约定：区块真的渲染时才把这些键从伴侣表里排除，
+ * 否则同一个指标会既进冷启动区块、又以原值列在回答质量/生成上限表里。
+ */
+export const COLD_START_SECTION_METRICS: string[] = [
+  'coldStartTotalP50Ms', 'coldStartTotalP95Ms',
+  'avgColdStartPassageMs', 'avgColdStartEmbedPassagesMs',
+  'structureCallP50Ms', 'structureCallP95Ms',
+  'avgColdStartEmbedCardsMs', 'structureTokensPerPaper',
+  'structureFallbackRate', 'avgColdStartCardCount', 'avgColdStartPassageCount',
+  'passageEmbedFailureRate', 'passageDegradedQuestionRate',
+]
+
 /** schema-v2 判定：缺 `mrrDefinition: 'context-page-v1'` 一律按 legacy 处理（§7）。 */
 function isSchemaV2(result: BenchResult): boolean {
   return result.meta.mrrDefinition === MRR_DEFINITION
@@ -120,6 +135,7 @@ export function partitionResults(results: BenchResult[]): {
 }
 
 function fmt(value: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
   return Number.isInteger(value) && Math.abs(value) >= 10
     ? String(value)
     : value.toFixed(3)
@@ -127,6 +143,7 @@ function fmt(value: number): string {
 
 /** 命中率百分比：31.7% → '31.7%'（保留 1 位小数，去尾零）。 */
 function fmtPct(rate: number): string {
+  if (typeof rate !== 'number' || !Number.isFinite(rate)) return '—'
   return `${(rate * 100).toFixed(1).replace(/\.0$/, '')}%`
 }
 
@@ -226,12 +243,16 @@ export function renderReport(
   const treeBlock = renderTreeSection(results)
   if (treeBlock.length > 0) lines.push(...treeBlock, '')
 
-  // 上面三个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
+  const coldStartBlock = renderColdStartSection(results)
+  if (coldStartBlock.length > 0) lines.push(...coldStartBlock, '')
+
+  // 上面四个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
   // length 守卫不是性能优化：区块根本没渲染时若仍然排除，这些数值会从整份报表里消失。
   const sharedSections = new Set<string>()
   if (speedBlock.length > 0) for (const n of SPEED_SECTION_METRICS) sharedSections.add(n)
   if (timingBlock.length > 0) for (const n of TIMING_SECTION_METRICS) sharedSections.add(n)
   if (treeBlock.length > 0) for (const n of TREE_SECTION_METRICS) sharedSections.add(n)
+  if (coldStartBlock.length > 0) for (const n of COLD_START_SECTION_METRICS) sharedSections.add(n)
 
   if (retrievalRows.length > 0) {
     lines.push('### 检索排名（Context Page MRR）')
@@ -366,7 +387,7 @@ function renderRetrievalTable(rows: BenchResult[]): string[] {
  * 用单一主指标加粗会给出误导性的「最优」；排名信号一律以 §9 的 Context Page MRR 为准。
  *
  * 排除规则见文件头的单一归属策略：检索族整族排除（检索主表渲染的就是这批行），
- * 耗时/语义树族只在对应区块真的渲染时排除（sharedSections）。
+ * 耗时/语义树/冷启动族只在对应区块真的渲染时排除（sharedSections）。
  */
 function renderAnswerQualityTable(rows: BenchResult[], sharedSections: Set<string>): string[] {
   const names = collectMetricNames(rows).filter(
@@ -392,7 +413,7 @@ function renderCeilingSection(rows: BenchResult[], sharedSections: Set<string>):
   lines.push('')
   // 列由结果自行推导而非手写清单：runner 新增什么指标就展示什么，不会因为本表漏列而消失
   // （answerF1 是「全文可见时能做到多好」这个上限量本身，与其它指标一视同仁）。
-  // 只排除耗时/语义树区块真的渲染了的键；检索族不排除——检索主表只渲染检索行，
+  // 只排除耗时/语义树/冷启动区块真的渲染了的键；检索族不排除——检索主表只渲染检索行，
   // 覆盖不到上限行，在这里排除的话上限行携带的检索指标就再也没有地方显示了。
   const metricCols = collectMetricNames(rows).filter(name => !sharedSections.has(name))
   const header = ['配置', '完成', ...metricCols, '排除原因']
@@ -541,14 +562,14 @@ function renderSpeedSection(results: BenchResult[]): string[] {
   const lines: string[] = []
 
   if (retrievalRows.length > 0) {
-    lines.push('### 检索方法速度（query-timeline-v1）')
+    lines.push(`### 检索方法速度（${SPEED_DEFINITION}）`)
     lines.push('')
     lines.push(...renderSpeedTable(retrievalRows, true))
     lines.push('')
   }
 
   if (ceilingRows.length > 0) {
-    lines.push('### 生成上限速度（query-timeline-v1）')
+    lines.push(`### 生成上限速度（${SPEED_DEFINITION}）`)
     lines.push('')
     lines.push('> full-context 只表示生成上限，Evidence Ready 不适用；不参与检索方法速度排名或 delta。')
     lines.push('')
@@ -596,7 +617,7 @@ function renderTimingSection(results: BenchResult[]): string[] {
   lines.push('')
   lines.push('> 本区块保留 index / retrieval / generation / end-to-end / network 旧时延与 wall-clock 诊断，不作为 query-timeline 速度主指标。')
   if (results.some(result => result.meta.speedDefinition !== SPEED_DEFINITION)) {
-    lines.push('> 缺少 `speedDefinition: \'query-timeline-v1\'` 的结果只在 Legacy timing / 诊断区域读取，不进入速度主表或 delta。')
+    lines.push(`> 缺少 \`speedDefinition: '${SPEED_DEFINITION}'\` 的结果只在 Legacy timing / 诊断区域读取，不进入速度主表或 delta。`)
   }
   lines.push('')
 
@@ -671,6 +692,54 @@ function cell(metrics: Record<string, number>, prefix: string): string {
   if (p50 === undefined || p95 === undefined) return '—'
   return `${fmtDuration(p50)} / ${fmtDuration(p95)}`
 }
+
+/**
+ * 「冷启动成本」区块（方案 §7）：与 Q **并列**报告，不进入 Q。
+ * 只在结果里真的出现过冷启动指标时渲染，否则旧基线报表会多出一整块空表
+ * （与 `renderTreeSection` 同一约定）。
+ */
+function renderColdStartSection(results: BenchResult[]): string[] {
+  const hasColdStart = results.some(r => r.metrics.coldStartTotalP50Ms !== undefined || r.metrics.structureTokensPerPaper !== undefined)
+  if (!hasColdStart) return []
+
+  const lines: string[] = []
+  lines.push('### 冷启动成本（不进入 Q）')
+  lines.push('')
+  lines.push('| 配置 | 冷启动端到端 P50 / P95 | 切段均值 | 段落向量均值 | 卡片调用 P50 / P95 | 卡片向量均值 | 卡片 token/篇 | 卡片回落率 | 平均卡片数 | 平均段落数 |')
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |')
+  for (const result of results) {
+    if (result.metrics.coldStartTotalP50Ms === undefined && result.metrics.structureTokensPerPaper === undefined) continue
+    const m = result.metrics
+    // 三个「均值」列各自是单值字段（`avgColdStartPassageMs` 等），没有 `...P50Ms/P95Ms`
+    // 后缀：用两值的 `cell` 查它们会全部落到缺失分支，真实数据整列渲染成「—」。
+    // 真正的百分位列（端到端、卡片调用）才走 `cell`。
+    lines.push(
+      `| ${result.config.name} | ${cell(m, 'coldStartTotal')} | ${avgCell(m, 'avgColdStartPassageMs')} | `
+      + `${avgCell(m, 'avgColdStartEmbedPassagesMs')} | ${cell(m, 'structureCall')} | ${avgCell(m, 'avgColdStartEmbedCardsMs')} | `
+      + `${m.structureTokensPerPaper === undefined ? '—' : fmtTokens(m.structureTokensPerPaper)} | `
+      + `${pctCell(m, 'structureFallbackRate')} | ${numCell(m, 'avgColdStartCardCount')} | ${numCell(m, 'avgColdStartPassageCount')} |`,
+    )
+  }
+  lines.push('')
+  lines.push('> 「卡片调用 P50/P95」只统计**未命中缓存**的调用（命中时耗时接近 0，混进去会把成本稀释成假象）；')
+  for (const result of results) {
+    const failed = result.metrics.passageEmbedFailureRate ?? 0
+    const degraded = result.metrics.passageDegradedQuestionRate ?? 0
+    if (failed > 0 || degraded > 0) {
+      lines.push(`> ⚠ ${result.config.name}：段落向量失败率 ${(failed * 100).toFixed(1)}%，降级为 bm25* 检索的题占 ${(degraded * 100).toFixed(1)}%，本轮已标为不可比。`)
+    }
+  }
+  lines.push('> 「冷启动端到端」同样只统计卡片调用未命中缓存的论文。')
+  lines.push('> 卡片 token 由字符数估算（`LlmClient.complete` 不透传服务商 usage），每篇论文的冷启动只发生**一次**卡片调用。')
+  return lines
+}
+
+/** 单个均值字段渲染；缺失输出「—」。 */
+const avgCell = (metrics: Record<string, number>, name: string): string =>
+  metrics[name] === undefined ? '—' : fmtDuration(metrics[name])
+/** 单个计数/均值字段渲染（非时长口径）；缺失输出「—」。 */
+const numCell = (metrics: Record<string, number>, name: string): string =>
+  metrics[name] === undefined ? '—' : fmt(metrics[name])
 
 /**
  * 分母计数行（`contextPageMrrSampleCount` / `EligibleCount`）：它们的差值抑制与门禁无关，
@@ -748,7 +817,7 @@ function renderSpeedComparison(a: BenchResult, b: BenchResult): string[] {
     const va = a.metrics[row.name]
     const vb = b.metrics[row.name]
     const tokenSuppressed = row.name === 'avgOnlineTokensPerCompletedAnswer' && tokenIssues.length > 0
-    const delta = issues.length > 0 || tokenSuppressed || va === undefined || vb === undefined
+    const delta = issues.length > 0 || tokenSuppressed || !Number.isFinite(va) || !Number.isFinite(vb)
       ? '—'
       : comparisonSpeedDelta(vb - va, row.duration)
     lines.push(`| ${row.label} | ${comparisonSpeedValue(va, row.duration)} | ${comparisonSpeedValue(vb, row.duration)} | ${delta} |`)
@@ -821,7 +890,7 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
     || Object.keys(result.metrics).some(name => SPEED_SECTION_METRICS.has(name))
   ))) {
     if (!isQueryTimelineResult(a) || !isQueryTimelineResult(b)) {
-      lines.push('> Legacy timing 不进入 query-timeline 速度 delta；两侧都必须声明 `speedDefinition: \'query-timeline-v1\'`。')
+      lines.push(`> Legacy timing 不进入 query-timeline 速度 delta；两侧都必须声明 \`speedDefinition: '${SPEED_DEFINITION}'\`。`)
     } else {
       lines.push('> full-context 是独立生成上限，不进入检索方法的 query-timeline 速度 delta。')
     }
@@ -839,7 +908,7 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
     const va = a.metrics[name]
     const vb = b.metrics[name]
     if (isCountMetric(name)) hasCountRow = true
-    const delta = shouldSuppressDelta(name, gated) || va === undefined || vb === undefined
+    const delta = shouldSuppressDelta(name, gated) || !Number.isFinite(va) || !Number.isFinite(vb)
       ? '—'
       : `${vb - va >= 0 ? '+' : ''}${fmt(vb - va)}`
     lines.push(`| ${comparisonMetricLabel(name)} | ${va !== undefined ? fmt(va) : '—'} | ${vb !== undefined ? fmt(vb) : '—'} | ${delta} |`)

@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ElementPlus, { ElMessageBox, ElMessage } from 'element-plus'
 import { ElSwitch } from 'element-plus'
 
 import SettingsView from '../views/SettingsView.vue'
 import { useChatStore } from '../stores/chat'
+
+// init 一进来就 `void ensureEmbedder()`：真实实现会动态 import transformers 并真的发起
+// 权重下载（取缓存时还会碰 jsdom 未实现的 indexedDB）。单测里向量模型一律缺席，
+// 设置页与建树路径都不依赖它。
+vi.mock('../utils/transformersEmbedder', () => ({
+  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+}))
 
 const mockDb = () => (globalThis as any).mockDb
 
@@ -19,8 +26,15 @@ const KEYED_PROFILE = [{
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 }]
 
-const keyedSettings = (key: string) =>
-  Promise.resolve(key === 'llm_profiles' ? KEYED_PROFILE.map(profile => ({ ...profile })) : null)
+/**
+ * 设置：填好 Key 的索引配置 + 语义树显式开启。自方案 §6.3 起语义树默认关闭，
+ * 而「重建全部语义树」两条用例验证的是开关打开后的行为，不开启只会被总开关短路。
+ */
+const keyedSettings = (key: string) => {
+  if (key === 'llm_profiles') return Promise.resolve(KEYED_PROFILE.map(profile => ({ ...profile })))
+  if (key === 'semantic_tree_enabled') return Promise.resolve(true)
+  return Promise.resolve(null)
+}
 
 const VALID_TREE = JSON.stringify({
   root: {
@@ -52,18 +66,39 @@ describe('SettingsView — 语义树开关（§8.2）', () => {
     mockDb().tree.list.mockResolvedValue([])
   })
 
-  it('设置页提供语义树开关，默认处于开启状态', async () => {
-    const { wrapper } = await mountSettings()
+  it('设置页提供语义树开关，默认处于关闭状态（方案 §6.3）', async () => {
+    const { wrapper, store } = await mountSettings()
     const switches = wrapper.findAllComponents(ElSwitch)
     expect(switches).toHaveLength(1)
-    expect(switches[0].props('modelValue')).toBe(true)
+    expect(switches[0].props('modelValue')).toBe(false)
+    expect(store.treeEnabled).toBe(false)
   })
 
   it('已关闭时开关反映关闭状态', async () => {
+    // 存的是字符串编码（非布尔 false）：字符串 false 不是「显式开启」，开关必须保持关闭。
+    // 用布尔 false 测不出加载判据的真值性——它恰好等于新默认值，删除加载点也照样绿
     mockDb().settings.get.mockImplementation((key: string) =>
-      Promise.resolve(key === 'semantic_tree_enabled' ? false : null))
+      Promise.resolve(key === 'semantic_tree_enabled' ? 'false' : null))
     const { wrapper } = await mountSettings()
     expect(wrapper.findComponent(ElSwitch).props('modelValue')).toBe(false)
+  })
+
+  it('store 在挂载之后才 init（App 的 onMounted）：已存开启时开关补上开启状态', async () => {
+    // 生产顺序是视图先挂载、init 在 App 的 onMounted 里跑：一次性快照会把「已存开启」
+    // 显示成关闭（默认翻转为 false 后的新方向），诱使用户再拨一次
+    mockDb().settings.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'semantic_tree_enabled' ? true : null))
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useChatStore()
+    const wrapper = mount(SettingsView, { global: { plugins: [pinia, ElementPlus] } })
+    expect(wrapper.findComponent(ElSwitch).props('modelValue')).toBe(false)
+
+    await store.init()
+    await flushPromises()
+
+    expect(store.treeEnabled).toBe(true)
+    expect(wrapper.findComponent(ElSwitch).props('modelValue')).toBe(true)
   })
 
   it('拨动开关写入设置，关闭语义树', async () => {

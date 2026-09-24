@@ -18,8 +18,8 @@ const client: LlmClient = {
 
 function speedContract(datasetFingerprint: string): SpeedRunContract {
   return {
-    speedMetricSchemaVersion: 1,
-    speedDefinition: 'query-timeline-v1',
+    speedMetricSchemaVersion: 2,
+    speedDefinition: 'query-timeline-v2',
     datasetFingerprint,
     executedQuestionIdsHash: 'executed-question-ids',
     streaming: true,
@@ -581,7 +581,7 @@ describe('strong baseline stage-aware checkpoints', () => {
     materialize: groups => materializeContext(groups, oneTokenPerPiece, 4096),
     llmEndpointIdentity: 'provider:endpoint-hash-a',
     systemPromptHash: 'prompt-hash-a',
-    generationSettings: { maxTokens: 512, requestTimeoutMs: 30_000 },
+    generationSettings: { maxTokens: 4096, requestTimeoutMs: 30_000, temperature: 0, topP: 0.8, thinking: 'enabled', stop: ['END'], retryAttempts: 3 },
     judgeEnabled: false,
     retrieval: { granularity: 'test passage', build: async () => ({ leafCount: 1, retrieve }) },
     meta: { retrievalAlgorithm: 'long-section-rag', baselineFamily: 'strong', config: longConfig },
@@ -677,7 +677,13 @@ describe('strong baseline stage-aware checkpoints', () => {
     ['judge model', { judgeModel: 'judge-b' }],
     ['endpoint identity', { llmEndpointIdentity: 'endpoint-b' }],
     ['system prompt hash', { systemPromptHash: 'prompt-b' }],
-    ['generation settings', { generationSettings: { maxTokens: 1024, requestTimeoutMs: 30_000 } }],
+    ['max tokens', { generationSettings: { ...strongArgs('').generationSettings, maxTokens: 1024 } }],
+    ['request timeout', { generationSettings: { ...strongArgs('').generationSettings, requestTimeoutMs: 60_000 } }],
+    ['temperature', { generationSettings: { ...strongArgs('').generationSettings, temperature: 0.2 } }],
+    ['top-p', { generationSettings: { ...strongArgs('').generationSettings, topP: 0.9 } }],
+    ['thinking mode', { generationSettings: { ...strongArgs('').generationSettings, thinking: 'disabled' as const } }],
+    ['stop sequences', { generationSettings: { ...strongArgs('').generationSettings, stop: ['STOP'] } }],
+    ['retry attempts', { generationSettings: { ...strongArgs('').generationSettings, retryAttempts: 2 } }],
     ['git sha', { gitSha: 'def5678' }],
     ['evaluation contract', { evaluationContract: { ...buildEvaluationContract([checkpointSample]), datasetFingerprint: 'fingerprint-b' } }],
   ])('rejects checkpoint when %s changes', async (_label, change) => {

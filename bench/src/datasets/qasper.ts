@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import type { EvalSample, QaQuestion } from '../types'
 import { benchPath } from '../paths'
+import { QA_QUALITY_DEFINITION } from '../metrics/qaQuality'
+import { qasperReference } from '../metrics/qasperQuality'
 
 /** 伪页大小：约等于一页学术论文的字符数。 */
 export const PSEUDO_PAGE_CHARS = 3000
@@ -25,6 +27,7 @@ export interface QasperEntry {
         free_form_answer: string
         extractive_spans: string[]
         unanswerable: boolean
+        yes_no?: boolean | null
         evidence: string[]
       }
     }>>
@@ -114,6 +117,10 @@ export function normalizeQasperEntry(paperId: string, entry: QasperEntry): EvalS
   const questions: QaQuestion[] = entry.qas.question.map((question, i) => {
     const annotations = entry.qas.answers[i] ?? []
     const unanswerable = annotations.length > 0 && annotations.every(a => a.answer.unanswerable)
+    const qualityAnswers = annotations.map(({ answer }) => qasperReference(answer))
+    if (qualityAnswers.length === 0) {
+      throw new Error(`QASPER question ${paperId}#${i} has no versioned reference answers`)
+    }
 
     const answers: string[] = []
     const evidencePages = new Set<number>()
@@ -143,6 +150,8 @@ export function normalizeQasperEntry(paperId: string, entry: QasperEntry): EvalS
       answers,
       evidencePages: [...evidencePages].sort((a, b) => a - b),
       unanswerable,
+      qualityAnswers,
+      qualityDefinition: QA_QUALITY_DEFINITION,
       ...(unanswerable ? {} : { evidenceMapping }),
     }
   })
@@ -174,6 +183,12 @@ export async function loadQasperDataset(path: string = DEFAULT_PATH()): Promise<
     for (const question of sample.questions) {
       if (!question.unanswerable && question.evidenceMapping === undefined) {
         throw new Error('QASPER 数据集缺少 evidenceMapping；请重新运行 fetch.ts 以生成当前格式的数据集。')
+      }
+      if (question.qualityDefinition !== QA_QUALITY_DEFINITION
+        || !Array.isArray(question.qualityAnswers)
+        || question.qualityAnswers.length === 0
+        || question.qualityAnswers.some(answer => typeof answer !== 'string' || answer.trim().length === 0)) {
+        throw new Error('QASPER 数据集缺少版本化参考答案；请重新运行 fetch.ts 以生成当前格式的数据集。')
       }
     }
   }
