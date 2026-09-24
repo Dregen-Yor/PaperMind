@@ -44,15 +44,16 @@ function isPassageConfig(config: BenchConfig): config is PaperMindConfig & { pas
   return 'passage' in config && config.passage !== undefined
 }
 
-/** 语义树视图：逐篇建树，把树按层打印出来。 */
+/** 语义树视图：逐篇建树，把树按层打印出来。配置名与卡片视图一样打进进度行，两条路径口径一致。 */
 async function renderTreeSections(
+  name: string,
   params: PaperMindConfig['semanticTree'],
   samples: EvalSample[],
   client: LlmClient,
 ): Promise<string> {
   if (!params) throw new Error('语义树配置缺少 semanticTree 参数块，无法做结构检查')
   const hook = createSemanticTreeHook({ params, client })
-  process.stdout.write(`对 ${samples.length} 篇论文建树...\n`)
+  process.stdout.write(`对 ${samples.length} 篇论文建树（${name}）...\n`)
   const entries: TreeInspectionEntry[] = []
   for (const sample of samples) {
     const outcome = await hook(sample)
@@ -113,22 +114,29 @@ async function renderCardSections(
   process.stdout.write(`对 ${samples.length} 篇论文建卡片索引（${config.name}）...\n`)
   const lines: string[] = ['# 卡片划分人工核对', '']
   for (const sample of samples) {
-    const { index } = await hook(sample)
-    const cards = index.cards
-    // hook 契约保证阶段③ 一定有成型的卡片；真缺了就说实话，不渲染一张空表
-    if (cards === undefined) throw new Error(`论文 ${sample.paperId} 未走到阶段③，卡片刻度缺失`)
-    lines.push(renderCardReport({
-      paperId: sample.paperId,
-      title: sample.title,
-      passages: index.passages,
-      cards,
-      ...(index.structureFallback ? { fallback: index.structureFallback.reason } : {}),
-      ...(index.paper ? { paper: index.paper } : {}),
-    }))
-    process.stdout.write(
-      `  ${sample.paperId}：${cards.length} 张卡片`
-      + `${index.structureFallback ? `（回落 ${index.structureFallback.reason}）` : ''}\n`,
-    )
+    try {
+      const { index } = await hook(sample)
+      const cards = index.cards
+      // hook 契约保证阶段③ 一定有成型的卡片；真缺了就说实话，不渲染一张空表
+      if (cards === undefined) throw new Error(`论文 ${sample.paperId} 未走到阶段③，卡片刻度缺失`)
+      lines.push(renderCardReport({
+        paperId: sample.paperId,
+        title: sample.title,
+        passages: index.passages,
+        cards,
+        ...(index.structureFallback ? { fallback: index.structureFallback.reason } : {}),
+        ...(index.paper ? { paper: index.paper } : {}),
+      }))
+      process.stdout.write(
+        `  ${sample.paperId}：${cards.length} 张卡片`
+        + `${index.structureFallback ? `（回落 ${index.structureFallback.reason}）` : ''}\n`,
+      )
+    } catch (error) {
+      // 与树路径同一约定：一篇坏论文（无段落、卡片阶段缺失…）只记一条失败，其余论文照常核对。
+      // 一次 throw 冒到顶层会让整份报告连文件都不写，五篇里一篇坏的会让另外四篇的结果一起丢。
+      lines.push(`## ${sample.title}（${sample.paperId}）`, '', `卡片索引失败：\`${errorMessage(error)}\`（该篇跳过）`, '')
+      process.stdout.write(`  ${sample.paperId}：卡片索引失败（${errorMessage(error)}）\n`)
+    }
   }
   return lines.join('\n')
 }
@@ -144,7 +152,7 @@ const client = createLlmClient({ ...env, useCache: args.useCache })
 
 let report: string
 if (config.kind === 'semantic-tree') {
-  report = await renderTreeSections(config.semanticTree, limited, client)
+  report = await renderTreeSections(config.name, config.semanticTree, limited, client)
 } else if (isPassageConfig(config)) {
   report = await renderCardSections(config, limited, client, env.model)
 } else {

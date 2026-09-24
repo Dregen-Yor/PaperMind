@@ -4,6 +4,7 @@ import {
   renderReport, renderComparison, fmtDuration, partitionResults,
   retrievalComparisonIssues,
   RETRIEVAL_SECTION_METRICS, RETRIEVAL_EXEMPT_METRICS, TIMING_SECTION_METRICS, TREE_SECTION_METRICS,
+  COLD_START_SECTION_METRICS,
 } from '../report'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { renderCardReport } from '../treeInspect'
@@ -1164,6 +1165,34 @@ describe('冷启动成本表', () => {
     }
     const report = renderReport([allCacheHit as never])
     expect(report).toContain('| papermind-hybrid | 900 ms / 1.20 s | — | — | — | — | 9000 | 0% | — | — |')
+  })
+
+  it('schema-v2 行：11 个冷启动指标只由冷启动区块渲染，伴侣表与生成上限表一个都不列', () => {
+    // 上面三条用例的 fixture 都缺 mrrDefinition，会落进「历史结果」表——那张表按原值全量打印，
+    // 因此永远抓不到「同一指标既进冷启动区块、又作为原始列出现在回答质量/生成上限表」的重复。
+    // 只有 schema-v2 行才走这两张按 sharedSections 过滤的表。
+    const coldStartMetrics: Record<string, number> = {
+      coldStartTotalP50Ms: 4300, coldStartTotalP95Ms: 5200,
+      avgColdStartPassageMs: 150, avgColdStartEmbedPassagesMs: 2500,
+      structureCallP50Ms: 4000, structureCallP95Ms: 4100,
+      avgColdStartEmbedCardsMs: 300, structureTokensPerPaper: 8455,
+      structureFallbackRate: 0.1, avgColdStartCardCount: 4, avgColdStartPassageCount: 34,
+    }
+    // answerF1 保证伴侣表非空：表被整块跳过时下面的表头断言会查无此表而假通过
+    const eligible = schemaV2Result('papermind-hybrid', { ...coldStartMetrics, answerF1: 0.43 })
+    // bm25*（comparisonEligible: false）走生成上限表，同样只受 sharedSections 过滤
+    const bm25 = schemaV2Result('papermind-hybrid-bm25', coldStartMetrics, {
+      comparisonEligible: false, comparisonIneligibleReason: 'embedder-unavailable',
+    })
+    const md = renderReport([eligible, bm25])
+
+    // 归属区块真的渲染了——否则「排除」等于把数字删掉，而不是搬家
+    expect(tableHeaderAfter(md, '### 冷启动成本')).toContain('卡片 token/篇')
+    for (const key of Object.keys(coldStartMetrics)) {
+      expect(COLD_START_SECTION_METRICS, `COLD_START_SECTION_METRICS 缺 ${key}`).toContain(key)
+      expect(tableHeaderAfter(md, '### 回答质量'), `回答质量伴侣表仍在列 ${key}`).not.toContain(key)
+      expect(tableHeaderAfter(md, '### 生成上限'), `生成上限表仍在列 ${key}`).not.toContain(key)
+    }
   })
 
   it('没有冷启动指标时不渲染（旧报表不被污染）', () => {

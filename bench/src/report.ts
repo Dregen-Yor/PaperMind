@@ -91,6 +91,20 @@ export const TREE_SECTION_METRICS: string[] = [
   'treeUsedRate', 'treeDegradationRate', 'selectedNodeCount',
 ]
 
+/**
+ * 「冷启动成本」表实际渲染的 11 个键，按列序：端到端与卡片调用各展开成 P50/P95 两列
+ * （`coldStartTotal*` / `structureCall*`，见 `summarizeColdStart`），其余为单值键。
+ * 与 `TREE_SECTION_METRICS` 同一约定：区块真的渲染时才把这些键从伴侣表里排除，
+ * 否则同一个指标会既进冷启动区块、又以原值列在回答质量/生成上限表里。
+ */
+export const COLD_START_SECTION_METRICS: string[] = [
+  'coldStartTotalP50Ms', 'coldStartTotalP95Ms',
+  'avgColdStartPassageMs', 'avgColdStartEmbedPassagesMs',
+  'structureCallP50Ms', 'structureCallP95Ms',
+  'avgColdStartEmbedCardsMs', 'structureTokensPerPaper',
+  'structureFallbackRate', 'avgColdStartCardCount', 'avgColdStartPassageCount',
+]
+
 /** schema-v2 判定：缺 `mrrDefinition: 'context-page-v1'` 一律按 legacy 处理（§7）。 */
 function isSchemaV2(result: BenchResult): boolean {
   return result.meta.mrrDefinition === MRR_DEFINITION
@@ -231,12 +245,13 @@ export function renderReport(
   const coldStartBlock = renderColdStartSection(results)
   if (coldStartBlock.length > 0) lines.push(...coldStartBlock, '')
 
-  // 上面三个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
+  // 上面四个区块跨所有结果渲染，因此它们就是这些指标在任何行上的归属区块。
   // length 守卫不是性能优化：区块根本没渲染时若仍然排除，这些数值会从整份报表里消失。
   const sharedSections = new Set<string>()
   if (speedBlock.length > 0) for (const n of SPEED_SECTION_METRICS) sharedSections.add(n)
   if (timingBlock.length > 0) for (const n of TIMING_SECTION_METRICS) sharedSections.add(n)
   if (treeBlock.length > 0) for (const n of TREE_SECTION_METRICS) sharedSections.add(n)
+  if (coldStartBlock.length > 0) for (const n of COLD_START_SECTION_METRICS) sharedSections.add(n)
 
   if (retrievalRows.length > 0) {
     lines.push('### 检索排名（Context Page MRR）')
@@ -371,7 +386,7 @@ function renderRetrievalTable(rows: BenchResult[]): string[] {
  * 用单一主指标加粗会给出误导性的「最优」；排名信号一律以 §9 的 Context Page MRR 为准。
  *
  * 排除规则见文件头的单一归属策略：检索族整族排除（检索主表渲染的就是这批行），
- * 耗时/语义树族只在对应区块真的渲染时排除（sharedSections）。
+ * 耗时/语义树/冷启动族只在对应区块真的渲染时排除（sharedSections）。
  */
 function renderAnswerQualityTable(rows: BenchResult[], sharedSections: Set<string>): string[] {
   const names = collectMetricNames(rows).filter(
@@ -397,7 +412,7 @@ function renderCeilingSection(rows: BenchResult[], sharedSections: Set<string>):
   lines.push('')
   // 列由结果自行推导而非手写清单：runner 新增什么指标就展示什么，不会因为本表漏列而消失
   // （answerF1 是「全文可见时能做到多好」这个上限量本身，与其它指标一视同仁）。
-  // 只排除耗时/语义树区块真的渲染了的键；检索族不排除——检索主表只渲染检索行，
+  // 只排除耗时/语义树/冷启动区块真的渲染了的键；检索族不排除——检索主表只渲染检索行，
   // 覆盖不到上限行，在这里排除的话上限行携带的检索指标就再也没有地方显示了。
   const metricCols = collectMetricNames(rows).filter(name => !sharedSections.has(name))
   const header = ['配置', '完成', ...metricCols, '排除原因']
