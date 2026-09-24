@@ -8,7 +8,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   GlobalWorkerOptions: { workerSrc: '' },
 }))
 
-import { useChatStore } from '../stores/chat'
+import { useChatStore, CAPPED_MAX_TOKENS_DEFAULT } from '../stores/chat'
 
 /** 生成阶段走流式（#6）：回答请求按 OpenAI 兼容 SSE 返回。 */
 const sse = (chunks: string[], finishReason = 'stop') => {
@@ -294,7 +294,8 @@ describe('useChatStore', () => {
     expect(init.headers).toMatchObject({ 'x-api-key': 'sk-ant-1', 'anthropic-version': '2023-06-01' })
     const body = JSON.parse(init.body)
     expect(body.model).toBe('claude-3-5-sonnet')
-    expect(body.max_tokens).toBe(4096)
+    // 默认「不限制」，而 Messages API 的 max_tokens 必填，故发兜底上限
+    expect(body.max_tokens).toBe(CAPPED_MAX_TOKENS_DEFAULT)
     expect(body.messages.every((m: any) => m.role !== 'system')).toBe(true)
     expect(body.system).toContain('学术论文阅读助手')
   })

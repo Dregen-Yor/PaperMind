@@ -29,6 +29,7 @@ export interface LLMProfile {
   apiKey: string
   baseUrl: string
   temperature: number
+  /** 回答输出上限；0 = 不限制（不向上游发送该参数，由模型自身决定） */
   maxTokens: number
   topK: number        // 0 = 不限制
   systemPrompt: string
@@ -62,6 +63,37 @@ export interface Conversation {
 /** 单次 LLM 请求上限：超时即失败，避免无声挂死（#2）。 */
 const LLM_REQUEST_TIMEOUT_MS = 120_000
 
+/** 输出上限的「不限制」哨兵：0 表示不向上游发送该参数。 */
+export const UNLIMITED_MAX_TOKENS = 0
+
+/**
+ * 「不限制」时 Anthropic 的兜底上限。Messages API 的 `max_tokens` 是**必填**字段，
+ * 不能像 OpenAI 兼容端点与 Ollama 那样直接省略；8192 是 Claude 3.5 一代起所有模型
+ * 都接受的值（更早的 claude-3-haiku / claude-3-opus 上限 4096，会被 API 拒绝）。
+ * 同时用作设置页把「不限制」关回去时的起点值。
+ */
+export const CAPPED_MAX_TOKENS_DEFAULT = 8192
+
+/** 老一代 Claude（claude-3-opus / claude-3-haiku / claude-2.x）的输出上限。 */
+export const ANTHROPIC_LEGACY_MAX_TOKENS = 4096
+
+/**
+ * 设置页滑块的量程上限。默认不限制，但显式设上限时不该被 8192 卡住——
+ * 现代模型的输出上限动辄 32k 起。
+ */
+export const MAX_TOKENS_LIMIT = 32768
+
+/**
+ * 已探明的 Anthropic 模型上限（key = `baseUrl|model`）。老模型只接受 4096，
+ * 撞一次 400 就记下来，后续调用直接按它发送，不必每次提问都失败重试一轮。
+ */
+const anthropicTokenCeilings = new Map<string, number>()
+
+/** 旧版本的出厂输出上限：升级时按「从未显式设置」处理，迁到不限制。 */
+const LEGACY_DEFAULT_MAX_TOKENS = 4096
+/** 一次性迁移标记：迁过之后用户再显式设回 4096 也不会被下次启动抹掉。 */
+const MAX_TOKENS_MIGRATED_KEY = 'llm_max_tokens_unlimited_migrated'
+
 const DEFAULT_PROFILE: LLMProfile = {
   id: 'default',
   name: '默认配置',
@@ -70,9 +102,43 @@ const DEFAULT_PROFILE: LLMProfile = {
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   temperature: 0.7,
-  maxTokens: 4096,
+  maxTokens: UNLIMITED_MAX_TOKENS,
   topK: 0,
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
+}
+
+/**
+ * 合法化输出上限：缺失、非数字、`≤0` 一律视为「不限制」，小数向下取整。
+ * 备份导入（`data:import`）进来的 settings 不受设置页滑块约束，发送前仍需过一遍，
+ * 否则一个 `maxTokens: 0.5` 会变成上游 400。
+ */
+function normalizeMaxTokens(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return UNLIMITED_MAX_TOKENS
+  return Math.floor(value)
+}
+
+/**
+ * 升级迁移：上限语义从「恒有上限」变成「0 = 不限制」之后，旧版本写盘的 4096
+ * 是当时的**出厂值**而非用户选择，按「从未设置」迁到不限制。
+ * 只在带迁移标记的首次启动里调用——否则用户之后显式设的 4096 会被反复抹掉。
+ */
+function migrateMaxTokens(value: unknown): number {
+  const normalized = normalizeMaxTokens(value)
+  return normalized === LEGACY_DEFAULT_MAX_TOKENS ? UNLIMITED_MAX_TOKENS : normalized
+}
+
+/**
+ * OpenAI 兼容端点里「与模型代次有关」的采样参数。o 系与 gpt-5 起改用
+ * `max_completion_tokens`（老字段被直接拒绝），并且不接受非默认的 `temperature`
+ * ——只发上限不发温度，等于还是每次都被拒。其余模型（含第三方兼容端点）维持原样。
+ * 模型名是自由文本，这里按最保守的前缀判断（顺带剥掉 `openai/` 这类厂商前缀）。
+ */
+function generationParams(model: string, maxTokens: number, temperature: number): Record<string, number> {
+  const bare = model.trim().split('/').pop() ?? ''
+  if (/^(o[1-9]|gpt-[5-9])/i.test(bare)) {
+    return maxTokens > 0 ? { max_completion_tokens: maxTokens } : {}
+  }
+  return { temperature, ...(maxTokens > 0 ? { max_tokens: maxTokens } : {}) }
 }
 
 /** 单篇建树结果：失败必须带可展示的原因（#13）。 */
@@ -312,10 +378,19 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value = conversations.value.filter(c => c.messages.length > 0)
 
-    // 加载配置列表
+    // 加载配置列表。
+    // 首次启动要做「4096 → 不限制」的一次性迁移：旧记录里的 4096 是当时的出厂值
+    // （也可能是根本没有这个字段的旧记录），不是用户选择。只有真的改了值才回写，
+    // 避免每次启动都无条件写一遍 settings。
+    const tokensMigrated = (await window.db.settings.get(MAX_TOKENS_MIGRATED_KEY)) === true
+    const normalizeTokens = tokensMigrated ? normalizeMaxTokens : migrateMaxTokens
     const savedProfiles = await window.db.settings.get('llm_profiles')
     if (savedProfiles && Array.isArray(savedProfiles) && savedProfiles.length > 0) {
       profiles.value = savedProfiles
+      if (profiles.value.some(p => p.maxTokens !== normalizeTokens(p.maxTokens))) {
+        profiles.value = profiles.value.map(p => ({ ...p, maxTokens: normalizeTokens(p.maxTokens) }))
+        await persistProfiles()
+      }
     } else {
       // 迁移旧版单一 llm_config（首次升级时）
       const oldConfig = await window.db.settings.get('llm_config')
@@ -325,11 +400,14 @@ export const useChatStore = defineStore('chat', () => {
           name: '默认配置',
           topK: 0,
           ...oldConfig,
+          maxTokens: normalizeTokens(oldConfig.maxTokens),
         }]
       }
       // 无论是迁移还是全新安装，都将当前 profiles 写入磁盘，确保下次启动可恢复
       await persistProfiles()
     }
+    // 标记必须在配置落盘之后写：中途失败时下次启动仍会重跑迁移，不会漏掉用户
+    if (!tokensMigrated) await window.db.settings.set(MAX_TOKENS_MIGRATED_KEY, true)
 
     const savedChatId = await window.db.settings.get('llm_profile_chat')
     if (savedChatId && profiles.value.some(p => p.id === savedChatId)) {
@@ -365,13 +443,22 @@ export const useChatStore = defineStore('chat', () => {
     return newProfile
   }
 
+  /**
+   * 能改变建树指纹的字段（`modelIdentity` 的三要素）。改这些之外的东西
+   * （温度、输出上限、名称…）不会让任何一棵树失效，不必重查树表。
+   */
+  const TREE_CONFIG_PATCH_KEYS = ['provider', 'model', 'baseUrl'] as const
+
   async function updateProfile(id: string, patch: Partial<Omit<LLMProfile, 'id'>>) {
     const idx = profiles.value.findIndex(p => p.id === id)
     if (idx === -1) return
     profiles.value[idx] = { ...profiles.value[idx], ...patch }
     await persistProfiles()
-    // 改的若是当前索引配置（模型/端点），已建好的树随即失效，就绪集合要重算
-    if (id === indexProfileId.value) await refreshTreeReadyPapers()
+    // 改的若是当前索引配置的模型/端点，已建好的树随即失效，就绪集合要重算；
+    // 拖温度或输出上限滑块不必付一次 tree.list 的 IPC 开销
+    if (id === indexProfileId.value && TREE_CONFIG_PATCH_KEYS.some(key => key in patch)) {
+      await refreshTreeReadyPapers()
+    }
   }
 
   async function removeProfile(id: string) {
@@ -428,10 +515,16 @@ export const useChatStore = defineStore('chat', () => {
     opts: { onToken?: (token: string) => void } = {},
   ): Promise<{ content: string; truncated: boolean }> {
     const profile = resolveLlmProfile(profileOrId)
+    // 落库值可能是备份导入进来的任意数字，发送前统一合法化（0 = 不限制）
+    const maxTokens = normalizeMaxTokens(profile.maxTokens)
 
     if (profile.provider === 'ollama') {
       const body: Record<string, unknown> = { model: profile.model, messages, stream: !!opts.onToken }
-      if (profile.topK > 0) body.options = { top_k: profile.topK }
+      // Ollama 用 `num_predict` 表达输出上限；不限制时整个 options 都不出现
+      const options: Record<string, number> = {}
+      if (profile.topK > 0) options.top_k = profile.topK
+      if (maxTokens > 0) options.num_predict = maxTokens
+      if (Object.keys(options).length > 0) body.options = options
       const res = await requestWithTimeout(`${profile.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -453,7 +546,8 @@ export const useChatStore = defineStore('chat', () => {
 
       const body: Record<string, unknown> = {
         model: profile.model,
-        max_tokens: profile.maxTokens,
+        // 必填字段，占位值在下面的循环里覆盖（不限制时退到兜底上限，不能省略）
+        max_tokens: CAPPED_MAX_TOKENS_DEFAULT,
         messages: chatMessages,
         temperature: Math.min(profile.temperature, 1),
       }
@@ -461,16 +555,35 @@ export const useChatStore = defineStore('chat', () => {
       if (profile.topK > 0) body.top_k = profile.topK
       if (opts.onToken) body.stream = true
 
-      const res = await requestWithTimeout(`${profile.baseUrl}/v1/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': profile.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify(body),
-      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
-      if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
+      const ceilingKey = `${profile.baseUrl}|${profile.model}`
+      let requested = maxTokens > 0
+        ? maxTokens
+        : anthropicTokenCeilings.get(ceilingKey) ?? CAPPED_MAX_TOKENS_DEFAULT
+      let res: Response
+      for (;;) {
+        body.max_tokens = requested
+        res = await requestWithTimeout(`${profile.baseUrl}/v1/messages`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': profile.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify(body),
+        }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+        if (res.ok) break
+        const detail = await readErrorBody(res)
+        // 兜底上限被模型上限拒掉时降级重试：老 Claude（claude-3-opus / haiku）只接受 4096，
+        // 而「不限制」的用户并不会在意 8192 与 4096 的差别，报错卡才是真问题。
+        // 只在自动兜底路径上降级——用户显式设的上限照旧原样报错，不替他改配置。
+        const downgradable = maxTokens === UNLIMITED_MAX_TOKENS
+          && res.status === 400
+          && requested > ANTHROPIC_LEGACY_MAX_TOKENS
+          && /max_?tokens?/i.test(detail)
+        if (!downgradable) throw new Error(`LLM 请求失败 (${res.status})：${detail}`)
+        requested = ANTHROPIC_LEGACY_MAX_TOKENS
+        anthropicTokenCeilings.set(ceilingKey, ANTHROPIC_LEGACY_MAX_TOKENS)
+      }
       if (opts.onToken) return readAnthropicStream(res, opts.onToken)
       const data = await res.json()
       const content = data.content?.[0]?.text
@@ -485,8 +598,8 @@ export const useChatStore = defineStore('chat', () => {
     const body: Record<string, unknown> = {
       model: profile.model,
       messages,
-      temperature: profile.temperature,
-      max_tokens: profile.maxTokens,
+      // 温度与输出上限按模型代次决定发不发、发哪个字段名（见 generationParams）
+      ...generationParams(profile.model, maxTokens, profile.temperature),
       ...(opts.onToken ? { stream: true } : {}),
     }
 

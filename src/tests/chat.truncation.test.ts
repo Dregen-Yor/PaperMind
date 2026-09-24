@@ -7,7 +7,7 @@ import ElementPlus, { ElMessage } from 'element-plus'
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ default: {}, GlobalWorkerOptions: { workerSrc: '' } }))
 
 import ChatPanel from '../components/ChatPanel.vue'
-import { useChatStore, type Conversation } from '../stores/chat'
+import { useChatStore, UNLIMITED_MAX_TOKENS, type Conversation } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
 /** 非流式回答（`continueMessage` 仍走非流式请求）。 */
@@ -103,10 +103,10 @@ describe('截断与继续（#3）', () => {
     expect(conv.messages[1].content).toBe('半截回答，这是续写部分。')
   })
 
-  it('默认 maxTokens 已提升到 4096', async () => {
+  it('出厂配置默认不限制输出长度', async () => {
     const store = useChatStore()
     await store.init()
-    expect(store.profiles[0].maxTokens).toBe(4096)
+    expect(store.profiles[0].maxTokens).toBe(UNLIMITED_MAX_TOKENS)
   })
 
   it('anthropic 的 stop_reason=max_tokens 同样标记截断', async () => {

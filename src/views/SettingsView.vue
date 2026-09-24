@@ -206,8 +206,18 @@
 
           <el-form-item label="Max Tokens">
             <div class="slider-row">
-              <el-slider v-model="form.maxTokens" :min="256" :max="8192" :step="256" style="flex:1" />
-              <span class="slider-val tabular-nums">{{ form.maxTokens }}</span>
+              <el-slider
+                :model-value="form.maxTokens || CAPPED_MAX_TOKENS_DEFAULT"
+                @update:model-value="form.maxTokens = $event"
+                :min="256" :max="MAX_TOKENS_LIMIT" :step="256"
+                :disabled="unlimitedTokens"
+                style="flex:1"
+              />
+              <span class="slider-val tabular-nums">{{ unlimitedTokens ? '不限制' : form.maxTokens }}</span>
+            </div>
+            <div class="slider-row unlimited-row">
+              <el-switch v-model="unlimitedTokens" size="small" />
+              <span class="slider-hint">{{ unlimitedHint }}</span>
             </div>
           </el-form-item>
         </div>
@@ -245,10 +255,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
-import { useChatStore, PROMPT_TEMPLATES, type LLMProfile } from '../stores/chat'
+import {
+  useChatStore, PROMPT_TEMPLATES,
+  UNLIMITED_MAX_TOKENS, CAPPED_MAX_TOKENS_DEFAULT, MAX_TOKENS_LIMIT,
+  type LLMProfile,
+} from '../stores/chat'
 import { storeToRefs } from 'pinia'
 
 const chatStore = useChatStore()
@@ -279,21 +293,44 @@ const EMPTY_FORM = (): Omit<LLMProfile, 'id'> => ({
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   temperature: 0.7,
-  maxTokens: 4096,
+  maxTokens: UNLIMITED_MAX_TOKENS,
   topK: 0,
   systemPrompt: '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。',
 })
 
 const form = reactive<Omit<LLMProfile, 'id'>>(EMPTY_FORM())
 
+/** 关掉「不限制」时用来还原的上限：本次编辑里用户设过的最后一个有限值。 */
+const lastCappedTokens = ref<number | null>(null)
+
+/** 「不限制」开关与 maxTokens 的双向映射：0 = 不限制，关掉开关回到用户上次设过的有限上限。 */
+const unlimitedTokens = computed({
+  get: () => form.maxTokens === UNLIMITED_MAX_TOKENS,
+  set: (unlimited: boolean) => {
+    if (unlimited) {
+      if (form.maxTokens > UNLIMITED_MAX_TOKENS) lastCappedTokens.value = form.maxTokens
+      form.maxTokens = UNLIMITED_MAX_TOKENS
+      return
+    }
+    form.maxTokens = lastCappedTokens.value ?? CAPPED_MAX_TOKENS_DEFAULT
+  },
+})
+
+/** Anthropic 的 max_tokens 必填，不能真的「什么都不发」，提示里要说清楚。 */
+const unlimitedHint = computed(() => form.provider === 'anthropic'
+  ? `Anthropic 的 max_tokens 必填，按 ${CAPPED_MAX_TOKENS_DEFAULT} 发送（老模型上限更低时自动降级）`
+  : '不向上游发送输出上限，由模型自身决定')
+
 function openNew() {
   editingId.value = null
+  lastCappedTokens.value = null
   Object.assign(form, EMPTY_FORM())
   dialogVisible.value = true
 }
 
 function openEdit(p: LLMProfile) {
   editingId.value = p.id
+  lastCappedTokens.value = null
   Object.assign(form, { ...p })
   dialogVisible.value = true
 }
@@ -548,6 +585,8 @@ async function clearData() {
 }
 .slider-row { display: flex; align-items: center; gap: 10px; width: 100%; }
 .slider-val { font-size: 12px; color: var(--accent); min-width: 32px; text-align: right; }
+.unlimited-row { margin-top: 2px; }
+.slider-hint { font-size: 12px; color: var(--text-muted); }
 
 .template-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .template-chip {

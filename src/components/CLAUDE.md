@@ -3,6 +3,7 @@
 # src/components/ — 公共组件模块
 
 **变更记录**
+- 2026-09-24: ParamPanel 的回答长度上限改用「不限制」开关 + 滑块（`maxTokens = 0` 即不限制；关掉开关按 profile 还原 `lastCappedTokens` 里记的上一次有限值，没有才用 `CAPPED_MAX_TOKENS_DEFAULT`；滑块量程 `MAX_TOKENS_LIMIT`）
 - 2026-09-21: 问答链路补失败卡 / 截断条 / 流式光标（ChatPanel），来源芯片结构化并可跳页；PdfViewer 划选按页合并（`mergeSegments`）且高亮接入 IPC 落库、适宽度跟随容器（ResizeObserver + 宽度守卫 + 渲染代次）、`scrollToPage` 等待目标页并闪烁
 - 2026-08-02T15:49:42: 补记 ChatPanel 的 `renderMarkdown`/KaTeX 渲染与 `/abstract` 命令提示、头像资源、IME 组合态处理；PdfViewer 高亮叠加层与 HiDPI 渲染；ParamPanel 改为多 profile 选择
 - 2026-07-19T14:49:32: ChatPanel / ParamPanel / PdfViewer 视觉与 a11y 微调
@@ -40,7 +41,7 @@
 - **Emits**：`close`
 - 可折叠的对话参数面板（`ChatView` 右栏）：
   - **对话模型选择**：下拉切换 `chatProfileId`（`setChatProfileId`），显示 provider·model 元信息 chip
-  - **Temperature / Top-K** 滑块：`updateCurrent` → `chatStore.updateProfile(chatProfile.id, {...})` 即时持久化
+  - **Temperature / Top-K / Max Tokens** 滑块：`updateCurrent` → `chatStore.updateProfile(chatProfile.id, {...})` 即时持久化；Max Tokens 另有「不限制」开关（`maxTokens = 0`，滑块禁用），提示按 provider 区分 Anthropic 的必填兜底；关掉开关还原本 profile 上次设过的有限值（`lastCappedTokens`，组件内按 profile id 记）
   - 底部「前往设置」链接到 `/settings` 做完整配置
 - 通过 `storeToRefs` 读取 `profiles` / `chatProfileId` / `chatProfile`
 
