@@ -116,7 +116,7 @@ addMessage(user, ..., { context })        // 划选原文随用户消息持久�
 - **继续** `continueMessage(convId, messageId)`：对截断回答就地续写（非流式），追加到原回答并刷新 `truncated`；带 `context` 时与重试同构，否则把已输出的半截回答并入改写历史后按原问题重跑检索
 - **来源构造**：`retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐，产出结构化 `SourceRef { label, paperId?, startPage?, endPage? }`（缺件退化为纯标签；芯片能否跳页由 `isJumpable` 判断）
 
-每篇论文先取段落索引（`parsePassageIndex`，v2）：拿到就挂 `passageIndex` 走**段落混合检索**，且**不挂 `semantic`**（D57：树路由与段落路径互斥，这是 `treeRouted` 保持诚实的前提）。只有旧版 v1 平面记录才回落到 `loadSemanticIndex` 的树路由（同样一次 LLM 调用，上下文仍来自原文证据块）/ 平面 `scoreAndSelect`。三条路径的查询阶段 LLM 调用次数一致（段落路径为零）。
+每篇论文先取段落索引（`parsePassageIndex`，v2）：拿到就挂 `passageIndex` 走**段落混合检索**，且**不挂 `semantic`**（D57：树路由与段落路径互斥，这是 `treeRouted` 保持诚实的前提）。只有旧版 v1 平面记录才回落到 `loadSemanticIndex` 的树路由（同样一次 LLM 调用，上下文仍来自原文证据块）/ 平面 `scoreAndSelect`。三条路径的查询阶段 LLM 调用次数并不一致：段落路径为零，树路由与平面 `scoreAndSelect` 各一次（退化到单候选的树会短路，为零）。
 
 - system 提示词固定追加 `MATH_FORMAT_INSTRUCTION`（要求用 `$...$` / `$$...$$`，禁用 `\(\)`/`\[\]`）
 - 首条消息实际仅 1 次 LLM 调用：段落路径的检索阶段零 LLM（无历史时不触发 `rewriteQuery`）
@@ -135,7 +135,7 @@ addMessage(user, ..., { context })        // 划选原文随用户消息持久�
 ## 常见问题
 
 **Q: 语义树开关关掉之后会怎样？**
-`treeEnabled=false` 时既不建树也不载入树，全部检索退回原有平面路径；已落库的树只是不再被读取，不会删除。重新打开即恢复。
+`treeEnabled=false` 时既不建树也不载入树，但检索分派不受该开关控制：记录里只要有可解析的 v2 段落索引就走段落混合检索，只有旧版（v1）平面记录才回落到平面 `scoreAndSelect`。已落库的树只是不再被读取，不会删除。重新打开即恢复。
 
 **Q: 对话和索引为什么用不同 profile？**
 索引构建（生成节标题/摘要、评分）可用便宜/本地模型，对话回答用更强模型，分开配置更经济。

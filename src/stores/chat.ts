@@ -309,9 +309,10 @@ function indexModelIdentity(profile: LLMProfile): string {
 /**
  * 本节两个指纹是**产品侧自己的失效令牌**，bench 的 `runner/passageIndexHook.ts` 也有一对同名概念。
  *
- * 两侧的指纹值**永远不可比、也永远不该被比较**：它们由各自侧的输入算出（产品是估算分词器 +
- * `baseUrl|model`，bench 是冻结的 BGE-M3 计数器 + `env.model`），哈希只覆盖输入里被显式写进去的
- * 那几项，所以「数值相等」既不能推出「两侧口径相同」，也不能推出「这份索引在对面可用」。
+ * 两侧的指纹值**永远不可比、也永远不该被比较**：它们由各自侧的输入算出（产品是默认切段参数 +
+ * `baseUrl|model`，bench 是配置旋钮 + `env.model`），两侧的 token 计数器（产品的估算器 / bench 冻结的
+ * BGE-M3）不进哈希——哈希只覆盖输入里被显式写进去的那几项，所以「数值相等」既不能推出「两侧口径
+ * 相同」，也不能推出「这份索引在对面可用」。
  * 哪天真需要跨侧核对，比的是**输入**（schemaVersion / 切段参数 / maxInputChars / 模型身份），
  * 而不是这两个摘要。
  */
