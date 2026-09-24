@@ -13,6 +13,18 @@ const obj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'o
 const positiveInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0
 const nonNegative = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
 
+/** 递归冻结：共享的配置块不得被按臂改写（见 `expandMatrix` 的 `carried`）。 */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    for (const key of Object.keys(value as Record<string, unknown>)) deepFreeze((value as Record<string, unknown>)[key])
+    Object.freeze(value)
+  }
+  return value
+}
+
+/** 段落混合检索的七项旋钮（`matrix` 里的键名）；与 `validateHybridKnobs` 的清单同源。 */
+const PASSAGE_KNOB_KEYS = ['minTokens', 'maxTokens', 'maxInputChars', 'rrfK', 'sectionWeight', 'neighbourFactor', 'skipLimit'] as const
+
 export function expandMatrix(file: ConfigFile): PaperMindConfig[] {
   const keys = Object.keys(file.matrix) as Array<keyof NonNullable<ConfigFile['matrix']>>
   // semanticTree 与「非默认 kind」不属于矩阵维度，但展开时必须原样带到每个配置上。
@@ -20,8 +32,14 @@ export function expandMatrix(file: ConfigFile): PaperMindConfig[] {
   const carried: Partial<PaperMindConfig> = {
     ...(file.kind && file.kind !== 'papermind' ? { kind: file.kind } : {}),
     ...(file.semanticTree ? { semanticTree: file.semanticTree } : {}),
-    // passage 的身份由 validatePaperMind 校验并归一化，这里不再重复校验
-    ...(file.passage ? { passage: file.passage } : {}),
+    // passage 的身份由 validatePaperMind 校验并归一化，这里不再重复校验。
+    // 三个 sectionWeight 臂共享**同一个** passage 对象，所以这里克隆一次并深冻结：
+    // 克隆让展开结果不依赖调用方那份对象的后续改动，冻结让任何未来的按臂改写在严格模式下
+    // 当场抛错，而不是「悄悄把三个臂的嵌入器身份一起改掉、却仍各自声称不同的旋钮」。
+    // （选冻结而不是「按臂克隆」：克隆只隔离副作用，改写仍然静默通过；这里的语义是
+    //   「不可消融、各臂逐字相同」，越界就该是显式失败。显式克隆也是类型检查点——
+    //   将来给 PassageRuntimeParams 加必填字段时，这里会先编译失败，而不是漏拷贝一个键。）
+    ...(file.passage ? { passage: deepFreeze({ embedder: { ...file.passage.embedder } }) } : {}),
   }
   if (!keys.length) return [{ ...carried, name: file.name }]
   let combos: Array<Record<string, number | boolean>> = [{}]
@@ -215,6 +233,18 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
     const list = values as unknown[]
     if (list.some(v => typeof v !== 'number' && typeof v !== 'boolean')) fail(path, `matrix.${key}`, '必须为 number/boolean 数组')
     if (!list.length) fail(path, `matrix.${key}`, '展开为 0 个配置')
+  }
+  // 七项旋钮与 `passage` 块必须**共现**（方案 §7：旋钮消融 + 不可消融的嵌入器块）。
+  // 上面的白名单只挡拼错的键名，挡不住「旋钮一个不差、整块 `passage` 却漏了」：那种配置会
+  // 原样展开成若干条平铺臂，名字却还叫 papermind-hybrid——量出来的数字标着混合检索，
+  // 实际一条 passage 参数都没下发。只在「恰好一边有」时报错：两者都缺席是合法的纯平铺配置
+  // （`bench/configs/default.json`），两者都在则交给下面的 `validateHybridKnobs` 逐项校验。
+  const hasKnob = PASSAGE_KNOB_KEYS.some(key => matrix[key] !== undefined)
+  const hasPassage = raw.passage !== undefined
+  if (hasKnob !== hasPassage) {
+    fail(path, 'passage', hasKnob
+      ? `段落旋钮 ${PASSAGE_KNOB_KEYS.filter(key => matrix[key] !== undefined).join('/')} 缺少配套的 passage 块：嵌入器不可消融，两者必须同时出现（否则会以混合检索之名跑平铺管道）`
+      : `缺少段落混合检索的七项旋钮 ${PASSAGE_KNOB_KEYS.join('/')}：passage 块必须与它们同时出现`)
   }
   const file: ConfigFile = raw.kind === 'semantic-tree'
     ? {

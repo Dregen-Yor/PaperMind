@@ -50,6 +50,12 @@ export type PassageIndexHook = (sample: EvalSample) => Promise<PassageIndexInfo>
 
 export function createPassageIndexHook(opts: PassageIndexHookOptions): PassageIndexHook {
   const now = opts.now ?? Date.now
+  // 下面两个指纹是 **bench 侧自己的失效令牌**（产品侧 `stores/chat.ts` 有一对同名概念）。
+  // 两侧的值永远不可比、也永远不该被比较：输入取自各自侧（这里用配置旋钮 + `env.model`，
+  // 产品用估算分词器 + `baseUrl|model`），哈希只覆盖显式写进去的那几项，所以「数值相等」
+  // 既推不出「两侧口径相同」，也推不出「这份索引在对面可用」。将来真要跨侧核对，
+  // 比的是**输入**（schemaVersion / minTokens / maxTokens / maxInputChars / 提示词版本 /
+  // 模型身份），不是这两个摘要。
   const passageConfig = passageConfigHash({
     schemaVersion: PASSAGE_INDEX_SCHEMA_VERSION,
     segmentation: { minTokens: opts.knobs.minTokens, maxTokens: opts.knobs.maxTokens },
