@@ -555,8 +555,10 @@ export const useChatStore = defineStore('chat', () => {
     if (idx === -1) return
     profiles.value[idx] = { ...profiles.value[idx], ...patch }
     await persistProfiles()
-    // 改的若是当前索引配置的模型/端点（`TREE_CONFIG_PATCH_KEYS`，即建树与段落索引指纹的组成），
-    // 已建好的树随即失效，就绪集合要重算；拖温度或输出上限滑块不必付一次 tree.list 的 IPC 开销
+    // 改的若是当前索引配置的模型/端点（`TREE_CONFIG_PATCH_KEYS` = 建树指纹 `provider:model@baseUrl`
+    // 的三要素），已建好的树随即失效，就绪集合要重算；拖温度或输出上限滑块不必付一次 tree.list
+    // 的 IPC 开销。对段落索引这是个**超集**门（`indexModelIdentity` 只取 `baseUrl|model`，
+    // 不含 provider），只改 provider 时多跑一次索引校验、不会漏作废（见 #R33）
     if (id === indexProfileId.value && TREE_CONFIG_PATCH_KEYS.some(key => key in patch)) {
       // 段落索引同理：在途构建按旧端点算出的结构卡片与 structureHash 已经不对了，
       // 作废让它们停止写盘（方案 §8），再把受影响的论文重新入队

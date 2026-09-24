@@ -65,7 +65,7 @@ Pinia 全局状态管理，封装所有与主进程的 IPC 通信、LLM API 请�
 
 - **ollama**：`POST {baseUrl}/api/chat`，`stream` 随 `opts.onToken`，`topK>0` 时附 `options.top_k`，`maxTokens>0` 时附 `options.num_predict`（不限制则整个 `options` 都不出现）
 - **openai / anthropic**：`POST {baseUrl}/chat/completions`（OpenAI 兼容）
-  - openai：`Authorization: Bearer {apiKey}`；`maxTokens>0` 才附上限字段，字段名按模型选（`outputLimitParam`：`o` 系 / `gpt-5` 系用 `max_completion_tokens`，其余含第三方兼容端点用 `max_tokens`），不限制时整条不发送
+  - openai：`Authorization: Bearer {apiKey}`；采样与上限都由 `generationParams` 按模型代次产出（`o` 系 / `gpt-5` 系发 `max_completion_tokens` 且**不发 `temperature`**，非默认温度会被直接拒绝；其余含第三方兼容端点发 `max_tokens` + `temperature`），不限制时上限字段整条不发送
   - anthropic：`x-api-key` + `anthropic-version: 2023-06-01`，`topK>0` 时附 `top_k`；`max_tokens` **必填**，不限制时退到 `CAPPED_MAX_TOKENS_DEFAULT`（8192）。老模型（claude-3-opus / haiku，上限 `ANTHROPIC_LEGACY_MAX_TOKENS` = 4096）会对 8192 报 400，此时**自动降级重试一次**并把上限记进模块级 `anthropicTokenCeilings`（key = `baseUrl|model`），后续调用直接按 4096 发送；只在「不限制」的自动兜底路径降级，用户显式设过的上限被拒时原样报错
 - 可传 `profileId` 指定配置（默认用 `chatProfile`）；空回答一律抛「模型返回了空响应」
 - **输出上限与截断是两件事**：上限可以不设（默认），截断提示只看 `finish_reason` / `stop_reason` / `done_reason`；不设上限后，非流式请求（120s 超时）更容易被长回答顶到时间上限
