@@ -8,7 +8,7 @@
 import type { DataType } from '@huggingface/transformers'
 import {
   BGE_SMALL_DIM, BGE_SMALL_DTYPE, BGE_SMALL_MODEL, BGE_SMALL_REVISION,
-  createEmbedder, embedderId, type Embedder,
+  createEmbedder, defaultQueryInstruction, embedderId, type Embedder,
 } from './embedder'
 import { createIdbStore, createModelFileCache, type ModelFileCache } from './modelCache'
 
@@ -129,5 +129,5 @@ export async function createTransformersEmbedder(options: TransformersEmbedderOp
     }
     return vectors
   }
-  return createEmbedder({ id: embedderId(model, revision, dtype), embed })
+  return createEmbedder({ id: embedderId(model, revision, dtype), embed, queryInstruction: defaultQueryInstruction(model) })
 }

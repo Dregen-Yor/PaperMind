@@ -25,6 +25,8 @@ export HF_MODEL=Bashaarat1/t5-small-arxiv-summarizer  # 可选，覆盖摘要模
 export HF_ENDPOINT=https://hf-mirror.com
 # GitHub 克隆等依赖下载走本地代理（只放执行环境，绝不写进提交的配置或源码）：
 export HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897
+# Node 自带 fetch 默认不读上面两个代理变量；模型首次下载需要走代理时再加：
+export NODE_USE_ENV_PROXY=1
 ```
 
 QA 最终回答统一请求 `maxTokens=4096`、`temperature=0`，并共用上述超时与重试设置；这些请求参数也进入速度协议身份。`temperature=0` 只是请求值，provider 可能忽略参数，不能据此保证确定性。`BENCH_QA_TOP_P` 与 `BENCH_QA_THINKING` 未设置时保持 provider 默认行为，不等同于明确关闭 thinking；正式对照须两侧使用相同的显式选择。`BENCH_QA_THINKING` 的请求对象面向支持它的 OpenAI 兼容端点；`BENCH_LLM_PROVIDER=ollama` 会拒绝任何显式 thinking 值（包括 `disabled`），使用 Ollama 时应留空。客户端支持 `stop`，但目前没有相应的 `BENCH_STOP` CLI 环境变量。
@@ -162,6 +164,7 @@ Q 要求两侧都是 schema 2 / `query-timeline-v2`，并逐项核对同一数�
 | Ceiling | `--mode full-context` | 报表沿用**生成上限**标签，指全文直投参考而非理论质量上限；它不是检索选手：无检索、全文直投，预算不受 4096 约束，故 `comparisonEligible: false`，只进「生成上限」表、不进检索排名。注意它是 `--mode` 取值而**不是**配置名——没有 `configs/full-context.json`，结果文件里的 `config.name` 仍是 `default`，不要去找一个不存在的配置 |
 | Strong | `hybrid-rerank`、`long-section-rag` | 强基线组（计划 §0）：成熟检索栈、结构化阅读 |
 | Primary | PaperMind 当前管线 | 被评测的生产方法 |
+| Hybrid | `papermind-hybrid`、`papermind-hybrid-m3` | 段落级混合检索（方案 `docs/superpowers/specs/2026-09-23-hybrid-passage-retrieval-design.md`）：BM25 + 段落向量 + 结构卡片先验三路加权 RRF，回答前零 LLM 调用；冷启动成本单独成表、不进 Q。任一题降级为 `bm25*` 检索（向量模型加载失败或单篇向量失败）整轮标 `comparisonEligible: false`。`-m3` 变体向量模型为 `Xenova/bge-m3`（`BAAI/bge-m3` 官方仓库无 q8 ONNX 权重，pin 到 revision `4de13258`），查询不加 bge v1.5 的检索指令前缀 |
 | Tree | `semantic-tree` | Primary 的变体：同一条分阶段管线（`retrieveRagContext` → `generateRagAnswer`；`runRagPipeline` 仅是向后兼容的组合封装），仅把平面 `scoreAndSelect` 换成单轮树路由——树的收益是唯一变量 |
 
 **强基线共同契约**（计划 `docs/superpowers/plans/2026-09-08-baseline-matrix.md` §1 冻结）：与所有基线同一份数据集/原文/原始问题/最终作答模型/4096 token 上下文预算/指标与错误口径；无查询改写。最终预算由**共用物化器**施加——它把候选逐段填入 4096 token 上限，允许在预算边界**截断最后一段**（部分进入的页仍计入页序）并以 `truncated` 标记；多段之间用 `\n\n---\n\n` 分组分隔符连接，且「分隔符 + 至少一个内容 token」都放不下时整组不进入，避免留下吃掉剩余预算的尾部分隔符。因此不存在「单个候选不截断、预算不足整段停止」的旧行为。

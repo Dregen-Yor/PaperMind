@@ -2,7 +2,7 @@
   "name": "papermind-hybrid-m3",
   "kind": "papermind",
   "passage": {
-    "embedder": { "model": "BAAI/bge-m3", "revision": "main", "dtype": "q8", "dim": 1024 }
+    "embedder": { "model": "Xenova/bge-m3", "revision": "4de13258303883538bd53b696b452bf8099f0858", "dtype": "q8", "dim": 1024 }
   },
   "matrix": {
     "topK": [4],

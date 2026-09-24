@@ -26,6 +26,14 @@ export const BGE_SMALL_DIM = 384
 /** bge 系列检索是非对称的：查询侧必须带指令前缀，段落 / 卡片侧不加。 */
 export const QUERY_INSTRUCTION = 'Represent this sentence for searching relevant passages: '
 
+/**
+ * 查询前缀按模型决定：只有 bge v1.5 英文系列是用这句指令训练的；bge-m3 等模型
+ * 查询与段落对称编码，加前缀反而偏移查询向量，消融时也会混入第二个变量。
+ */
+export function defaultQueryInstruction(model: string): string {
+  return /bge-(small|base|large)-en-v1\.5$/.test(model) ? QUERY_INSTRUCTION : ''
+}
+
 export function embedderId(model: string, revision: string, dtype: string): string {
   return `${model}@${revision}#${dtype}`
 }
@@ -45,11 +53,14 @@ export function cardEmbedText(card: EmbeddableCard): string {
 export function createEmbedder(deps: {
   id: string
   embed: (texts: string[]) => Promise<Float32Array[]>
+  /** 查询前缀；缺省为 bge v1.5 的检索指令 */
+  queryInstruction?: string
 }): Embedder {
+  const queryInstruction = deps.queryInstruction ?? QUERY_INSTRUCTION
   return {
     id: deps.id,
     async embedQuery(text: string): Promise<Float32Array> {
-      const [vector] = await deps.embed([QUERY_INSTRUCTION + text])
+      const [vector] = await deps.embed([queryInstruction + text])
       if (!vector) throw new Error('向量模型未返回查询向量')
       return vector
     },

@@ -475,6 +475,16 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   // 树诊断与检索质量指标合流进同一份 metrics，报表才能在同一行同时回答
   // 「检索有没有变好」与「树是什么样、贵不贵、失败得多不多」（§阶段 E）
   const treeAgg = summarizeTreeDiagnostics(perPaper)
+  // 段落配置：只要有一题实际走了 bm25*（单篇向量失败、查询向量失败、来源不符），
+  // 本轮检索信号就与正式对照不同源——整轮标为不可比，而不只是在 CLI 模型整体加载失败时（方案 §7/§8）
+  const passageModes = args.passage ? perSample.filter(record => record.retrievalMode !== undefined) : []
+  const degradedQuestions = passageModes.filter(record => record.retrievalMode!.startsWith('bm25')).length
+  const passageDegradedQuestionRate = passageModes.length > 0 ? degradedQuestions / passageModes.length : 0
+  const passageIneligibleReason = args.passage?.embedderUnavailable
+    ? 'embedder-unavailable'
+    : degradedQuestions > 0 || perPaper.some(record => record.coldStartEmbedFailed === 1)
+      ? 'passage-retrieval-degraded'
+      : undefined
   return finalizeQaResult({
     config,
     contract,
@@ -500,15 +510,17 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     unmappedEvidenceQuestions,
     ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
     // 段落配置下 extraMetrics 换成冷启动成本（树诊断在段落路径上恒为空：hook 接管后不再建树）
-    extraMetrics: args.passage ? summarizeColdStart(perPaper) : treeAgg.metrics,
+    extraMetrics: args.passage
+      ? { ...summarizeColdStart(perPaper), passageDegradedQuestionRate }
+      : treeAgg.metrics,
     ...(args.passage
       ? {
           extraMeta: {
             baselineFamily: 'classic' as const,
             candidateGranularity: 'paragraph passage',
             // 向量模型不可用时本轮检索信号与其它基线不同源，如实标为不可比（方案 §7）
-            ...(args.passage.embedderUnavailable
-              ? { comparisonEligible: false, comparisonIneligibleReason: 'embedder-unavailable' }
+            ...(passageIneligibleReason
+              ? { comparisonEligible: false, comparisonIneligibleReason: passageIneligibleReason }
               : {}),
           },
         }

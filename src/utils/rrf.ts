@@ -5,6 +5,11 @@
 export interface RankedItem {
   id: number
   score: number
+  /**
+   * 显式名次（1-based）。给了就不再按排序位置计名次——用于「多个条目共享同一名次」
+   * 的场景（段落继承所属卡片名次、零分段落并列末位），见方案 §4.2。
+   */
+  rank?: number
 }
 
 export function reciprocalRankFusion(lists: RankedItem[][], k: number, weights?: number[]): RankedItem[] {
@@ -17,7 +22,7 @@ export function reciprocalRankFusion(lists: RankedItem[][], k: number, weights?:
     const weight = weights?.[listIndex] ?? 1
     const ranked = [...list].sort((a, b) => b.score - a.score || a.id - b.id)
     ranked.forEach((item, rank) => {
-      scores.set(item.id, (scores.get(item.id) ?? 0) + weight / (k + rank + 1))
+      scores.set(item.id, (scores.get(item.id) ?? 0) + weight / (k + (item.rank ?? rank + 1)))
     })
   })
   return [...scores.entries()]

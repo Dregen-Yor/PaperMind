@@ -132,7 +132,10 @@ describe('startPassagePipeline', () => {
       embedPassages: vi.fn(async () => { throw new Error('向量模型不可用') }),
     }
     const brokenCtx = deps(async () => CARDS_JSON, broken)
-    const brokenFinal = await (await startPassagePipeline(PAGES, brokenCtx.deps, {})).rest
+    const events: Array<{ stage: string; failed?: boolean }> = []
+    const brokenFinal = await (await startPassagePipeline(PAGES, { ...brokenCtx.deps, onStage: event => { events.push(event) } }, {})).rest
+    // 失败事件必须带 failed 标记：bench 据此把这篇判为降级，不把失败耗时记成向量成本
+    expect(events.find(event => event.stage === 'passage-vectors')?.failed).toBe(true)
     expect(brokenFinal.passageVectors).toBeUndefined()
     expect(brokenFinal.cardVectors).toBeUndefined()
     expect(brokenFinal.cards).toHaveLength(3)

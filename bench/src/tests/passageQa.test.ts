@@ -174,3 +174,14 @@ describe('runQaTask 段落路径 — 融合旋钮的端到端转发', () => {
     expect(cardPriorOn.captured).not.toEqual(cardPriorOff.captured)
   })
 })
+
+describe('runQaTask 段落路径 — 逐题降级判不可比', () => {
+  it('模型整体可用但本篇没有向量（逐题走 bm25*）时整轮标为不可比', async () => {
+    const args = argsWithSectionWeight(0.5, capturingMaterialize().materialize)
+    args.passage!.embedderUnavailable = false
+    const result = await runQaTask(args)
+    expect(result.meta.comparisonEligible).toBe(false)
+    expect(result.meta.comparisonIneligibleReason).toBe('passage-retrieval-degraded')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(1)
+  })
+})

@@ -106,7 +106,9 @@ export function createPassageIndexHook(opts: PassageIndexHookOptions): PassageIn
             coldStart.coldStartPassageMs = event.latencyMs
             coldStart.coldStartPassageCount = event.passageCount
           } else if (event.stage === 'passage-vectors') {
-            coldStart.coldStartEmbedPassagesMs = event.latencyMs
+            // 失败那次的耗时不是「段落向量成本」，不进均值；只留失败标记
+            if (event.failed) coldStart.coldStartEmbedFailed = 1
+            else coldStart.coldStartEmbedPassagesMs = event.latencyMs
           } else if (event.stage === 'card-vectors') {
             coldStart.coldStartEmbedCardsMs = event.latencyMs
           } else {

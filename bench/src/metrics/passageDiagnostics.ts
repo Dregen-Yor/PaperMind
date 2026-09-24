@@ -58,7 +58,12 @@ export function summarizeColdStart(records: PaperTimingRecord[]): Record<string,
   const passageMs = valuesOf(records, record => record.coldStartPassageMs)
   const embedPassagesMs = valuesOf(records, record => record.coldStartEmbedPassagesMs)
   const embedCardsMs = valuesOf(records, record => record.coldStartEmbedCardsMs)
-  const totalMs = valuesOf(records, record => record.coldStartTotalMs)
+  // 端到端与卡片调用同口径：只统计卡片调用未命中缓存的论文。命中时端到端只剩切段 +
+  // 向量，同一次运行里后跑的 sectionWeight 臂会因此显得「冷启动更便宜」，是假象
+  const totalMs = valuesOf(
+    records.filter(record => record.coldStartStructureCacheHit !== 1),
+    record => record.coldStartTotalMs,
+  )
   store('avgColdStartPassageMs', meanOf(passageMs))
   store('avgColdStartEmbedPassagesMs', meanOf(embedPassagesMs))
   store('avgColdStartEmbedCardsMs', meanOf(embedCardsMs))
@@ -81,6 +86,7 @@ export function summarizeColdStart(records: PaperTimingRecord[]): Record<string,
   const fallbacks = records.filter(record => record.coldStartStructureFallback !== undefined).length
   store('structureFallbackRate', attempted > 0 ? fallbacks / attempted : undefined)
   store('avgColdStartCardCount', meanOf(valuesOf(records, record => record.coldStartCardCount)))
+  store('passageEmbedFailureRate', records.filter(record => record.coldStartEmbedFailed === 1).length / attempted)
   store('avgColdStartPassageCount', meanOf(valuesOf(records, record => record.coldStartPassageCount)))
 
   return withPercentiles(metrics, { coldStartTotal: totalMs, structureCall: uncachedCallMs })

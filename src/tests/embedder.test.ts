@@ -109,3 +109,19 @@ describe('cardEmbedText', () => {
       .toBe('Datasets. Europarl. Key terms: data, corpora')
   })
 })
+
+describe('defaultQueryInstruction', () => {
+  it('bge v1.5 英文系列带检索指令，bge-m3 不带', async () => {
+    const { defaultQueryInstruction, QUERY_INSTRUCTION } = await import('../utils/embedder')
+    expect(defaultQueryInstruction('Xenova/bge-small-en-v1.5')).toBe(QUERY_INSTRUCTION)
+    expect(defaultQueryInstruction('Xenova/bge-m3')).toBe('')
+  })
+
+  it('createEmbedder 按 queryInstruction 拼查询', async () => {
+    const { createEmbedder } = await import('../utils/embedder')
+    const seen: string[] = []
+    const embedder = createEmbedder({ id: 'x', queryInstruction: '', embed: async texts => { seen.push(...texts); return [new Float32Array(1)] } })
+    await embedder.embedQuery('q')
+    expect(seen).toEqual(['q'])
+  })
+})

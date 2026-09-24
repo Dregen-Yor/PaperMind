@@ -48,6 +48,48 @@ export interface FusePassageCandidatesArgs {
   passagesCannotUseVectors: boolean
 }
 
+/**
+ * 词法路名次：正分按分数排位；零分（没命中任何查询词）的段落**并列末位**，
+ * 不按排序位置递增——否则同分按 id 排位会把「前部段落」系统性抬高。
+ */
+export function rankWithTiedZeros(items: RankedItem[]): RankedItem[] {
+  const positive = items.filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.id - b.id)
+  const tailRank = positive.length + 1
+  return [
+    ...positive.map((item, index) => ({ ...item, rank: index + 1 })),
+    ...items.filter(item => !(item.score > 0)).map(item => ({ ...item, rank: tailRank })),
+  ]
+}
+
+/**
+ * 卡片先验路：先对**卡片**排名次，段落继承所属卡片的名次（方案 §4.2）。
+ * 同一卡片下的段落共享名次；未被任何卡片覆盖的段落、以及无效分（非有限 / 词法零分）
+ * 的卡片并列末位。
+ */
+export function inheritCardRanks(
+  passages: Passage[],
+  cardScores: number[],
+  cardByPassage: Map<number, number>,
+  zeroIsMiss: boolean,
+): RankedItem[] {
+  const valid = (score: number) => Number.isFinite(score) && (!zeroIsMiss || score > 0)
+  const ranked = cardScores
+    .map((score, cardIndex) => ({ score, cardIndex }))
+    .filter(card => valid(card.score))
+    .sort((a, b) => b.score - a.score || a.cardIndex - b.cardIndex)
+  const rankByCard = new Map(ranked.map((card, index) => [card.cardIndex, index + 1]))
+  const tailRank = ranked.length + 1
+  return passages.map(passage => {
+    const cardIndex = cardByPassage.get(passage.order)
+    const rank = cardIndex === undefined ? undefined : rankByCard.get(cardIndex)
+    return {
+      id: passage.order,
+      score: cardIndex === undefined ? 0 : cardScores[cardIndex],
+      rank: rank ?? tailRank,
+    }
+  })
+}
+
 /** 三路（可少路）加权 RRF，返回按分数降序、同分按 order 升序的候选。 */
 export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageCandidate[] {
   const lists: RankedItem[][] = [args.bm25(args.query)]
@@ -291,7 +333,7 @@ export async function retrievePassageContext(
     }
     if (cardScores && cardByPassage) {
       const scores = cardScores
-      card = () => passages.map(passage => ({ id: passage.order, score: scores[cardByPassage.get(passage.order) ?? -1] ?? 0 }))
+      card = () => inheritCardRanks(passages, scores, cardByPassage, false)
       mode = index.structureFallback ? 'full-title-fallback' : 'full'
     } else {
       mode = 'bm25+dense'
@@ -301,7 +343,7 @@ export async function retrievePassageContext(
     const scoreCards = buildBm25Scorer(cards.map(card => cardEmbedText(card)))
     card = text => {
       const scores = scoreCards(text)
-      return passages.map(passage => ({ id: passage.order, score: scores[cardByPassage!.get(passage.order) ?? -1]?.score ?? 0 }))
+      return inheritCardRanks(passages, cards.map((_, cardIndex) => scores[cardIndex]?.score ?? 0), cardByPassage!, true)
     }
     mode = 'bm25+card-lexical'
   } else {
@@ -311,7 +353,7 @@ export async function retrievePassageContext(
   const candidates = fusePassageCandidates({
     passages,
     query,
-    bm25: text => bm25(text),
+    bm25: text => rankWithTiedZeros(bm25(text)),
     ...(dense ? { dense } : {}),
     ...(card ? { card } : {}),
     rrfK,

@@ -30,6 +30,7 @@ import type { StrongBaselineQaArgs, StrongGenerationSettings } from './runner/st
 import { materializeContext, type ContextGroup } from '../../src/utils/contextTrace'
 import type { Embedder } from '../../src/utils/embedder'
 import { createTransformersEmbedder } from '../../src/utils/transformersEmbedder'
+import { applyHfEndpoint } from './hub'
 import { MATH_FORMAT_INSTRUCTION } from '../../src/utils/ragPipeline'
 import {
   buildEvaluationContract,
@@ -423,6 +424,8 @@ for (const config of configs) {
           // 因为「模型没下下来」和「检索不行」是两件事，混在一起读会得出错误结论
           let passageEmbedder: Embedder | undefined
           try {
+            // 与其它 runner 同一下载口径：transformers.js 不读 HF_ENDPOINT，需显式设 remoteHost
+            applyHfEndpoint(await import('@huggingface/transformers'))
             passageEmbedder = await createTransformersEmbedder({
               model: config.passage.embedder.model,
               revision: config.passage.embedder.revision,

@@ -92,7 +92,7 @@ export const TREE_SECTION_METRICS: string[] = [
 ]
 
 /**
- * 「冷启动成本」表实际渲染的 11 个键，按列序：端到端与卡片调用各展开成 P50/P95 两列
+ * 「冷启动成本」区块占用的 13 个键（后两个是降级诊断，只在非零时以脚注呈现），按列序：端到端与卡片调用各展开成 P50/P95 两列
  * （`coldStartTotal*` / `structureCall*`，见 `summarizeColdStart`），其余为单值键。
  * 与 `TREE_SECTION_METRICS` 同一约定：区块真的渲染时才把这些键从伴侣表里排除，
  * 否则同一个指标会既进冷启动区块、又以原值列在回答质量/生成上限表里。
@@ -103,6 +103,7 @@ export const COLD_START_SECTION_METRICS: string[] = [
   'structureCallP50Ms', 'structureCallP95Ms',
   'avgColdStartEmbedCardsMs', 'structureTokensPerPaper',
   'structureFallbackRate', 'avgColdStartCardCount', 'avgColdStartPassageCount',
+  'passageEmbedFailureRate', 'passageDegradedQuestionRate',
 ]
 
 /** schema-v2 判定：缺 `mrrDefinition: 'context-page-v1'` 一律按 legacy 处理（§7）。 */
@@ -721,6 +722,14 @@ function renderColdStartSection(results: BenchResult[]): string[] {
   }
   lines.push('')
   lines.push('> 「卡片调用 P50/P95」只统计**未命中缓存**的调用（命中时耗时接近 0，混进去会把成本稀释成假象）；')
+  for (const result of results) {
+    const failed = result.metrics.passageEmbedFailureRate ?? 0
+    const degraded = result.metrics.passageDegradedQuestionRate ?? 0
+    if (failed > 0 || degraded > 0) {
+      lines.push(`> ⚠ ${result.config.name}：段落向量失败率 ${(failed * 100).toFixed(1)}%，降级为 bm25* 检索的题占 ${(degraded * 100).toFixed(1)}%，本轮已标为不可比。`)
+    }
+  }
+  lines.push('> 「冷启动端到端」同样只统计卡片调用未命中缓存的论文。')
   lines.push('> 卡片 token 由字符数估算（`LlmClient.complete` 不透传服务商 usage），每篇论文的冷启动只发生**一次**卡片调用。')
   return lines
 }

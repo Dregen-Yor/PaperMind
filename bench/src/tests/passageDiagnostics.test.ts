@@ -16,8 +16,8 @@ describe('summarizeColdStart', () => {
 
   it('聚合出总耗时 P50/P95 与每篇 token 均值', () => {
     const metrics = summarizeColdStart(records)
-    // 最近秩法分位数：两个值取 P50 落在低位（ceil(0.5 * 2) - 1 = 0），P95 才是高位
-    expect(metrics.coldStartTotalP50Ms).toBe(400)
+    // p2 的卡片调用命中缓存，端到端不计入：只剩 p1 一个值
+    expect(metrics.coldStartTotalP50Ms).toBe(4300)
     expect(metrics.coldStartTotalP95Ms).toBe(4300)
     expect(metrics.structureTokensPerPaper).toBe(8455)
   })
@@ -56,5 +56,26 @@ describe('introspectPassageStageEvent', () => {
   it('回落事件额外记原因', () => {
     const event: PassageStageEventLike = { stage: 'structure', latencyMs: 9, cardCount: 2, fallback: 'input-too-large' }
     expect(introspectPassageStageEvent(event, { inputChars: 0, outputChars: 0 }).coldStartStructureFallback).toBe('input-too-large')
+  })
+})
+
+describe('summarizeColdStart — 缓存命中与向量失败', () => {
+  const base = { source: 'qasper' as const, pageCount: 5, questionCount: 1 }
+  it('冷启动端到端只统计卡片调用未命中缓存的论文', () => {
+    const metrics = summarizeColdStart([
+      { ...base, paperId: 'a', coldStartTotalMs: 5000, coldStartStructureCacheHit: 0 },
+      { ...base, paperId: 'b', coldStartTotalMs: 300, coldStartStructureCacheHit: 1 },
+    ])
+    expect(metrics.coldStartTotalP50Ms).toBe(5000)
+    expect(metrics.coldStartTotalP95Ms).toBe(5000)
+  })
+
+  it('向量失败的论文只计失败率，不进段落向量耗时均值', () => {
+    const metrics = summarizeColdStart([
+      { ...base, paperId: 'a', coldStartEmbedPassagesMs: 200 },
+      { ...base, paperId: 'b', coldStartEmbedFailed: 1 },
+    ])
+    expect(metrics.avgColdStartEmbedPassagesMs).toBe(200)
+    expect(metrics.passageEmbedFailureRate).toBe(0.5)
   })
 })

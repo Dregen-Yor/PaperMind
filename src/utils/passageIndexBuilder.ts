@@ -27,7 +27,8 @@ import {
 
 export type PassageStageEvent =
   | { stage: 'passages'; latencyMs: number; passageCount: number }
-  | { stage: 'passage-vectors'; latencyMs: number }
+  /** `failed`：本篇段落向量计算失败、已降级为无向量检索（bench 据此判不可比） */
+  | { stage: 'passage-vectors'; latencyMs: number; failed?: boolean }
   | { stage: 'structure'; latencyMs: number; cardCount: number; fallback?: StructureFallbackReason; cacheHit?: boolean }
   | { stage: 'card-vectors'; latencyMs: number }
 
@@ -219,7 +220,7 @@ async function runRemainingStages(
     } catch {
       // 向量模型不可用：停留阶段①，卡片仍然生成（检索退化为 bm25+card-lexical）。
       // 不 rethrow：没有向量是可用性降级，不是构建失败
-      deps.onStage?.({ stage: 'passage-vectors', latencyMs: Math.max(0, now() - startedAt) })
+      deps.onStage?.({ stage: 'passage-vectors', latencyMs: Math.max(0, now() - startedAt), failed: true })
     }
   })()
 

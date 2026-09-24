@@ -3,7 +3,7 @@ import { createMaxHeap } from '../utils/priorityQueue'
 import { buildPassages, createEstimatingTokenCounter } from '../utils/passages'
 import { buildTitleCards, cardsToIndexNodes, type StructureCard } from '../utils/structureCards'
 import { PASSAGE_INDEX_VERSION, passageConfigHash, type PassageIndex } from '../utils/passageIndex'
-import { fusePassageCandidates } from '../utils/passageRetrieval'
+import { fusePassageCandidates, inheritCardRanks, rankWithTiedZeros } from '../utils/passageRetrieval'
 import type { Embedder } from '../utils/embedder'
 import {
   DEFAULT_HYBRID_OPTIONS, fillPassageBudget, retrievePassageContext,
@@ -256,7 +256,9 @@ describe('retrievePassageContext（模式判定与组装）', () => {
     // 于是两个 ContextGroup、两个真实页区间，中间必须落一个分隔符。
     // 预算由 fixture 自己的 tokenCount 算出（0 + 2 + 一个分隔符），不依赖分词细节
     const budget = index.passages[0].tokenCount + index.passages[2].tokenCount + index.separatorTokens
-    const result = await retrievePassageContext(index, 'corpus', { embedder, maxTokens: budget })
+    // 查询命中 0 号（BM25 第一）、2 号是稠密与卡片先验第一：融合序 2 > 0 > 1，
+    // 1 号与 0/2 同卡片名次共享后不再靠位置偏置挤进来
+    const result = await retrievePassageContext(index, 'alpha', { embedder, maxTokens: budget })
     expect(result.contextGroups).toHaveLength(2)
     expect(result.hybrid.selectedPassageIds).toEqual([index.passages[0].id, index.passages[2].id])
     expect(result.context).toContain(CONTEXT_GROUP_SEPARATOR)
@@ -275,7 +277,7 @@ describe('retrievePassageContext（模式判定与组装）', () => {
     const total = index.passages.reduce((sum, passage) => sum + passage.tokenCount, 0)
     const multiGroupBudgets: number[] = []
     for (let budget = 1; budget <= total + index.separatorTokens + 1; budget++) {
-      const result = await retrievePassageContext(index, 'corpus', { embedder, maxTokens: budget })
+      const result = await retrievePassageContext(index, 'alpha', { embedder, maxTokens: budget })
       const materialized = materializeContext(result.contextGroups, exact, budget)
       expect(materialized.truncated, `budget=${budget}`).toBe(false)
       expect(materialized.tokenCount, `budget=${budget}`).toBeLessThanOrEqual(budget)
@@ -475,5 +477,41 @@ describe('fusePassageCandidates 卡片先验的接线', () => {
     // （1/62 + 2/61 > 1/61 + 2/62）。这与 `rrf.test.ts` 的「权重改变卡片路的名次贡献」同型。
     expect(topOrder(0)).toBe(0)
     expect(topOrder(2)).toBe(1)
+  })
+})
+
+describe('卡片名次继承与零分并列（方案 §4.2）', () => {
+  const passages = buildPassages(['a.\n\nb.\n\nc.\n\nd.'], counter, { minTokens: 1 })
+    .map((passage, order) => ({ ...passage, order }))
+
+  it('同一卡片下的段落共享卡片名次，第二张卡片名次为 2', () => {
+    // 段落 0-2 属于卡片 0（高分），段落 3 属于卡片 1
+    const cardByPassage = new Map([[0, 0], [1, 0], [2, 0], [3, 1]])
+    const ranks = inheritCardRanks(passages.slice(0, 4), [0.9, 0.5], cardByPassage, false).map(item => item.rank)
+    expect(ranks).toEqual([1, 1, 1, 2])
+  })
+
+  it('未覆盖段落与无效卡片分并列末位', () => {
+    const cardByPassage = new Map([[0, 0], [1, 1]])
+    const ranks = inheritCardRanks(passages.slice(0, 3), [0.4, 0], cardByPassage, true).map(item => item.rank)
+    expect(ranks).toEqual([1, 2, 2])
+  })
+
+  it('BM25 零分段落并列末位，不按 order 递增', () => {
+    const ranked = rankWithTiedZeros([{ id: 0, score: 0 }, { id: 1, score: 0 }, { id: 2, score: 3 }])
+    expect(ranked.map(item => [item.id, item.rank])).toEqual([[2, 1], [0, 2], [1, 2]])
+  })
+
+  it('卡片路不再给同卡片的后部段落降分', () => {
+    const fused = fusePassageCandidates({
+      passages: passages.slice(0, 4),
+      query: 'x',
+      bm25: () => [0, 1, 2, 3].map(id => ({ id, score: 0, rank: 1 })),
+      card: () => inheritCardRanks(passages.slice(0, 4), [0.9], new Map([[0, 0], [1, 0], [2, 0], [3, 0]]), false),
+      rrfK: 60,
+      sectionWeight: 0.5,
+      passagesCannotUseVectors: true,
+    })
+    expect(new Set(fused.map(item => item.score)).size).toBe(1)
   })
 })

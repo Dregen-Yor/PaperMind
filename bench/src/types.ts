@@ -232,6 +232,8 @@ export interface PaperTimingRecord {
   /** 1 = token 数为估算值（服务商 usage 未透传） */
   coldStartStructureTokensEstimated?: number
   coldStartEmbedCardsMs?: number
+  /** 1 = 本篇段落向量计算失败，检索降级为 bm25*（整轮据此判不可比） */
+  coldStartEmbedFailed?: number
   coldStartTotalMs?: number
   /** 卡片回落原因；未回落时不写 */
   coldStartStructureFallback?: string
