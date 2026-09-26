@@ -24,6 +24,7 @@
 | `src/utils/tocTree.ts` | `TocNode` 类型、逐层遍历、页 → `ContextGroup`。数据集无关，不 import pdfjs / 网络 / LLM |
 | `bench/src/datasets/qasper.ts` | **修改**：`sectionsToPages` 增加 `sectionPages` 返回值（纯观察，不改既有输出） |
 | `bench/src/toc/qasperTree.ts` | QASPER 节结构 → `TocNode[]` |
+| `bench/src/toc/qasperRows.ts` | 上游**只读**拉取 QASPER 原始行（含节结构）；`tocSmoke.ts` / `jevSmoke.ts` 共用，冻结数据集不含该字段 |
 | `bench/src/jev/protocol.ts` | 侧车 JSON-lines 协议 + 子进程客户端（仅 Node 内置模块） |
 | `bench/src/jev/sidecar.py` | 常驻 Python 进程，持有 `laya_mlx.Agent` |
 | `bench/src/jev/mlxJudge.ts` | `EvidenceJudge` 的 MLX 实现（协议客户端 + 批量切分） |
@@ -1739,9 +1740,20 @@ git commit -m "feat(jev): add the sidecar protocol with a testable fake child pr
 
 本任务不在单测路径上。它的验收是**手工跑通**，因为真实推理依赖 `models/laya/.venv`。
 
+> **本任务不负责 §4 的诊断字段，但必须让失败可分类。** 设计文档 §4 要求的 `judgeUnavailable:true` /
+> `judgeDegraded:'invalid-output'` 是**臂级回落**的产物，落在调用方（`toc-jev` 的 runner，属 Plan 2）——
+> 只有它知道「该篇回落到 `passage-hybrid`」这件事，`src/utils/tocTree.ts:163-164` 的注释也写明判定器输出非法
+> 由调用方处理、不在遍历里吞掉。所以本任务只需保证 `SidecarJudge` 的 reject 文案可区分两类：
+> **侧车不可用**（`sidecar spawn failed` / `sidecar exited` / `sidecar timeout`）与
+> **输出非法**（`not-an-array` / `length-mismatch` / `invalid-score` / `sidecar error`）。
+> ⚠️ **Plan 2 必须真的产出这两个字段**：截至 2026-09-26 全仓没有任何地方定义或写入它们，
+> §4 的「绝不静默」目前**没有落地**，别在 Plan 2 里再漏一次。
+
 **Files:**
 - Create: `bench/src/jev/sidecar.py`
 - Create: `bench/src/jev/mlxJudge.ts`
+- Create: `bench/src/toc/qasperRows.ts`（上游只读行拉取，与 `tocSmoke.ts` 共用）
+- Modify: `bench/scripts/tocSmoke.ts`（改用共用 helper，删掉本地的 `fetchRows` / `ROWS_URL` / `RawRow`）
 - Create: `bench/scripts/jevSmoke.ts`
 
 - [ ] **Step 1: 写侧车**
@@ -1889,7 +1901,57 @@ export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge {
 }
 ```
 
-- [ ] **Step 4: 端到端冒烟**
+- [ ] **Step 4a: 抽出共用的上游行拉取**
+
+> **为什么必须先做这一步。** 冻结的 `bench/datasets/qasper/qasper.jsonl` **不含节结构字段**：它的记录键只有
+> `pages / paperId / questions / referenceAbstract / source / title`（2026-09-26 实测首行），而
+> `loadQasperDataset` 只做 `JSON.parse` + 题目字段校验、**不重跑** `normalizeQasperEntry`——
+> `sectionNames` / `sectionPages` 虽然在 `EvalSample` 里声明为可选（`bench/src/types.ts:35-37`），
+> 但在这个产物上恒为 `undefined`。该文件同时是全部既有基线所依据的语料、且被 gitignore，**不能重跑 fetch.ts 覆写它**。
+>
+> 后果正是本步要防的：写成 `sample.sectionNames ?? []` 会静默建出一棵**空树**，而
+> `traverseWithJudge` 对空树在 `src/utils/tocTree.ts:162` 就 `return []`——**判定器一次都不会被调用**、
+> 侧车不会 spawn、权重不会被加载。脚本于是打印「顶层 0 个节点 / 0ms / 选中: []」并以 `exit 0` 通过，
+> 冒烟在什么都没验的情况下报绿。这与 Task 6 的 `tocSmoke.ts` 是同一个坑，那边已用「上游只读取行」解决。
+
+Create `bench/src/toc/qasperRows.ts`：
+
+```ts
+/**
+ * 从上游**只读**拉取 QASPER 原始行（含 `full_text` 节结构），供人工冒烟脚本使用。
+ *
+ * 刻意不读 `bench/datasets/qasper/qasper.jsonl`：那是已归一化的冻结产物、不含节结构字段
+ * （`loadQasperDataset` 只做 JSON.parse，不重跑 normalizeQasperEntry），且是既有基线的语料，
+ * 重跑 `fetch.ts` 会覆写它。人工冒烟需要节结构时只能走这里。
+ */
+export interface QasperRawRow {
+  id: string
+  full_text: { section_name: string[]; paragraphs: string[][] }
+}
+
+const ROWS_URL = 'https://datasets-server.huggingface.co/rows'
+const PAGE_SIZE = 100
+
+export async function fetchQasperRows(limit = 60): Promise<QasperRawRow[]> {
+  const rows: QasperRawRow[] = []
+  for (let offset = 0; offset < limit; offset += PAGE_SIZE) {
+    const url = `${ROWS_URL}?dataset=allenai%2Fqasper&config=qasper&split=validation`
+      + `&offset=${offset}&length=${Math.min(PAGE_SIZE, limit - offset)}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`QASPER 拉取失败 ${res.status}: ${(await res.text()).slice(0, 300)}`)
+    const data = await res.json() as { rows: Array<{ row: QasperRawRow }> }
+    rows.push(...data.rows.map(r => r.row))
+  }
+  return rows
+}
+```
+
+Then modify `bench/scripts/tocSmoke.ts` to use it: delete its local `ROWS_URL` / `PAGE_SIZE` / `RawRow` / `fetchRows`, import `fetchQasperRows` (and `type QasperRawRow` if still referenced), and replace the paging loop in `main()` with `const rows = await fetchQasperRows(LIMIT)`. **行为必须逐字不变**——这只是把那 15 行搬了个家，两个脚本从此共用同一份拉取口径（否则两处将来各自漂移，会静默产出不同的语料）。
+
+Run: `npx tsx bench/scripts/tocSmoke.ts`
+Expected: 与改前逐字相同的输出（`样本 60 篇…` / `最深 N 层…` / 前三篇结构）。
+
+- [ ] **Step 4b: 端到端冒烟**
 
 Create `bench/scripts/jevSmoke.ts`：
 
@@ -1897,33 +1959,49 @@ Create `bench/scripts/jevSmoke.ts`：
 /**
  * Jev 判定冒烟：用真实 QASPER 论文确认本地权重可用、概率有区分度。
  *
+ * **刻意不走 `loadQasperDataset` 取节结构**：冻结数据集不含节结构字段（见 `qasperRows.ts` 的说明），
+ * 拿到的会是 `undefined`，`?? []` 会静默建出空树，而空树在 `tocTree.ts:162` 就返回——
+ * 判定器一次都不会被调用，脚本却会以 `exit 0` 通过。所以节结构与 `tocSmoke.ts` 一样从上游只读取。
+ *
  * 全部逻辑包在 main() 里，只为失败时有一个明确的 exit 1——**不是**为了绕开转译限制：
  * 顶层 await 在 bench/ 下是可用的（bench/package.json 是 "type": "module"）。
  */
-import { loadQasperDataset } from '../src/datasets/qasper'
+import { fetchQasperRows } from '../src/toc/qasperRows'
+import { sectionsToPages } from '../src/datasets/qasper'
 import { createMlxJudge } from '../src/jev/mlxJudge'
 import { buildQasperTree } from '../src/toc/qasperTree'
 import { traverseWithJudge } from '../../src/utils/tocTree'
 
-async function main(): Promise<void> {
-  const samples = await loadQasperDataset()
-  const sample = samples[0]
-  const query = sample.questions[0]?.question ?? 'What is the main contribution?'
+/** 固定问题（不用数据集里的）：探针已确认 Transformer 论文的 Multi-Head Attention 节排第一，期望因此是确定的。 */
+const QUERY = 'How many attention heads does the Transformer use?'
 
-  const { tree } = buildQasperTree({
-    sectionNames: sample.sectionNames ?? [],
-    sectionPages: sample.sectionPages ?? [],
-  })
-  console.log(`论文: ${sample.title.slice(0, 60)}`)
-  console.log(`问题: ${query}`)
+async function main(): Promise<void> {
+  const [row] = await fetchQasperRows(1)
+  const { sectionPages } = sectionsToPages(row.full_text.section_name, row.full_text.paragraphs)
+  const { tree } = buildQasperTree({ sectionNames: row.full_text.section_name, sectionPages })
+
+  // 空树必须响亮失败：否则下面的 traverseWithJudge 会直接返回空选择，
+  // 冒烟会在「判定器根本没跑」的情况下报绿——这正是本脚本最该防的假成功。
+  if (tree.length === 0) throw new Error('建树结果为空：上游节结构字段可能变了，冒烟无法成立')
+
+  console.log(`论文: ${row.id}`)
+  console.log(`问题: ${QUERY}`)
   console.log(`树: 顶层 ${tree.length} 个节点`)
 
   const judge = createMlxJudge()
-  const started = Date.now()
-  const sel = await traverseWithJudge(tree, query, judge, { alpha: 0.5, topN: 2 })
-  console.log(`遍历耗时 ${Date.now() - started}ms`)
-  console.log('逐层诊断:', JSON.stringify(sel.layers, null, 2))
-  console.log('选中:', sel.selected.map(n => `${n.title} pages=[${n.pages.join(',')}]`))
+  try {
+    const started = Date.now()
+    // alpha=0.5 只是冒烟取值，不是实验选定格点；真的 α 网格见设计文档 §3.2。
+    const sel = await traverseWithJudge(tree, QUERY, judge, { alpha: 0.5, topN: 2 })
+    console.log(`遍历耗时 ${Date.now() - started}ms`)
+    // layers 为空 == 判定器一次都没被调用（traverseWithJudge 对空节点直接返回）。
+    // 这条断言是本脚本的承重墙：没有它，上面所有打印都可能在「没跑模型」时照常出现。
+    if (sel.layers.length === 0) throw new Error('遍历未调用判定器（layers 为空），冒烟不成立')
+    console.log('逐层诊断:', JSON.stringify(sel.layers, null, 2))
+    console.log('选中:', sel.selected.map(n => `${n.title} pages=[${n.pages.join(',')}]`))
+  } finally {
+    await judge.close()
+  }
 }
 
 main().catch(error => { console.error(error); process.exit(1) })
@@ -1931,7 +2009,7 @@ main().catch(error => { console.error(error); process.exit(1) })
 
 Run: `npx tsx bench/scripts/jevSmoke.ts`
 
-Expected: 打印树规模、遍历耗时（量级应为数百毫秒）、逐层诊断，且**选中的节点与问题相关**。若选中明显无关，先确认 Step 2 的区分度，再回来查 `toJudgeNode` 的 `path` 是否传对。
+Expected: 打印树规模、**非零**的 `layers` 逐层诊断、遍历耗时（量级应为数百毫秒；`layers` 为空即抛错，不会再出现「0ms 且报绿」），且**选中的节点与问题相关**（探针预期 `Multi-Head Attention` 入选）。若选中明显无关，先确认 Step 2 的区分度，再回来查判定节点里 `path` 是否带上了父路径。
 
 - [ ] **Step 5: 跑全量测试与类型检查**
 
@@ -1941,7 +2019,7 @@ Expected: 全绿。`sidecar.py`、`mlxJudge.ts` 都不在单测路径上——�
 - [ ] **Step 6: Commit**
 
 ```bash
-git add bench/src/jev/sidecar.py bench/src/jev/mlxJudge.ts bench/scripts/jevSmoke.ts
+git add bench/src/jev/sidecar.py bench/src/jev/mlxJudge.ts bench/src/toc/qasperRows.ts bench/scripts/tocSmoke.ts bench/scripts/jevSmoke.ts
 git commit -m "feat(jev): run the local decision model through a Python sidecar"
 ```
 
@@ -1957,4 +2035,4 @@ git commit -m "feat(jev): run the local decision model through a Python sidecar"
 - `npx tsx bench/scripts/jevSmoke.ts` 能对真实论文跑通并选出与问题相关的节
 - `sectionsToPages` 的 `pages` / `paragraphToPage` 逐字未变（Task 5 Step 4 的既有测试全绿）
 
-**未覆盖（属 Plan 2）：** 接入 bench runner 与配置、四条对照臂、α/N 网格扫描、按深度分组的对照报告；以及 spec §2.4 要求的 **`RetrievalResult` 字面组装**与 `ragPipeline.ts:245` 的第四路分派。本计划只交付它依赖的硬约束——`ContextGroup` 的逐页无损分区，那才是四个检索指标同源的前提。产品侧分派按 spec 的「非目标」本就不做，等实验结论为正再补。
+**未覆盖（属 Plan 2）：** 接入 bench runner 与配置、四条对照臂、α/N 网格扫描、按深度分组的对照报告；**spec §4 的两个诊断字段 `judgeUnavailable` / `judgeDegraded`**（截至 2026-09-26 全仓无人定义或写入，Task 8 只保证失败可分类，臂级回落与字段产出都在 Plan 2 的 runner）；以及 spec §2.4 要求的 **`RetrievalResult` 字面组装**与 `ragPipeline.ts:245` 的第四路分派。本计划只交付它依赖的硬约束——`ContextGroup` 的逐页无损分区，那才是四个检索指标同源的前提。产品侧分派按 spec 的「非目标」本就不做，等实验结论为正再补。
