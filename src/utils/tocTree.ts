@@ -34,7 +34,9 @@ export function tocNodePageSpan(node: TocNode, pages: string[]): ContextPiece[] 
     .sort((a, b) => a - b)
     .map((page, index) => {
       if (!Number.isInteger(page) || page < 0 || page >= pages.length) {
-        throw new Error('toc-page-out-of-range')
+        // 带上节点 id 与页号：这条错误会在批处理里滚过上百篇论文，
+        // 只有 `toc-page-out-of-range` 时无法定位是哪个节点、哪一页越了界。
+        throw new Error(`toc-page-out-of-range: ${node.id}#${page}`)
       }
       return { page, text: index === 0 ? pages[page] : `\n\n${pages[page]}` }
     })

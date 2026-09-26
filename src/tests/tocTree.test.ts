@@ -33,6 +33,25 @@ describe('tocNodePageSpan', () => {
     const n = node({ id: 'a', title: 'A', pages: [99] })
     expect(() => tocNodePageSpan(n, PAGES)).toThrow('toc-page-out-of-range')
   })
+
+  // 负页号与小数页号正是「下一页起始页 − 1」那套算术推导会产出的值——本设计已删掉推导，
+  // 但重建这套逻辑很容易顺手写回 `pages[-1]`。若守卫被简化成只剩上界判断，
+  // 这里会静默拿到 `pages[-1] === undefined` 在物化器的 `piece.text.trim()` 上才炸，
+  // 错误离现场极远；因此下界与整数性必须各自钉住。
+  it('负页号直接抛错', () => {
+    const n = node({ id: 'a', title: 'A', pages: [-1] })
+    expect(() => tocNodePageSpan(n, PAGES)).toThrow('toc-page-out-of-range')
+  })
+
+  it('非整数页号直接抛错', () => {
+    const n = node({ id: 'a', title: 'A', pages: [1.5] })
+    expect(() => tocNodePageSpan(n, PAGES)).toThrow('toc-page-out-of-range')
+  })
+
+  it('末页是合法上界，恰好等于 pages.length - 1 不抛错', () => {
+    const n = node({ id: 'a', title: 'A', pages: [7] })
+    expect(tocNodePageSpan(n, PAGES)).toEqual([{ page: 7, text: 'p7' }])
+  })
 })
 
 describe('tocSelectionToContextGroups', () => {
@@ -46,13 +65,15 @@ describe('tocSelectionToContextGroups', () => {
     expect(groups[1].pieces.map(p => p.page)).toEqual([4, 5])
   })
 
+  // 无内容节点刻意放在**末尾**：若放在首位，「整体丢掉第一个元素」这种 bug 会产出同样的单组结果，
+  // 测试无法区分它到底验证了什么。放末尾才能真正钉住「空节点被跳过」这一行为。
   it('pages 为空的节点被跳过，不产生空组', () => {
     const groups = tocSelectionToContextGroups([
-      node({ id: 'a', title: 'A' }),
-      node({ id: 'b', title: 'B', pages: [2] }),
+      node({ id: 'a', title: 'A', pages: [1] }),
+      node({ id: 'b', title: 'B' }),
     ], PAGES)
     expect(groups).toHaveLength(1)
-    expect(groups[0].pieces.map(p => p.page)).toEqual([2])
+    expect(groups[0].pieces.map(p => p.page)).toEqual([1])
   })
 
   it('兄弟节点共用伪页时两组都产出该页——重叠由物化器按首次出现去重', () => {
