@@ -363,7 +363,7 @@ git commit -m "feat(jev): add TocNode and page-to-context conversion"
 - Modify: `src/utils/tocTree.ts`
 - Test: `src/tests/tocTree.test.ts`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 追加到 `src/tests/tocTree.test.ts`：
 
@@ -381,6 +381,23 @@ const FLAT = (): TocNode[] => [
   node({ id: 'a', title: 'A', pages: [0] }),
   node({ id: 'b', title: 'B', pages: [1] }),
   node({ id: 'c', title: 'C', pages: [2] }),
+]
+
+/** 两层树 A[A1, A2] / B[B1]；父节点各自也带一页，确保它们本有资格进 selected */
+const NESTED = (): TocNode[] => [
+  node({
+    id: 'a', title: 'A', pages: [0],
+    children: [
+      node({ id: 'a1', title: 'A1', path: ['A'], depth: 1, pages: [1] }),
+      node({ id: 'a2', title: 'A2', path: ['A'], depth: 1, pages: [2] }),
+    ],
+  }),
+  node({
+    id: 'b', title: 'B', pages: [3],
+    children: [
+      node({ id: 'b1', title: 'B1', path: ['B'], depth: 1, pages: [4] }),
+    ],
+  }),
 ]
 
 describe('traverseWithJudge —— 相对阈值', () => {
@@ -405,7 +422,10 @@ describe('traverseWithJudge —— 相对阈值', () => {
     // 设计里已删掉；本用例把该推论钉死，防止有人日后"补"一个不可能的兜底。
     for (const alpha of [0, 0.25, 0.5, 0.75, 1]) {
       const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha, topN: 10 })
-      expect(sel.selected.map(n => n.title)).toContain('A')
+      // 钉的是**打分阶段**：θ ≤ max ⇒ argmax 必过阈值。刻意不看 selected——
+      // Task 4 起空 pages 节点会被移出 selected，那时这条断言会因与本事无关的理由失败。
+      expect(sel.layers[0].threshold).toBeLessThanOrEqual(sel.layers[0].maxScore)
+      expect(sel.layers[0].survivors).toBeGreaterThanOrEqual(1)
     }
   })
 
@@ -419,12 +439,39 @@ describe('traverseWithJudge —— 相对阈值', () => {
     expect(sel.selected.map(n => n.title)).toEqual(['A', 'B'])
   })
 
-  it('layers 记录每一层的候选数、最高分、阈值与下探数', async () => {
+  it('layers 记录每一层的候选数、最高分、阈值与留存数', async () => {
     const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha: 0.5, topN: 10 })
     expect(sel.layers).toHaveLength(1)
     expect(sel.layers[0]).toMatchObject({
-      depth: 0, candidates: 3, maxScore: 0.9, threshold: 0.45, survivors: 1, descended: 1,
+      depth: 0, candidates: 3, maxScore: 0.9, threshold: 0.45, survivors: 1, kept: 1,
     })
+  })
+
+  it('有子节点的存活者继续下探：父节点不进 selected，子节点进，layers 按先序记录两层', async () => {
+    const sel = await traverseWithJudge(
+      NESTED(), 'q', fixedJudge({ A: 0.9, B: 0.4, A1: 0.5, A2: 0.2, B1: 0.3 }), { alpha: 0, topN: 9 },
+    )
+    // 父节点有子层，改收集子层结果，父节点自身**不**进 selected
+    expect(sel.selected.map(n => n.title)).toEqual(['A1', 'A2', 'B1'])
+    expect(sel.selected.map(n => n.title)).not.toContain('A')
+    expect(sel.selected.map(n => n.title)).not.toContain('B')
+    // 一次判定一条、DFS 先序：根层 depth 0 之后跟着 A 子层与 B 子层两条 depth 1
+    expect(sel.layers.map(l => l.depth)).toEqual([0, 1, 1])
+    expect(sel.layers[0]).toMatchObject({ depth: 0, candidates: 2, survivors: 2, kept: 2 })
+    expect(sel.layers[1]).toMatchObject({ depth: 1, candidates: 2, survivors: 2, kept: 2 })
+    expect(sel.layers[2]).toMatchObject({ depth: 1, candidates: 1, survivors: 1, kept: 1 })
+  })
+
+  it('空树不调判定器、不产诊断，两个计数器保持默认', async () => {
+    let called = 0
+    const judge: EvidenceJudge = { async judge() { called += 1; return [] } }
+    const sel = await traverseWithJudge([], 'q', judge, { alpha: 0.5, topN: 10 })
+    expect(sel.selected).toEqual([])
+    expect(sel.layers).toEqual([])
+    expect(sel.emptyContentSkipped).toBe(0)
+    expect(sel.emptySelectionFallback).toBe(false)
+    // nodes.length === 0 的守卫在**调用判定器之前**返回，因此判定器一次都没被叫到
+    expect(called).toBe(0)
   })
 
   it('判定器返回垃圾时向上抛，不吞掉', async () => {
@@ -434,12 +481,12 @@ describe('traverseWithJudge —— 相对阈值', () => {
 })
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `npx vitest run src/tests/tocTree.test.ts -t 相对阈值`
 Expected: FAIL，`traverseWithJudge is not a function`。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 在 `src/utils/tocTree.ts` 补：
 
@@ -459,13 +506,20 @@ export interface LayerDiagnostic {
   candidates: number
   maxScore: number
   threshold: number
+  /** 通过层内阈值的节点数（top-N 截断**之前**） */
   survivors: number
-  descended: number
+  /** 阈值存活后再截 top-N 留下的节点数；**含叶子**，不表示「下探过」 */
+  kept: number
 }
 
 export interface TocSelection {
-  /** 收为证据的节点，按首个个页号升序 */
+  /** 收为证据的节点，按首个页号升序 */
   selected: TocNode[]
+  /**
+   * 每个判定调用一条，按 DFS 先序排列——**不是**按深度索引。同一 `depth`
+   * 可能出现多条（多个存活分支各自下探一层，且彼此不相邻），拿下标当层号会错；
+   * 调用方要按 `depth` 自行聚合。
+   */
   layers: LayerDiagnostic[]
   /** 因 pages 为空被排除出 selected 的节点数 */
   emptyContentSkipped: number
@@ -473,25 +527,44 @@ export interface TocSelection {
   emptySelectionFallback: boolean
 }
 
+/** 一次层内筛选的结果：留下的节点，以及阈值存活数（切片前）。 */
+interface SurvivorResult {
+  nodes: TocNode[]
+  survivingCount: number
+}
+
 const toJudgeNode = (n: TocNode): JudgeNode => ({ id: n.id, title: n.title, path: n.path })
 
-/** 稳定排序取前 topN：同分保持原有文档顺序。 */
-function topNSurvivors(nodes: TocNode[], scores: number[], threshold: number, topN: number): TocNode[] {
+/**
+ * 稳定排序取前 topN：同分保持原有文档顺序。
+ *
+ * 一并返回 `survivingCount`（过滤后、切片前的长度）：诊断里的 `survivors` 与
+ * 这里留下的节点出自**同一次** `>= threshold` 判定。若让调用方另写一遍这个比较，
+ * 日后比较式改了、或这里加了分数下限/去重，诊断就会悄悄报出一个不再描述该阶段的数字。
+ */
+function topNSurvivors(nodes: TocNode[], scores: number[], threshold: number, topN: number): SurvivorResult {
   const surviving = nodes
     .map((node, i) => ({ node, score: scores[i], order: i }))
     .filter(s => s.score >= threshold)
-  if (surviving.length <= topN) return surviving.map(s => s.node)
-  return surviving
-    .sort((a, b) => (b.score - a.score) || (a.order - b.order))
-    .slice(0, topN)
-    .map(s => s.node)
+  const survivingCount = surviving.length
+  if (survivingCount <= topN) return { nodes: surviving.map(s => s.node), survivingCount }
+  return {
+    nodes: surviving
+      .sort((a, b) => (b.score - a.score) || (a.order - b.order))
+      .slice(0, topN)
+      .map(s => s.node),
+    survivingCount,
+  }
 }
 
 /**
  * 按文档顺序（先序）找第一个 `pages` 非空的节点。
  * 只要树里还有一个带内容的节点就必有结果——供空选择时兜底。
+ *
+ * 本模块内部使用（Task 4 的空选择回落），刻意不导出：调用方一律经
+ * `traverseWithJudge` 走完整条链路，不需要单独拿到这个查找。
  */
-export function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
+function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
   for (const node of nodes) {
     if (node.pages.length > 0) return node
     const found = firstNodeWithContent(node.children)
@@ -507,7 +580,9 @@ export function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
  * 概率整体压在 0.03–0.39，任何固定绝对阈值都会把整层滤光。相对阈值同时对
  * 未校准的概率免疫——这正好对症该 checkpoint 的温度被 clamp 那条警告。
  *
- * 本步只实现阈值与 top-N；父节点规则、空内容节点与空选择兜底由 Task 4 补上。
+ * 本步只实现阈值与 top-N。父节点的「空子层回落」表达式已经写好，但对
+ * α∈[0,1]、topN≥1 目前**不可达**——argmax 恒通过阈值，故非空子层至少产出一个
+ * 节点；要等 Task 4 补上空内容过滤，子层才可能被整体剔除而激活它。空选择兜底同样留给 Task 4。
  */
 export async function traverseWithJudge(
   tree: TocNode[],
@@ -524,14 +599,14 @@ export async function traverseWithJudge(
     const scores = assertJudgeOutput(await judge.judge({ query, nodes: nodes.map(toJudgeNode) }), nodes.length)
     const maxScore = Math.max(...scores)
     const threshold = opts.alpha * maxScore
-    const survivors = topNSurvivors(nodes, scores, threshold, opts.topN)
+    const { nodes: survivors, survivingCount } = topNSurvivors(nodes, scores, threshold, opts.topN)
     layers.push({
       depth,
       candidates: nodes.length,
       maxScore,
       threshold,
-      survivors: scores.filter(s => s >= threshold).length,
-      descended: survivors.length,
+      survivors: survivingCount,
+      kept: survivors.length,
     })
 
     const collected: TocNode[] = []
@@ -541,6 +616,9 @@ export async function traverseWithJudge(
         continue
       }
       const fromChildren = await descend(node.children, depth + 1)
+      // 这一支目前不可达：argmax 恒通过阈值，非空子层至少产出一个节点，故
+      // fromChildren 永不为空。Task 4 加空内容过滤后，子层可能被整体剔除，
+      // 那时才需要「子层空则收父节点」。谁把它"简化"成 fromChildren 会弄坏 Task 4。
       collected.push(...(fromChildren.length > 0 ? fromChildren : [node]))
     }
     return collected
@@ -551,17 +629,19 @@ export async function traverseWithJudge(
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run src/tests/tocTree.test.ts`
-Expected: PASS，15 个用例全绿。
+Expected: PASS，20 个用例全绿（Task 2 的 10 + 本任务新增 10）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/utils/tocTree.ts src/tests/tocTree.test.ts
 git commit -m "feat(jev): traverse the tree with a layer-relative threshold"
 ```
+
+> **复盘（两阶段评审后）**：本任务实际落了两个提交——`f0aefe9` 是上面的实现，`8f3c082` 是评审后的加固：把 `LayerDiagnostic.descended` 改名 `kept`（它含叶子，不表示「下探过」）、让 `topNSurvivors` 返回 `survivingCount` 使诊断与筛选共用同一次 `>= threshold` 判定、把 `firstNodeWithContent` 收回模块内、补上递归路径的用例（原先 `FLAT` 全是叶节点，`depth + 1` 与 `collected.push(...fromChildren)` 在测试里是死的，改坏了也不会红）、补空树用例、并把 alpha 循环的断言从 `selected` 挪到打分阶段，免得 Task 4 的空内容过滤让它因无关理由失败。
 
 ---
 
@@ -576,16 +656,8 @@ git commit -m "feat(jev): traverse the tree with a layer-relative threshold"
 追加到 `src/tests/tocTree.test.ts`：
 
 ```ts
-/** A 有子节点 A1/A2；B 有子节点 B1；D 是合成的导航节点（pages 为空） */
-const NESTED = (): TocNode[] => [
-  node({ id: 'a', title: 'A', pages: [0, 1], children: [
-    node({ id: 'a1', title: 'A1', path: ['A'], depth: 1, pages: [1] }),
-    node({ id: 'a2', title: 'A2', path: ['A'], depth: 1, pages: [2] }),
-  ] }),
-  node({ id: 'b', title: 'B', pages: [3], children: [
-    node({ id: 'b1', title: 'B1', path: ['B'], depth: 1, pages: [3] }),
-  ] }),
-]
+// 复用 Task 3 已在模块顶层定义的 NESTED（A[A1, A2] / B[B1]，父节点各带一页）。
+// 这里**不要**再定义一次：同名 const 重复声明会让整个测试文件编译失败。
 
 describe('traverseWithJudge —— 父节点规则', () => {
   it('下探的父节点本身不作为证据', async () => {
@@ -642,7 +714,7 @@ describe('traverseWithJudge —— 父节点规则', () => {
 
   it('父节点下探时 layers 记录两层', async () => {
     const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.4, A2: 0.1, B: 0.2 }), { alpha: 0.5, topN: 5 })
-    expect(sel.layers[0]).toMatchObject({ depth: 0, candidates: 2, maxScore: 0.9, threshold: 0.45, descended: 1 })
+    expect(sel.layers[0]).toMatchObject({ depth: 0, candidates: 2, maxScore: 0.9, threshold: 0.45, kept: 1 })
     expect(sel.layers[1].depth).toBe(1)
   })
 })
@@ -662,11 +734,13 @@ AssertionError: expected [ 'A1' ] to deeply equal [ 'A' ]
 
 「selected 按首个页号升序」那条会以更隐晦的方式失败：空 `pages` 让 `a.pages[0] - b.pages[0]` 得到 `NaN`，排序结果不稳定——**这正是必须先写测试的原因**，这类错误不会报错，只会悄悄产出乱序上下文。
 
-通过的是「下探的父节点本身不作为证据」（Task 3 已经会下探）、「有非空节点存活时不触发兜底」（`emptySelectionFallback` 恒为 `false`）、「父节点下探时 layers 记录两层」（与空内容无关）。若这三条里任何一条失败，说明 `NESTED` fixture 的构造与预期不符，先修 fixture 再继续。
+通过的是「下探的父节点本身不作为证据」（Task 3 已经会下探）、「有非空节点存活时不触发兜底」（`emptySelectionFallback` 恒为 `false`）、「父节点下探时 layers 记录两层」（与空内容无关）。若这三条里任何一条失败，说明 Task 3 定义的那个 `NESTED` fixture 与预期不符，先回去修它再继续。
 
 - [ ] **Step 3: 写实现**
 
-替换 `traverseWithJudge` 中的 `descend` 循环体与返回值：
+替换 `traverseWithJudge` 中的 `descend` 循环体与返回值。
+
+Task 3 在 `collected.push(...(fromChildren.length > 0 ? fromChildren : [node]))` 上方留了「这一支目前不可达」的三行注释——本步加了空内容过滤后该分支**变为可达**，那三行注释连同三元表达式一起删掉，换成下面的 `if / else if / else`。
 
 ```ts
   const layers: LayerDiagnostic[] = []
@@ -677,14 +751,14 @@ AssertionError: expected [ 'A1' ] to deeply equal [ 'A' ]
     const scores = assertJudgeOutput(await judge.judge({ query, nodes: nodes.map(toJudgeNode) }), nodes.length)
     const maxScore = Math.max(...scores)
     const threshold = opts.alpha * maxScore
-    const survivors = topNSurvivors(nodes, scores, threshold, opts.topN)
+    const { nodes: survivors, survivingCount } = topNSurvivors(nodes, scores, threshold, opts.topN)
     layers.push({
       depth,
       candidates: nodes.length,
       maxScore,
       threshold,
-      survivors: scores.filter(s => s >= threshold).length,
-      descended: survivors.length,
+      survivors: survivingCount,
+      kept: survivors.length,
     })
 
     const collected: TocNode[] = []
@@ -716,7 +790,7 @@ AssertionError: expected [ 'A1' ] to deeply equal [ 'A' ]
   return { selected, layers, emptyContentSkipped, emptySelectionFallback }
 ```
 
-并在 `traverseWithJudge` 的文档注释末尾补：
+并把 `traverseWithJudge` 文档注释末段的「这一支目前不可达」那段整体改写为：
 
 ```ts
  * 空内容过滤必须发生在**递归内部**，不能放到最后统一过滤：放到最后的话，
@@ -727,7 +801,7 @@ AssertionError: expected [ 'A1' ] to deeply equal [ 'A' ]
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run src/tests/tocTree.test.ts`
-Expected: PASS，22 个用例全绿。
+Expected: PASS，27 个用例全绿（20 + 本任务新增 7）。
 
 - [ ] **Step 5: 检查覆盖**
 
