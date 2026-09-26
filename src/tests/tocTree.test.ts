@@ -195,3 +195,63 @@ describe('traverseWithJudge —— 相对阈值', () => {
     await expect(traverseWithJudge(FLAT(), 'q', bad, { alpha: 0.5, topN: 10 })).rejects.toThrow('invalid-score')
   })
 })
+
+describe('traverseWithJudge —— 父节点规则', () => {
+  it('下探的父节点本身不作为证据', async () => {
+    const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.8, A2: 0.1, B: 0.2 }), { alpha: 0.5, topN: 5 })
+    const titles = sel.selected.map(n => n.title)
+    expect(titles).toContain('A1')
+    expect(titles).not.toContain('A')   // A 下探了，不该作为证据
+  })
+
+  it('下探颗粒无收时父节点兜底成为证据', async () => {
+    // A 的子节点都是导航节点（pages 为空），下探拿不到任何内容 → 用 A 的正文兜底
+    const tree: TocNode[] = [
+      node({ id: 'a', title: 'A', pages: [7], children: [
+        node({ id: 'a1', title: 'A1', path: ['A'], depth: 1, pages: [] }),
+      ] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0.9, A1: 0.8 }), { alpha: 0, topN: 5 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A'])
+    expect(sel.emptyContentSkipped).toBe(1)
+  })
+
+  it('无内容的叶节点绝不被收为证据', async () => {
+    const tree: TocNode[] = [
+      node({ id: 'a', title: 'A', pages: [0] }),
+      node({ id: 'd', title: 'D', pages: [] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0, D: 0.9 }), { alpha: 0, topN: 5 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A'])
+    expect(sel.emptyContentSkipped).toBe(1)
+  })
+
+  it('存活节点全无内容时，回落到文档首个非空节点并置位', async () => {
+    const tree: TocNode[] = [
+      node({ id: 'd', title: 'D', pages: [] }),
+      node({ id: 'e', title: 'E', pages: [] }),
+      node({ id: 'a', title: 'A', pages: [2] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ D: 0.9, E: 0.8, A: 0.1 }), { alpha: 1, topN: 5 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A'])
+    expect(sel.emptySelectionFallback).toBe(true)
+    expect(sel.emptyContentSkipped).toBe(1)   // 只有 D 存活且无内容
+  })
+
+  it('有非空节点存活时不触发兜底', async () => {
+    const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.8, A2: 0.1, B: 0.2 }), { alpha: 0.5, topN: 5 })
+    expect(sel.emptySelectionFallback).toBe(false)
+  })
+
+  it('selected 按首个页号升序，与文档顺序一致', async () => {
+    const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.9, A2: 0.9, B: 0.9, B1: 0.9 }), { alpha: 0, topN: 9 })
+    const pages = sel.selected.map(n => n.pages[0])
+    expect(pages).toEqual([...pages].sort((a, b) => a - b))
+  })
+
+  it('父节点下探时 layers 记录两层', async () => {
+    const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.4, A2: 0.1, B: 0.2 }), { alpha: 0.5, topN: 5 })
+    expect(sel.layers[0]).toMatchObject({ depth: 0, candidates: 2, maxScore: 0.9, threshold: 0.45, kept: 1 })
+    expect(sel.layers[1].depth).toBe(1)
+  })
+})

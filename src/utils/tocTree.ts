@@ -141,9 +141,9 @@ function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
  * 概率整体压在 0.03–0.39，任何固定绝对阈值都会把整层滤光。相对阈值同时对
  * 未校准的概率免疫——这正好对症该 checkpoint 的温度被 clamp 那条警告。
  *
- * 本步只实现阈值与 top-N。父节点的「空子层回落」表达式已经写好，但对
- * α∈[0,1]、topN≥1 目前**不可达**——argmax 恒通过阈值，故非空子层至少产出一个
- * 节点；要等 Task 4 补上空内容过滤，子层才可能被整体剔除而激活它。空选择兜底同样留给 Task 4。
+ * 空内容过滤必须发生在**递归内部**，不能放到最后统一过滤：放到最后的话，
+ * 下探会「看起来有收获」（返回一批马上要被丢掉的空节点）而父节点兜底永不触发，
+ * 最终静默产出空上下文。
  */
 export async function traverseWithJudge(
   tree: TocNode[],
@@ -152,6 +152,7 @@ export async function traverseWithJudge(
   opts: TraverseOptions,
 ): Promise<TocSelection> {
   const layers: LayerDiagnostic[] = []
+  let emptyContentSkipped = 0
 
   const descend = async (nodes: TocNode[], depth: number): Promise<TocNode[]> => {
     if (nodes.length === 0) return []
@@ -173,18 +174,28 @@ export async function traverseWithJudge(
     const collected: TocNode[] = []
     for (const node of survivors) {
       if (node.children.length === 0) {
-        collected.push(node)
+        // `pages` 为空的节点不携带任何内容，收进来只会产出一个被物化器丢掉的空组
+        if (node.pages.length === 0) emptyContentSkipped += 1
+        else collected.push(node)
         continue
       }
       const fromChildren = await descend(node.children, depth + 1)
-      // 这一支目前不可达：argmax 恒通过阈值，非空子层至少产出一个节点，故
-      // fromChildren 永不为空。Task 4 加空内容过滤后，子层可能被整体剔除，
-      // 那时才需要「子层空则收父节点」。谁把它"简化"成 fromChildren 会弄坏 Task 4。
-      collected.push(...(fromChildren.length > 0 ? fromChildren : [node]))
+      if (fromChildren.length > 0) collected.push(...fromChildren)
+      else if (node.pages.length === 0) emptyContentSkipped += 1
+      else collected.push(node)   // 兜底：下探颗粒无收时用父节点正文
     }
     return collected
   }
 
-  const selected = (await descend(tree, 0)).sort((a, b) => a.pages[0] - b.pages[0])
-  return { selected, layers, emptyContentSkipped: 0, emptySelectionFallback: false }
+  let selected = (await descend(tree, 0)).sort((a, b) => a.pages[0] - b.pages[0])
+  let emptySelectionFallback = false
+  if (selected.length === 0) {
+    const first = firstNodeWithContent(tree)
+    if (first) {
+      selected = [first]
+      emptySelectionFallback = true
+    }
+  }
+
+  return { selected, layers, emptyContentSkipped, emptySelectionFallback }
 }
