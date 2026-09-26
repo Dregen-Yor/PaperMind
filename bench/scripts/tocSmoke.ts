@@ -2,7 +2,7 @@
  * 用真实 QASPER **原始**数据建树并打印结构，人工核对。不属于单测。
  *
  * **刻意不读 bench/datasets/qasper/qasper.jsonl**：那是已归一化的旧产物、不含节结构
- * 字段（loadQasperDataset 只做 JSON 解析，不重跑 normalizeQasperEntry），且被
+ * 字段（loadQasperDataset 只做 JSON 解析与题目字段校验，不重跑 normalizeQasperEntry），且被
  * .gitignore 忽略、无从恢复；重跑 fetch.ts 会覆写它，那是全部既有基线结果所依据的语料。
  *
  * 因此这里只从上游**只读**取 full_text，不写任何文件。建树只需要 section_name 与
@@ -37,6 +37,7 @@ function print(nodes: TocNode[], indent: string): void {
   }
 }
 
+/** 返回最大 `TocNode.depth`，即**0-based 深度索引**；层数 = 返回值 + 1。把两者混用会把三层树报成两层。 */
 const depthOf = (node: TocNode): number =>
   node.children.length === 0 ? node.depth : Math.max(...node.children.map(depthOf))
 
@@ -55,7 +56,7 @@ async function main(): Promise<void> {
   }
 
   let withSections = 0
-  let maxDepth = 0
+  let maxLevels = 0
   let synthesized = 0
   let dropped = 0
   const invalid: string[] = []
@@ -71,7 +72,7 @@ async function main(): Promise<void> {
       const result = buildQasperTree({ sectionNames: names, sectionPages })
       synthesized += result.synthesizedParents
       dropped += result.droppedSections
-      for (const node of result.tree) maxDepth = Math.max(maxDepth, depthOf(node))
+      for (const node of result.tree) maxLevels = Math.max(maxLevels, depthOf(node) + 1)
       built.push({
         id: row.id, sectionCount: names.length, tree: result.tree,
         synthesizedParents: result.synthesizedParents, droppedSections: result.droppedSections,
@@ -81,7 +82,7 @@ async function main(): Promise<void> {
     }
   }
   console.log(`样本 ${rows.length} 篇，带节结构 ${withSections}/${rows.length}`)
-  console.log(`最深 ${maxDepth} 层，合成父节点 ${synthesized}，丢弃节 ${dropped}`)
+  console.log(`最深 ${maxLevels} 层，合成父节点 ${synthesized}，丢弃节 ${dropped}`)
   console.log(`节结构非法 ${invalid.length} 篇（这些篇整篇回落平面检索）`)
   for (const line of invalid.slice(0, 10)) console.log(`  ${line}`)
 

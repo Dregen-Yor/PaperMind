@@ -134,10 +134,12 @@ describe('buildQasperTree', () => {
     expect(setup.children[0].depth).toBe(2)
   })
 
-  it('节点 id 稳定：同一输入产出同一批 id', () => {
+  it('节点 id 按先序自 S000 编号，且每次调用都从头计数', () => {
     const names = ['A', 'A ::: B']
     const ids = () => build(names, [[0], [1]]).tree.flatMap(n => [n.id, ...n.children.map(c => c.id)])
-    expect(ids()).toEqual(ids())
+    expect(ids()).toEqual(['S000', 'S001'])
+    // 计数器必须是本次调用的局部量：若是模块级状态，第二次调用会接着数到 S002
+    expect(ids()).toEqual(['S000', 'S001'])
   })
 
   it('空输入返回空树', () => {
@@ -162,6 +164,12 @@ describe('validateSections', () => {
     const deep = Array.from({ length: MAX_TOC_DEPTH + 1 }, (_, i) => `L${i}`).join(' ::: ')
     expect(validateSections({ sectionNames: [deep], sectionPages: [[0]] }))
       .toEqual({ ok: false, reason: 'too-deep' })
+  })
+
+  it('恰好 MAX_TOC_DEPTH 层是合法的（上限取 > 而非 >=）', () => {
+    // 各层名必须互不相同：重复层名会被 cyclic-path 拦下，那样测的就是另一条规则了
+    const deepest = Array.from({ length: MAX_TOC_DEPTH }, (_, i) => `L${i}`).join(' ::: ')
+    expect(validateSections({ sectionNames: [deepest], sectionPages: [[0]] })).toEqual({ ok: true })
   })
 
   it('拒绝同一路径内重复的层名（自嵌套）', () => {

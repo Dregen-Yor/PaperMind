@@ -25,7 +25,11 @@ export type SectionValidation =
 
 export interface QasperTreeResult {
   tree: TocNode[]
-  /** 只作导航、自身无内容的父节点数 */
+  /**
+   * 有子节点、但自身 `pages` 为空的节点数。**不只是**「父节缺独立条目」合成出来的那些：
+   * 只带标题、没有段落的父节（`sectionPages` 记为空数组）同样计入——两者在树里的形态
+   * 都是「只导航、不携带内容」，下游只关心这个。字段名沿用方案，取窄了。
+   */
   synthesizedParents: number
   /** 因标题为空被丢弃的节数 */
   droppedSections: number
@@ -48,8 +52,10 @@ function pathOf(sectionName: string): string[] {
  * 取自 `piece.page`）仍然诚实，所以这不会表现为数字异常，只会表现为**召回
  * 静默损失**。这类「指标正常、内容悄悄少一段」正是本设计要避免的失效形态。
  *
- * 这是本模块**唯一**可能造出空隙的地方：打包循环只顺序追加，单节区间恒连续
- * （每次 append 至多封一页，页号每次至多 +1）。
+ * 这是本模块**唯一**可能造出空隙的地方。页号由 `datasets/qasper.ts:101-125` 的打包循环
+ * 产生：它只顺序追加，单节内两次记页之间至多一次 `append`，故页号至多 +1，单节区间恒连续。
+ * 注意这条跨文件不变量只是**说明性**的——下面的检查把同一路径的**所有**区间并起来再验
+ * 连续性，单节内部真出现空隙也拦得住，安全性并不依赖「单节恒连续」这个前提成立。
  */
 function mergedRunsAreContiguous(input: QasperSectionInput): boolean {
   const byPath = new Map<string, number[]>()
