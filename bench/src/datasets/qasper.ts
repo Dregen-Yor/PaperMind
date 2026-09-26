@@ -67,9 +67,16 @@ export function paragraphsToPages(paragraphs: string[]): {
 export function sectionsToPages(sectionNames: string[], sections: string[][]): {
   pages: string[]
   paragraphToPage: number[]
+  /**
+   * 每节内容实际落到的伪页号，升序。与 sectionNames 同序同长；空数组表示该节无内容。
+   * 由下面这段打包循环**顺手记录**，不另起一套实现——两套实现会在封页边界上错开一页，
+   * 而指标照常输出数字，是静默失真。
+   */
+  sectionPages: number[][]
 } {
   const pages: string[] = []
   const paragraphToPage: number[] = []
+  const sectionPages: number[][] = []
   let buffer: string[] = []
   let bufferLen = 0
   const append = (text: string) => {
@@ -81,25 +88,39 @@ export function sectionsToPages(sectionNames: string[], sections: string[][]): {
     buffer.push(text)
     bufferLen += text.length
   }
+  // 必须在每次 append **之后**调用：append 可能先封页，此时 pages.length 才是
+  // 这份内容真正落到的页号。封页前后的 pages.length 不同，顺序错了就整体偏一页。
+  const note = (touched: number[]) => {
+    const page = pages.length
+    if (touched[touched.length - 1] !== page) touched.push(page)
+  }
   for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
     const heading = sectionNames[sectionIndex]?.trim()
     const paragraphs = sections[sectionIndex]
     const firstParagraph = paragraphs[0]
+    const touched: number[] = []
     // Keep a heading and its first paragraph on the same pseudo page. Otherwise a
     // nearly full preceding page can strand the heading from the content it labels.
     if (heading && firstParagraph !== undefined) {
       append(`${heading}\n\n${firstParagraph}`)
+      note(touched)
       paragraphToPage.push(pages.length)
     } else if (heading) {
+      // 只带标题、没有段落的节是**导航节点**：标题照样进页面正文，但本节不记为
+      // 「携带内容」——sectionPages 留空数组，后面的建树任务据此把它建成 pages: [] 的节点。
+      // 这里刻意**不**调 note()：note 会把该页记成本节的内容页，空节就变成有内容的
+      // 节点，于是只有标题的节会把整页当成自己的证据。
       append(heading)
     }
     for (const paragraph of paragraphs.slice(firstParagraph === undefined ? 0 : 1)) {
       append(paragraph)
+      note(touched)
       paragraphToPage.push(pages.length)
     }
+    sectionPages.push(touched)
   }
   if (buffer.length > 0) pages.push(buffer.join('\n\n'))
-  return { pages, paragraphToPage }
+  return { pages, paragraphToPage, sectionPages }
 }
 
 export function normalizeQasperEntry(paperId: string, entry: QasperEntry): EvalSample {
