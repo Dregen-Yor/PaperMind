@@ -11,24 +11,10 @@
  */
 import { sectionsToPages } from '../src/datasets/qasper'
 import { buildQasperTree } from '../src/toc/qasperTree'
+import { fetchQasperRows } from '../src/toc/qasperRows'
 import type { TocNode } from '../../src/utils/tocTree'
 
-const ROWS_URL = 'https://datasets-server.huggingface.co/rows'
 const LIMIT = Number(process.env.QASPER_LIMIT ?? '60')
-
-interface RawRow {
-  id: string
-  full_text: { section_name: string[]; paragraphs: string[][] }
-}
-
-async function fetchRows(offset: number, length: number): Promise<RawRow[]> {
-  const url = `${ROWS_URL}?dataset=allenai%2Fqasper&config=qasper&split=validation`
-    + `&offset=${offset}&length=${length}`
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`QASPER 拉取失败 ${res.status}: ${(await res.text()).slice(0, 300)}`)
-  const data = await res.json() as { rows: Array<{ row: RawRow }> }
-  return data.rows.map(r => r.row)
-}
 
 function print(nodes: TocNode[], indent: string): void {
   for (const node of nodes) {
@@ -50,10 +36,7 @@ interface Built {
 }
 
 async function main(): Promise<void> {
-  const rows: RawRow[] = []
-  for (let offset = 0; offset < LIMIT; offset += 100) {
-    rows.push(...await fetchRows(offset, Math.min(100, LIMIT - offset)))
-  }
+  const rows = await fetchQasperRows(LIMIT)
 
   let withSections = 0
   let maxLevels = 0
