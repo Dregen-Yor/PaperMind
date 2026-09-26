@@ -69,3 +69,124 @@ describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
     expect(sectionPages).toEqual([[0, 1]])
   })
 })
+
+import { buildQasperTree, validateSections, MAX_TOC_DEPTH } from '../toc/qasperTree'
+
+const build = (names: string[], pages: number[][]) =>
+  buildQasperTree({ sectionNames: names, sectionPages: pages })
+
+describe('buildQasperTree', () => {
+  it('扁平节列表产出单层树', () => {
+    const { tree } = build(['Introduction', 'Method', 'Conclusion'], [[0], [1], [2]])
+    expect(tree.map(n => n.title)).toEqual(['Introduction', 'Method', 'Conclusion'])
+    expect(tree.every(n => n.depth === 0 && n.children.length === 0)).toBe(true)
+    expect(tree[1].pages).toEqual([1])
+  })
+
+  it(' ::: 还原父子关系，path 与 depth 正确', () => {
+    const { tree } = build(
+      ['Approach', 'Approach ::: Masked LM', 'Approach ::: Bridge LM', 'Experiments'],
+      [[0], [1], [2], [3]],
+    )
+    expect(tree.map(n => n.title)).toEqual(['Approach', 'Experiments'])
+    expect(tree[0].children.map(n => n.title)).toEqual(['Masked LM', 'Bridge LM'])
+    expect(tree[0].children[0].path).toEqual(['Approach'])
+    expect(tree[0].children[0].depth).toBe(1)
+  })
+
+  it('父节点缺条目时合成一个导航节点（pages 为空）', () => {
+    const { tree, synthesizedParents } = build(
+      ['Approach ::: Masked LM', 'Approach ::: Bridge LM'],
+      [[1], [2]],
+    )
+    expect(tree.map(n => n.title)).toEqual(['Approach'])
+    expect(tree[0].pages).toEqual([])
+    expect(synthesizedParents).toBe(1)
+    expect(tree[0].children.map(n => n.title)).toEqual(['Masked LM', 'Bridge LM'])
+  })
+
+  it('父节点后出现自己的条目时，页合并不新建节点', () => {
+    const { tree } = build(['Approach ::: Masked LM', 'Approach'], [[1], [0]])
+    expect(tree).toHaveLength(1)
+    expect(tree[0].pages).toEqual([0])
+  })
+
+  it('标题两端空白被 trim（实测存在尾随空格的节名）', () => {
+    const { tree } = build(['  Dogmatism data  ', 'What is X? (R1)'], [[0], [1]])
+    expect(tree.map(n => n.title)).toEqual(['Dogmatism data', 'What is X? (R1)'])
+  })
+
+  it('空标题的节被丢弃并计数', () => {
+    const { tree, droppedSections } = build(['Introduction', '   ', ''], [[0], [1], [2]])
+    expect(tree.map(n => n.title)).toEqual(['Introduction'])
+    expect(droppedSections).toBe(2)
+  })
+
+  it('三层嵌套正确挂载', () => {
+    const { tree } = build(
+      ['Experiments ::: Setup ::: Datasets.', 'Experiments ::: Setup ::: Details.'],
+      [[2], [3]],
+    )
+    const experiments = tree[0]
+    const setup = experiments.children[0]
+    expect([experiments.title, setup.title, experiments.depth, setup.depth]).toEqual(['Experiments', 'Setup', 0, 1])
+    expect(setup.children.map(n => n.title)).toEqual(['Datasets.', 'Details.'])
+    expect(setup.children[0].depth).toBe(2)
+  })
+
+  it('节点 id 稳定：同一输入产出同一批 id', () => {
+    const names = ['A', 'A ::: B']
+    const ids = () => build(names, [[0], [1]]).tree.flatMap(n => [n.id, ...n.children.map(c => c.id)])
+    expect(ids()).toEqual(ids())
+  })
+
+  it('空输入返回空树', () => {
+    expect(build([], []).tree).toEqual([])
+  })
+
+  it('节结构非法时抛错，绝不产出带断层的树', () => {
+    // 校验在 buildQasperTree 内部执行，调用方无法绕过
+    expect(() => build(['Results', 'Methods', 'Results'], [[1], [2, 3, 4], [5]]))
+      .toThrow('invalid-section-structure: non-adjacent-repeat')
+    const deep = Array.from({ length: MAX_TOC_DEPTH + 1 }, (_, i) => `L${i}`).join(' ::: ')
+    expect(() => build([deep], [[0]])).toThrow('invalid-section-structure: too-deep')
+  })
+})
+
+describe('validateSections', () => {
+  it('接受扁平与合法嵌套', () => {
+    expect(validateSections({ sectionNames: ['A', 'A ::: B'], sectionPages: [[0], [1]] })).toEqual({ ok: true })
+  })
+
+  it('拒绝超过深度上限', () => {
+    const deep = Array.from({ length: MAX_TOC_DEPTH + 1 }, (_, i) => `L${i}`).join(' ::: ')
+    expect(validateSections({ sectionNames: [deep], sectionPages: [[0]] }))
+      .toEqual({ ok: false, reason: 'too-deep' })
+  })
+
+  it('拒绝同一路径内重复的层名（自嵌套）', () => {
+    expect(validateSections({ sectionNames: ['A ::: A'], sectionPages: [[0]] }))
+      .toEqual({ ok: false, reason: 'cyclic-path' })
+  })
+
+  it('空标题不算非法：由建树阶段丢弃计数', () => {
+    expect(validateSections({ sectionNames: ['  '], sectionPages: [[0]] })).toEqual({ ok: true })
+  })
+
+  it('拒绝同一路径分两处出现且页区间断开（中间隔着别的节）', () => {
+    // `Results` 在页 1 与页 5 各出现一次，中间夹着 Methods 的 2–4 页。
+    // 并集 [1,5] 断开——拼出来的文本与连续两页没有区别，中间三页会被无声吞掉。
+    expect(validateSections({
+      sectionNames: ['Results', 'Methods', 'Results'],
+      sectionPages: [[1], [2, 3, 4], [5]],
+    })).toEqual({ ok: false, reason: 'non-adjacent-repeat' })
+  })
+
+  it('接受同一路径连续两节出现且页区间相接', () => {
+    // 真正相邻的重复节：页区间首尾相接，并集连续，不会造出断层
+    expect(validateSections({ sectionNames: ['Results', 'Results'], sectionPages: [[1], [2]] }))
+      .toEqual({ ok: true })
+    expect(validateSections({ sectionNames: ['Results', 'Results'], sectionPages: [[3], [3]] }))
+      .toEqual({ ok: true })
+  })
+})

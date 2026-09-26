@@ -31,6 +31,10 @@ export interface EvalSample {
   questions: QaQuestion[]
   /** 参考摘要；QASPER 样本可能没有，为 undefined 时跳过摘要任务 */
   referenceAbstract?: string
+  /** 节名（` ::: ` 编码层级）。仅 QASPER 样本有；冒烟集为 undefined。 */
+  sectionNames?: string[]
+  /** 每节内容落到的伪页号，与 sectionNames 同序同长。仅 QASPER 样本有。 */
+  sectionPages?: number[][]
   /** 数据来源，用于报表中分开统计语义分块指标 */
   source: SampleSource
 }

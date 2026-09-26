@@ -1,0 +1,96 @@
+/**
+ * 用真实 QASPER **原始**数据建树并打印结构，人工核对。不属于单测。
+ *
+ * **刻意不读 bench/datasets/qasper/qasper.jsonl**：那是已归一化的旧产物、不含节结构
+ * 字段（loadQasperDataset 只做 JSON 解析，不重跑 normalizeQasperEntry），且被
+ * .gitignore 忽略、无从恢复；重跑 fetch.ts 会覆写它，那是全部既有基线结果所依据的语料。
+ *
+ * 因此这里只从上游**只读**取 full_text，不写任何文件。建树只需要 section_name 与
+ * paragraphs，直接调 sectionsToPages 即可：既不必复刻 fetch.ts 里的 qas 转置，
+ * 也**不能** import fetch.ts——它有顶层副作用，一 import 就会拉取并覆写数据集。
+ */
+import { sectionsToPages } from '../src/datasets/qasper'
+import { buildQasperTree } from '../src/toc/qasperTree'
+import type { TocNode } from '../../src/utils/tocTree'
+
+const ROWS_URL = 'https://datasets-server.huggingface.co/rows'
+const LIMIT = Number(process.env.QASPER_LIMIT ?? '60')
+
+interface RawRow {
+  id: string
+  full_text: { section_name: string[]; paragraphs: string[][] }
+}
+
+async function fetchRows(offset: number, length: number): Promise<RawRow[]> {
+  const url = `${ROWS_URL}?dataset=allenai%2Fqasper&config=qasper&split=validation`
+    + `&offset=${offset}&length=${length}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`QASPER 拉取失败 ${res.status}: ${(await res.text()).slice(0, 300)}`)
+  const data = await res.json() as { rows: Array<{ row: RawRow }> }
+  return data.rows.map(r => r.row)
+}
+
+function print(nodes: TocNode[], indent: string): void {
+  for (const node of nodes) {
+    console.log(`${indent}${node.title}  pages=[${node.pages.join(',')}]`)
+    print(node.children, `${indent}  `)
+  }
+}
+
+const depthOf = (node: TocNode): number =>
+  node.children.length === 0 ? node.depth : Math.max(...node.children.map(depthOf))
+
+interface Built {
+  id: string
+  sectionCount: number
+  tree: TocNode[]
+  synthesizedParents: number
+  droppedSections: number
+}
+
+async function main(): Promise<void> {
+  const rows: RawRow[] = []
+  for (let offset = 0; offset < LIMIT; offset += 100) {
+    rows.push(...await fetchRows(offset, Math.min(100, LIMIT - offset)))
+  }
+
+  let withSections = 0
+  let maxDepth = 0
+  let synthesized = 0
+  let dropped = 0
+  const invalid: string[] = []
+  const built: Built[] = []
+  for (const row of rows) {
+    const names = row.full_text.section_name
+    if (names.length > 0) withSections += 1
+    // 节结构非法是**设计内**的结果（整篇作废、不修补），真实论文里出现非相邻的
+    // 同名节完全可能。冒烟脚本必须把它统计出来而不是崩掉：这个数字直接决定树路由
+    // 在多少篇上根本用不上——那些篇会整篇回落平面检索，是结论的一部分。
+    try {
+      const { sectionPages } = sectionsToPages(names, row.full_text.paragraphs)
+      const result = buildQasperTree({ sectionNames: names, sectionPages })
+      synthesized += result.synthesizedParents
+      dropped += result.droppedSections
+      for (const node of result.tree) maxDepth = Math.max(maxDepth, depthOf(node))
+      built.push({
+        id: row.id, sectionCount: names.length, tree: result.tree,
+        synthesizedParents: result.synthesizedParents, droppedSections: result.droppedSections,
+      })
+    } catch (error) {
+      invalid.push(`${row.id}: ${(error as Error).message}`)
+    }
+  }
+  console.log(`样本 ${rows.length} 篇，带节结构 ${withSections}/${rows.length}`)
+  console.log(`最深 ${maxDepth} 层，合成父节点 ${synthesized}，丢弃节 ${dropped}`)
+  console.log(`节结构非法 ${invalid.length} 篇（这些篇整篇回落平面检索）`)
+  for (const line of invalid.slice(0, 10)) console.log(`  ${line}`)
+
+  // 从**已建成的**里取前 3 篇：头 3 篇里若有一篇结构非法，未过滤就会让整个冒烟崩掉
+  for (const entry of built.slice(0, 3)) {
+    console.log(`\n--- ${entry.id}（节 ${entry.sectionCount}）`)
+    print(entry.tree, '  ')
+    console.log(`  合成父节点 ${entry.synthesizedParents}，丢弃节 ${entry.droppedSections}`)
+  }
+}
+
+main().catch(error => { console.error(error); process.exit(1) })

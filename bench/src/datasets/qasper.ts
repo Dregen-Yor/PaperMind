@@ -129,7 +129,7 @@ export function sectionsToPages(sectionNames: string[], sections: string[][]): {
 
 export function normalizeQasperEntry(paperId: string, entry: QasperEntry): EvalSample {
   const flatParagraphs = entry.full_text.paragraphs.flat()
-  const { pages, paragraphToPage } = sectionsToPages(entry.full_text.section_name, entry.full_text.paragraphs)
+  const { pages, paragraphToPage, sectionPages } = sectionsToPages(entry.full_text.section_name, entry.full_text.paragraphs)
 
   // evidence 是段落原文字符串，建索引以便反查段落下标
   const paragraphIndex = new Map<string, number[]>()
@@ -187,6 +187,8 @@ export function normalizeQasperEntry(paperId: string, entry: QasperEntry): EvalS
     pages,
     questions,
     referenceAbstract: entry.abstract,
+    sectionNames: entry.full_text.section_name,
+    sectionPages,
     source: 'qasper',
   }
 }
