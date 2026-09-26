@@ -40,7 +40,7 @@
 - Create: `src/utils/evidenceJudge.ts`
 - Test: `src/tests/evidenceJudge.test.ts`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 Create `src/tests/evidenceJudge.test.ts`：
 
@@ -94,13 +94,13 @@ describe('EvidenceJudge 契约', () => {
 })
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `npx vitest run src/tests/evidenceJudge.test.ts`
 
 Expected: FAIL，报错形如 `Failed to resolve import "../utils/evidenceJudge"`。
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 Create `src/utils/evidenceJudge.ts`：
 
@@ -113,7 +113,10 @@ Create `src/utils/evidenceJudge.ts`：
  * 不装 Python 的机器上被完整单测。
  */
 
-/** 送去判定的候选节点。只带标题与父路径，不带正文——见 spec §2.1。 */
+/**
+ * 送去判定的候选节点。只带标题与父路径，**不带正文**——树只承担导航职责，
+ * 判定的是「这一节值不值得去读」，真正的证据仍要回原文页取证（spec §1 的模块边界）。
+ */
 export interface JudgeNode {
   id: string
   title: string
@@ -149,12 +152,12 @@ export function assertJudgeOutput(output: unknown, expectedLength: number): numb
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run src/tests/evidenceJudge.test.ts`
 Expected: PASS，8 个用例全绿。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/utils/evidenceJudge.ts src/tests/evidenceJudge.test.ts
@@ -953,6 +956,14 @@ describe('buildQasperTree', () => {
   it('空输入返回空树', () => {
     expect(build([], []).tree).toEqual([])
   })
+
+  it('节结构非法时抛错，绝不产出带断层的树', () => {
+    // 校验在 buildQasperTree 内部执行，调用方无法绕过
+    expect(() => build(['Results', 'Methods', 'Results'], [[1], [2, 3, 4], [5]]))
+      .toThrow('invalid-section-structure: non-adjacent-repeat')
+    const deep = Array.from({ length: MAX_TOC_DEPTH + 1 }, (_, i) => `L${i}`).join(' ::: ')
+    expect(() => build([deep], [[0]])).toThrow('invalid-section-structure: too-deep')
+  })
 })
 
 describe('validateSections', () => {
@@ -973,6 +984,23 @@ describe('validateSections', () => {
 
   it('空标题不算非法：由建树阶段丢弃计数', () => {
     expect(validateSections({ sectionNames: ['  '], sectionPages: [[0]] })).toEqual({ ok: true })
+  })
+
+  it('拒绝同一路径分两处出现且页区间断开（中间隔着别的节）', () => {
+    // `Results` 在页 1 与页 5 各出现一次，中间夹着 Methods 的 2–4 页。
+    // 并集 [1,5] 断开——拼出来的文本与连续两页没有区别，中间三页会被无声吞掉。
+    expect(validateSections({
+      sectionNames: ['Results', 'Methods', 'Results'],
+      sectionPages: [[1], [2, 3, 4], [5]],
+    })).toEqual({ ok: false, reason: 'non-adjacent-repeat' })
+  })
+
+  it('接受同一路径连续两节出现且页区间相接', () => {
+    // 真正相邻的重复节：页区间首尾相接，并集连续，不会造出断层
+    expect(validateSections({ sectionNames: ['Results', 'Results'], sectionPages: [[1], [2]] }))
+      .toEqual({ ok: true })
+    expect(validateSections({ sectionNames: ['Results', 'Results'], sectionPages: [[3], [3]] }))
+      .toEqual({ ok: true })
   })
 })
 ```
@@ -1010,7 +1038,7 @@ export interface QasperSectionInput {
 
 export type SectionValidation =
   | { ok: true }
-  | { ok: false; reason: 'too-deep' | 'cyclic-path' }
+  | { ok: false; reason: 'too-deep' | 'cyclic-path' | 'non-adjacent-repeat' }
 
 export interface QasperTreeResult {
   tree: TocNode[]
@@ -1029,6 +1057,35 @@ function pathOf(sectionName: string): string[] {
 }
 
 /**
+ * 同一路径多次出现时，各次的页区间必须首尾相接（并集连续）。
+ *
+ * 为什么必须校验：`tocNodePageSpan` 用与「相邻两页」**完全相同**的 `\n\n` 拼接
+ * 片段，因此 `pages: [1, 5]` 渲染出的文本与 `[1, 2]` 形状毫无区别——中间
+ * 2–4 页被无声吞掉，读上下文的人和答题模型都看不出断层。指标（`pageOrder`
+ * 取自 `piece.page`）仍然诚实，所以这不会表现为数字异常，只会表现为**召回
+ * 静默损失**。这类「指标正常、内容悄悄少一段」正是本设计要避免的失效形态。
+ *
+ * 这是本模块**唯一**可能造出空隙的地方：打包循环只顺序追加，单节区间恒连续
+ * （每次 append 至多封一页，页号每次至多 +1）。
+ */
+function mergedRunsAreContiguous(input: QasperSectionInput): boolean {
+  const byPath = new Map<string, number[]>()
+  for (let i = 0; i < input.sectionNames.length; i++) {
+    const parts = pathOf(input.sectionNames[i])
+    if (parts.length === 0) continue
+    const key = parts.join(KEY_SEP)
+    byPath.set(key, [...(byPath.get(key) ?? []), ...(input.sectionPages[i] ?? [])])
+  }
+  for (const pages of byPath.values()) {
+    const sorted = [...new Set(pages)].sort((a, b) => a - b)
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] !== sorted[i - 1] + 1) return false
+    }
+  }
+  return true
+}
+
+/**
  * 节结构合法性校验。**整棵作废，不修补**——沿用 `validateSemanticTree` 的口径：
  * 猜一个修复方案比直接回落更容易产出看不出错的坏结果。
  *
@@ -1041,6 +1098,7 @@ export function validateSections(input: QasperSectionInput): SectionValidation {
     // `A ::: A` 会造出 A → A 的自嵌套
     if (new Set(parts).size !== parts.length) return { ok: false, reason: 'cyclic-path' }
   }
+  if (!mergedRunsAreContiguous(input)) return { ok: false, reason: 'non-adjacent-repeat' }
   return { ok: true }
 }
 
@@ -1050,8 +1108,14 @@ export function validateSections(input: QasperSectionInput): SectionValidation {
  * 父节点通常自带独立条目（实测 `Approach` 与 `Approach ::: Masked LM` 并存），
  * 但不保证每篇都如此；缺条目时合成一个 `pages` 为空的导航节点，
  * 它只承担下探职责，不会被收为证据（见 `traverseWithJudge` 的空内容过滤）。
+ *
+ * **先校验再建树**：校验放在函数内部而非交给调用方，是为了让「产出带断层的树」
+ * 在类型上没有出口——调用方忘了校验就会静默拿到坏树，这正是要防的。
  */
 export function buildQasperTree(input: QasperSectionInput): QasperTreeResult {
+  const validation = validateSections(input)
+  if (!validation.ok) throw new Error(`invalid-section-structure: ${validation.reason}`)
+
   const byPath = new Map<string, TocNode>()
   const roots: TocNode[] = []
   let droppedSections = 0
@@ -1109,7 +1173,7 @@ export function buildQasperTree(input: QasperSectionInput): QasperTreeResult {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run bench/src/tests/qasperTree.test.ts`
-Expected: PASS，16 个用例全绿。
+Expected: PASS，20 个用例全绿（本节 16 个 + Task 5 的 4 个 sectionsToPages 用例）。
 
 - [ ] **Step 5: 把节结构带进 EvalSample**
 
