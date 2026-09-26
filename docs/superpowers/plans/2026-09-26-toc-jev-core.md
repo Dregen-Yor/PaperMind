@@ -1371,8 +1371,10 @@ Create `bench/scripts/tocSmoke.ts`：
 /**
  * 用真实 QASPER 数据建树并打印结构，人工核对。不属于单测。
  *
- * 全部逻辑包在 main() 里：tsx 对仓库内脚本按 CJS 转译，顶层 await 会直接报
- * "Top-level await is currently not supported with the cjs output format"。
+ * 逻辑包在 main() 里并统一 catch：这里只需要一个失败出口，出错即以退出码 1 结束。
+ * 注意**不是**为了绕开转译限制——顶层 await 在 bench/ 下是可用的（bench/package.json
+ * 是 "type": "module"，既有 bench/scripts/verifyTokenizer.ts 就在顶层 await；
+ * 此处已实测通过）。写实现时别照抄一个不存在的约束。
  * 数据集路径走 loadQasperDataset，不自己拼——bench/src/paths.ts 的存在就是
  * 因为 `new URL(...).pathname` 会在含空格的路径上静默失效。
  */

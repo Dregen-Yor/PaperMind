@@ -132,7 +132,7 @@ bench/src/jev/                  实验专属，不入产品
 | 节点 `pages` = **该节内容实际落到的伪页号**，升序 | 见下 |
 | 节无任何内容（标题空且无段落）→ 整条丢弃 | 它不会进入任何一次判定 |
 
-**`pages` 必须由 `sectionsToPages` 的同一段打包循环产出，不得另写一套。** 这是本设计最容易出错的地方：`bench/src/datasets/qasper.ts` 的 `sectionsToPages` 决定了伪页边界，`evidencePages` 由它产出；节区间若用另一个实现算，两边会在边界上错开一页，而指标照常输出数字，**静默失真**。做法是给 `sectionsToPages` 增加一个返回值 `sectionPageRanges`，在原循环里顺手记录，**不改动它已产出的 `pages` 与 `paragraphToPage`**（改那两者会让全部缓存与既有结果失效）。
+**`pages` 必须由 `sectionsToPages` 的同一段打包循环产出，不得另写一套。** 这是本设计最容易出错的地方：`bench/src/datasets/qasper.ts` 的 `sectionsToPages` 决定了伪页边界，`evidencePages` 由它产出；节区间若用另一个实现算，两边会在边界上错开一页，而指标照常输出数字，**静默失真**。做法是给 `sectionsToPages` 增加一个返回值 `sectionPages`（`number[][]`，与 `sectionNames` 同序同长），在原循环里顺手记录，**不改动它已产出的 `pages` 与 `paragraphToPage`**（改那两者会让全部缓存与既有结果失效）。
 
 由此得到两个与原设计相反的结论：
 
@@ -252,7 +252,7 @@ bench/src/jev/                  实验专属，不入产品
 |---|---|---|
 | `src/tests/tocTree.test.ts` | 遍历纯函数 | `pages` 为空的节点绝不收为证据；下探的父节点不作为证据；下探无果时父节点兜底；空选择回落首个非空节点；相对阈值两个退化端点（`α=0` / `α=1`）；最高分节点在任意 `α∈[0,1]` 下恒存活（钉死「阈值滤光不可达」）；top-N 截断与同分稳定序；纯函数不 import pdfjs / 网络 |
 | `src/tests/evidenceJudge.test.ts` | 接口契约（注入假实现） | 批量语义、返回长度校验、NaN 与越界拒绝 |
-| `bench/src/tests/qasperTree.test.ts` | QASPER 节 → 树 | ` ::: ` 层级还原；父节点缺条目时合成；空标题丢弃；同篇重名不误判为自嵌套；**`sectionPageRanges` 与 `pages`/`paragraphToPage` 由同一次打包产出**（改 `sectionsToPages` 后 `evidencePages` 不变，用既有 fixture 钉死） |
+| `bench/src/tests/qasperTree.test.ts` | QASPER 节 → 树 | ` ::: ` 层级还原；父节点缺条目时合成；空标题丢弃；同篇重名不误判为自嵌套；**`sectionPages` 与 `pages`/`paragraphToPage` 由同一次打包产出**（改 `sectionsToPages` 后 `evidencePages` 不变，用既有 fixture 钉死） |
 | `bench/src/tests/jevSidecar.test.ts` | 侧车协议 | JSON-lines 往返、崩溃、超时、并发不串线——**全部用假侧车** |
 
 **硬纪律：遍历与建树的测试绝不依赖 Python 或 MLX 权重，也不依赖网络。** 这是 §1 解耦设计的直接回报——CI 与其他机器上均可运行。真实推理只由探针与实验负责，沿用现有 `transformersEmbedder` 的做法（单测中 mock 掉外部依赖）。
@@ -274,7 +274,7 @@ bench/src/jev/                  实验专属，不入产品
 ## 交付物
 
 1. `src/utils/tocTree.ts`、`src/utils/evidenceJudge.ts` 及各自单测
-2. `bench/src/toc/qasperTree.ts` + `sectionsToPages` 的 `sectionPageRanges` 扩展及单测
+2. `bench/src/toc/qasperTree.ts` + `sectionsToPages` 的 `sectionPages` 扩展及单测
 3. `bench/src/jev/`（MLX 实现 + Python 侧车）及协议测试
 4. bench 配置：`toc-bm25` / `toc-jev`（必要时含 `toc-jev-flat`）
 5. 带**深度分组**、四指标、成本与时延的对照报告；回落率与诊断分布
