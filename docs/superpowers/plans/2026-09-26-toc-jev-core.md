@@ -1746,9 +1746,17 @@ git commit -m "feat(jev): add the sidecar protocol with a testable fake child pr
 
 - [ ] **Step 1: 写侧车**
 
-> **先核对 API 再照抄。** 下面 `laya_mlx` 的调用形态来自早期探针，**没有**从装好的包里读过签名。动手前先跑
-> `models/laya/.venv/bin/python -c "import laya_mlx, inspect; print(inspect.signature(laya_mlx.load)); print([n for n in dir(laya_mlx) if not n.startswith('_')])"`
-> 与 `inspect.getsource` 确认 `load()` / `predict()` 的真实签名与返回结构（`result["answers"]["evidence"]["noul"]` 这条路径尤其要核）。对不上就按真实签名改 `score()`，**别改协议**——协议那侧已被 Task 7 的单测钉死。
+> **API 已核对（2026-09-26，直接读 `models/laya/.venv` 里装好的包并实跑一次 predict）。** 早期探针的形态被证实：
+> `Agent.predict(self, state, questions)`，`state` 收 `str | dict | list`（`common.py` 的 `serialize_state`，非字符串走
+> `json.dumps`——所以 `{"question":…, "section":…}` 不会崩，只是 state 段变成一坨 JSON）。返回
+> `{"answers": {<问题键>: {...}}}`，`answers["evidence"]["noul"]` 这条路径是对的。
+> **但 `noul` 的含义要盯死：它是「该陈述成立（true）」的概率。** `common.py` 的 `render_options` 写明
+> 「Noul is always [false, true]」（选项 0 渲染 `false: no, the statement does not hold`，选项 1 渲染
+> `true: yes, the statement holds`），`agent.py` 取 `p[1]`。**读反会把层内阈值整个倒置，而指标照常出数**——
+> 这是本任务唯一能静默毁掉实验的坑。另：载入时那条温度 clamp 警告只波及 `choice:11+`，我们用的 `noul:2` 桶是
+> 1.9834、按原值应用；温度 >1 压平 softmax，这正是概率挤在 0.03–0.39 的原因，别误读成模型「拿不准」。
+> 要复核就跑 `inspect.getsource(laya_mlx.Agent.predict)`。若哪一处对不上，都按真实签名改 `score()`，
+> **别改协议**——协议那侧已被 Task 7 的单测钉死。
 
 
 Create `bench/src/jev/sidecar.py`：
@@ -1761,11 +1769,15 @@ Create `bench/src/jev/sidecar.py`：
 """
 import json
 import sys
-from pathlib import Path
 
 import laya_mlx as laya
 
-MODEL_PATH = sys.argv[1] if len(sys.argv) > 1 else str(Path(__file__).with_name("laya-mlx"))
+if len(sys.argv) < 2:
+    # Path(__file__).with_name("laya-mlx") 会落在 bench/src/jev/，那里没有权重；而调用方
+    # mlxJudge.ts 的 defaultSpawn 每次都显式传路径，所以「缺参数」属编程错误，该响亮报错，
+    # 而不是默默指向一个不存在的目录。
+    sys.exit("usage: sidecar.py <model-dir>（如 models/laya/laya-mlx）")
+MODEL_PATH = sys.argv[1]
 
 INSTRUCTION = "Does `section` contain evidence that answers `question`?"
 
@@ -1885,8 +1897,8 @@ Create `bench/scripts/jevSmoke.ts`：
 /**
  * Jev 判定冒烟：用真实 QASPER 论文确认本地权重可用、概率有区分度。
  *
- * 全部逻辑包在 main() 里：tsx 对仓库内脚本按 CJS 转译，顶层 await 会直接报
- * "Top-level await is currently not supported with the cjs output format"。
+ * 全部逻辑包在 main() 里，只为失败时有一个明确的 exit 1——**不是**为了绕开转译限制：
+ * 顶层 await 在 bench/ 下是可用的（bench/package.json 是 "type": "module"）。
  */
 import { loadQasperDataset } from '../src/datasets/qasper'
 import { createMlxJudge } from '../src/jev/mlxJudge'
