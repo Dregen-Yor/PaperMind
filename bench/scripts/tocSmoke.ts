@@ -64,11 +64,13 @@ async function main(): Promise<void> {
   for (const row of rows) {
     const names = row.full_text.section_name
     if (names.length > 0) withSections += 1
+    // sectionsToPages 刻意留在 try **之外**：它出错是调用方的编程错误，不是论文的数据属性，
+    // 把它算进下面的「节结构非法」就等于把这个逐篇结论栽赃成论文的锅。
+    const { sectionPages } = sectionsToPages(names, row.full_text.paragraphs)
     // 节结构非法是**设计内**的结果（整篇作废、不修补），真实论文里出现非相邻的
     // 同名节完全可能。冒烟脚本必须把它统计出来而不是崩掉：这个数字直接决定树路由
     // 在多少篇上根本用不上——那些篇会整篇回落平面检索，是结论的一部分。
     try {
-      const { sectionPages } = sectionsToPages(names, row.full_text.paragraphs)
       const result = buildQasperTree({ sectionNames: names, sectionPages })
       synthesized += result.synthesizedParents
       dropped += result.droppedSections

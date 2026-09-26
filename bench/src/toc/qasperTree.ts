@@ -10,10 +10,11 @@ import type { TocNode } from '../../../src/utils/tocTree'
 /** 节层级上限。QASPER 实测最深 3 层，留一倍余量。 */
 export const MAX_TOC_DEPTH = 6
 
-/** 父路径与层名的连接符。用 NUL 避免与节名里的任何字符冲突。 */
+/** 父路径与层名的连接符。撞键需要节名里真的含 NUL——可以构造出来，只是现实中不会发生，不是「不可能」。 */
 const KEY_SEP = '\u0000'
 const PATH_SEP = ' ::: '
 
+/** 两个数组同序同长：`sectionPages[i]` 是 `sectionNames[i]` 那一节落到的伪页。长度不一致即调用方出错。 */
 export interface QasperSectionInput {
   sectionNames: string[]
   sectionPages: number[][]
@@ -102,6 +103,15 @@ export function validateSections(input: QasperSectionInput): SectionValidation {
  * 在类型上没有出口——调用方忘了校验就会静默拿到坏树，这正是要防的。
  */
 export function buildQasperTree(input: QasperSectionInput): QasperTreeResult {
+  // 长度不一致是**调用方的编程错误**，不是某篇论文的数据属性：所以这里直接抛错，而不是
+  // 加一条 validateSections 理由。理由是「该篇回落平面检索」的合法分类，把代码 bug 塞进去
+  // 会让它在 60 篇上逐篇被静默吸收，正是本仓库最防的那种掩盖。
+  if (input.sectionNames.length !== input.sectionPages.length) {
+    throw new Error(
+      `section-pages-length-mismatch: ${input.sectionNames.length} names vs ${input.sectionPages.length} page-lists`,
+    )
+  }
+
   const validation = validateSections(input)
   if (!validation.ok) throw new Error(`invalid-section-structure: ${validation.reason}`)
 

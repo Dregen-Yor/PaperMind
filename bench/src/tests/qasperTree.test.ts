@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { sectionsToPages, PSEUDO_PAGE_CHARS } from '../datasets/qasper'
+import { buildQasperTree, validateSections, MAX_TOC_DEPTH } from '../toc/qasperTree'
+import type { TocNode } from '../../../src/utils/tocTree'
 
 describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
   it('节的页区间覆盖其内容真正落入的伪页', () => {
@@ -70,8 +72,6 @@ describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
   })
 })
 
-import { buildQasperTree, validateSections, MAX_TOC_DEPTH } from '../toc/qasperTree'
-
 const build = (names: string[], pages: number[][]) =>
   buildQasperTree({ sectionNames: names, sectionPages: pages })
 
@@ -105,6 +105,11 @@ describe('buildQasperTree', () => {
     expect(tree[0].children.map(n => n.title)).toEqual(['Masked LM', 'Bridge LM'])
   })
 
+  it('只有标题、没有子节点的节不计入 synthesizedParents', () => {
+    // 加这条是为了钉住 children.length > 0 这个合取项：删掉它，这条会变成 1
+    expect(build(['A'], [[]]).synthesizedParents).toBe(0)
+  })
+
   it('父节点后出现自己的条目时，页合并不新建节点', () => {
     const { tree } = build(['Approach ::: Masked LM', 'Approach'], [[1], [0]])
     expect(tree).toHaveLength(1)
@@ -134,6 +139,24 @@ describe('buildQasperTree', () => {
     expect(setup.children[0].depth).toBe(2)
   })
 
+  it('六层链路建树：depth / path / pages 逐层正确', () => {
+    const name = Array.from({ length: MAX_TOC_DEPTH }, (_, i) => `L${i}`).join(' ::: ')
+    const { tree, synthesizedParents } = build([name], [[0]])
+    const chain: TocNode[] = []
+    for (let node: TocNode | undefined = tree[0]; node; node = node.children[0]) chain.push(node)
+    expect(chain.map(n => n.depth)).toEqual([0, 1, 2, 3, 4, 5])
+    expect(chain.map(n => n.path)).toEqual([
+      [], ['L0'], ['L0', 'L1'], ['L0', 'L1', 'L2'], ['L0', 'L1', 'L2', 'L3'], ['L0', 'L1', 'L2', 'L3', 'L4'],
+    ])
+    // 只有最深层那一节携带内容；五层祖先都是「有子节点、无 pages」的导航节点
+    expect(chain.map(n => n.pages)).toEqual([[], [], [], [], [], [0]])
+    expect(synthesizedParents).toBe(5)
+  })
+
+  it('自嵌套经建树入口同样被拒（校验在函数内部执行）', () => {
+    expect(() => build(['A ::: A'], [[0]])).toThrow('invalid-section-structure: cyclic-path')
+  })
+
   it('节点 id 按先序自 S000 编号，且每次调用都从头计数', () => {
     const names = ['A', 'A ::: B']
     const ids = () => build(names, [[0], [1]]).tree.flatMap(n => [n.id, ...n.children.map(c => c.id)])
@@ -152,6 +175,27 @@ describe('buildQasperTree', () => {
       .toThrow('invalid-section-structure: non-adjacent-repeat')
     const deep = Array.from({ length: MAX_TOC_DEPTH + 1 }, (_, i) => `L${i}`).join(' ::: ')
     expect(() => build([deep], [[0]])).toThrow('invalid-section-structure: too-deep')
+  })
+
+  it('连续分隔符产生的空层名被剔除，不制造空节点', () => {
+    // 输入用**两个空格**：`'A ::: ::: B'` 里两个分隔符共用中间那个空格、并不相邻，
+    // split 出来是 ['A','::: B']（一个名为 `::: B` 的层），根本不含空层。真正的空层
+    // 要两个相邻的 ` ::: `，此时中间层名是空串，被 pathOf 剔掉。
+    const { tree } = build(['A :::  ::: B'], [[0]])
+    expect(tree.map(n => n.title)).toEqual(['A'])
+    expect(tree[0].children.map(n => n.title)).toEqual(['B'])
+    expect(tree[0].children[0].depth).toBe(1)
+    expect(tree[0].children[0].pages).toEqual([0])
+  })
+
+  it('兄弟顺序按首次出现决定，中间插入别的节也不改变它', () => {
+    const { tree } = build(['A ::: B', 'C', 'A ::: D'], [[0], [1], [2]])
+    expect(tree.map(n => n.title)).toEqual(['A', 'C'])
+    expect(tree[0].children.map(n => n.title)).toEqual(['B', 'D'])
+  })
+
+  it('names 与 page-lists 长度不一致时立刻抛错，不静默产出无证据的树', () => {
+    expect(() => build(['A', 'B', 'C'], [[0]])).toThrow(/section-pages-length-mismatch/)
   })
 })
 
