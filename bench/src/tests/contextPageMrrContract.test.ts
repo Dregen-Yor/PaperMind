@@ -1,8 +1,10 @@
 /**
  * 跨方法横向比较的**互操作契约**。本文件不驱动任何方法的检索决策，
- * 所以它证明的比「跨方法可比较」更窄也更基础，只有两条：
+ * 所以它证明的比「跨方法可比较」更窄也更基础，只有三条：
  * 1. 页序是 materializer 的确定性函数（同样输入片段必得同样 pageOrder）；
- * 2. 四个检索指标是「页序 + evidence」的确定性函数。
+ * 2. 四个检索指标是「页序 + evidence」的确定性函数；
+ * 3. 树路径的逐页片段（`tocNodePageSpan`）与生产 `nodeToContextGroup` 对同一连续页区间逐字同口径，
+ *    因此树路径反推出的 pageOrder 与平面路径同源、可比。
  * 合起来即：不同方法只要最终物化出同一份页序，指标就必然逐字相同——谁内部怎么选段都不影响。
  * 五个受测方法刻意在组数、重叠、重复页上各异，却收敛到同一份 [2, 5, 7] 页序；
  * 另有一例用同一页多重集的不同次序，单独钉住「名次来自给定次序」这另一半契约。
@@ -14,6 +16,8 @@ import { buildEvidenceBlocks } from '../../../src/utils/evidenceBlock'
 import { materializeContext, type ContextGroup } from '../../../src/utils/contextTrace'
 // 生产侧的逐页分组生产者：PageIndex 适配器直接驱动它，不再自建替身
 import { nodeToContextGroup } from '../../../src/utils/pageIndex'
+// 树路径的逐页片段生产者：与 nodeToContextGroup 是同一套「首片原文、后续带 \n\n」口径的另一份实现
+import { tocNodePageSpan, type TocNode } from '../../../src/utils/tocTree'
 import {
   ZERO_CONTEXT_PAGE_METRICS,
   applyRetrievalMetrics,
@@ -205,5 +209,61 @@ describe('Context Page MRR 跨方法契约', () => {
     for (const key of ['contextPageMrr', 'evidenceRecall', 'evidenceHit', 'contextPrecision']) {
       expect(counts[key]).toBe(adapters.length)
     }
+  })
+})
+
+/**
+ * 树路径的逐页片段口径必须与生产 `nodeToContextGroup` 逐字一致。两条实现各自独立地写着
+ * 「首片是首页原文、后续每页带 `\n\n` 前缀」，却没有任何东西把它们耦合起来：`tocTree.ts`
+ * 刻意不 import `pageIndex.ts`（那会把它拖进 pdfjs 依赖）。一旦一侧漂移，树路径从上下文
+ * 反推出的 `pageOrder` 会整体错位一页，而四个指标照常出数——结果看起来正常，却与其它臂
+ * 静默不可比。所以这里拿**生产函数当基准**做交叉断言，而不是再抄一份规则：抄来的第二份
+ * 规则会和第一份一起漂，钉不住任何东西。
+ */
+describe('树路径逐页片段与生产 nodeToContextGroup 同口径', () => {
+  // 局部自备的 pages：不与上面 adapter 的语料共用，断言才独立于那些布局。
+  // 页 2 刻意留空，用来钉住「空页在两套实现里各产出什么前缀」这条边界。
+  const localPages = ['P0', 'P1', '', 'P3', 'P4']
+
+  /** 连续页区间 → 树侧的 TocNode：`pages` 由量出的区间展开，与 nodeToContextGroup 的 start/end 同义 */
+  const tocNodeForSpan = (startPage: number, endPage: number): TocNode => ({
+    id: `n-${startPage}-${endPage}`,
+    title: 'S',
+    path: [],
+    depth: 0,
+    pages: Array.from({ length: endPage - startPage + 1 }, (_, i) => startPage + i),
+    children: [],
+  })
+
+  const treePiecesForSpan = (startPage: number, endPage: number) =>
+    tocNodePageSpan(tocNodeForSpan(startPage, endPage), localPages)
+  const productionPiecesForSpan = (startPage: number, endPage: number) =>
+    nodeToContextGroup(
+      { title: 'S', nodeId: `n-${startPage}-${endPage}`, startPage, endPage, summary: '', nodes: [] },
+      localPages,
+    ).pieces
+
+  it('连续页区间：树路径产出的 pieces 与生产函数逐字相同（含页号）', () => {
+    for (const [startPage, endPage] of [[3, 3], [0, 1], [3, 4]] as Array<[number, number]>) {
+      expect(treePiecesForSpan(startPage, endPage)).toEqual(productionPiecesForSpan(startPage, endPage))
+    }
+
+    // 起点为页 0：首页片必须原样、不带 \n\n——这是「首片原文」这条边界的下限
+    const fromZero = treePiecesForSpan(0, 1)
+    expect(fromZero).toEqual(productionPiecesForSpan(0, 1))
+    expect(fromZero[0]).toEqual({ page: 0, text: 'P0' })
+    expect(fromZero[1]).toEqual({ page: 1, text: '\n\nP1' })
+  })
+
+  it('空页的前缀规则两侧一致：后续空页发 \\n\\n，首页空页发 ""', () => {
+    // [1,2]：页 2 空且是后续片——两侧都必须发 \n\n，不能塌成 ""
+    const continuationEmpty = treePiecesForSpan(1, 2)
+    expect(continuationEmpty).toEqual(productionPiecesForSpan(1, 2))
+    expect(continuationEmpty[1]).toEqual({ page: 2, text: '\n\n' })
+
+    // [2,3]：页 2 空且是首片——两侧都必须发 ""，不能凭空多出 \n\n
+    const firstEmpty = treePiecesForSpan(2, 3)
+    expect(firstEmpty).toEqual(productionPiecesForSpan(2, 3))
+    expect(firstEmpty[0]).toEqual({ page: 2, text: '' })
   })
 })

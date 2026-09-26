@@ -41,8 +41,11 @@ export function defaultSpawn(opts: MlxJudgeOptions = {}): SidecarSpawn {
  */
 export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge & { close: () => Promise<void> } {
   const batchSize = opts.batchSize ?? 16
-  // 刻意抛错而非 `Math.max(1, …)` 夹紧：0 会让步进永不前进、负数反向走、非整数切出小数下标，
-  // 三种都会让 `judge()` 静默卡死或给出错位切片。调用方要的是 0 就该当场听到，而不是悄悄拿到 1。
+  // 刻意抛错而非 `Math.max(1, …)` 夹紧：0 让 `i += 0` 永不前进、负数让 `i` 反向走，
+  // 两者都让 `judge()` 静默死循环——这才是真正要拦下的失败。
+  // 非整数（如 1.5）**不会**死循环：`slice` 把下标截断成整数，仍切出完整、不重叠、次序正确的
+  // 分区，只是各批大小不齐（5 个节点切出 1/2/1/1），违背了 `batchSize` 所承诺的等长切分。
+  // 三种都是调用方的编程错误，故当场抛错，而不是悄悄夹到 1。
   if (!Number.isInteger(batchSize) || batchSize <= 0) {
     throw new RangeError(`batchSize 必须是正整数，收到 ${batchSize}`)
   }

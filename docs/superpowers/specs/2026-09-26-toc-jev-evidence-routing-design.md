@@ -254,10 +254,11 @@ bench/src/jev/                  实验专属，不入产品
 
 | 文件 | 覆盖 | 关键点 |
 |---|---|---|
-| `src/tests/tocTree.test.ts` | 遍历纯函数 | `pages` 为空的节点绝不收为证据；下探的父节点不作为证据；下探无果时父节点兜底；空选择回落首个非空节点；相对阈值两个退化端点（`α=0` / `α=1`）；最高分节点在任意 `α∈[0,1]` 下恒存活（钉死「阈值滤光不可达」）；top-N 截断与同分稳定序；纯函数不 import pdfjs / 网络 |
+| `src/tests/tocTree.test.ts` | 遍历纯函数 | `pages` 为空的节点绝不收为证据；下探的父节点不作为证据；下探无果时父节点兜底；空选择回落首个非空节点；相对阈值两个退化端点（`α=0` / `α=1`）；最高分节点在任意 `α∈[0,1]` 下恒存活（钉死「阈值滤光不可达」）；top-N 截断与同分稳定序；纯函数不 import pdfjs / 网络（纯度由计划 Task 4 Step 6 的 grep 强制，本文件不 mock pdfjs 只是旁证） |
 | `src/tests/evidenceJudge.test.ts` | 接口契约（注入假实现） | 批量语义、返回长度校验、NaN 与越界拒绝 |
 | `bench/src/tests/qasperTree.test.ts` | QASPER 节 → 树 | ` ::: ` 层级还原；父节点缺条目时合成；空标题丢弃；同篇重名不误判为自嵌套；**`sectionPages` 与 `pages`/`paragraphToPage` 由同一次打包产出**（改 `sectionsToPages` 后 `evidencePages` 不变，用既有 fixture 钉死） |
 | `bench/src/tests/jevSidecar.test.ts` | 侧车协议 | JSON-lines 往返、崩溃、超时、并发不串线——**全部用假侧车** |
+| `bench/src/tests/contextPageMrrContract.test.ts` | 树路径逐页片段口径 | `tocNodePageSpan` 对同一连续页区间产出的 `pieces` 与生产 `nodeToContextGroup` **逐字相同（含页号）**，覆盖单页 / 起点为 0 / 多页 / 后续空页（须发 `\n\n`）/ 首页空页（须发 `""`）；拿生产函数当基准交叉断言，不另抄一份规则 |
 
 **硬纪律：遍历与建树的测试绝不依赖 Python 或 MLX 权重，也不依赖网络。** 这是 §1 解耦设计的直接回报——CI 与其他机器上均可运行。真实推理只由探针与实验负责，沿用现有 `transformersEmbedder` 的做法（单测中 mock 掉外部依赖）。
 
