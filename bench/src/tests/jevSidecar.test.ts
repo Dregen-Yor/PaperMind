@@ -60,9 +60,10 @@ describe('SidecarJudge', () => {
 
   it('侧车立刻退出时抛错，调用方据此按篇回落', async () => {
     const judge = new SidecarJudge({ spawn: () => ({ command: process.execPath, args: ['-e', 'process.exit(1)'] }) })
-    await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
-      .rejects.toThrow(/sidecar exited/)
-    await judge.close()
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
+        .rejects.toThrow(/sidecar exited/)
+    } finally { await judge.close() }
   })
 
   it('超时抛错，不无限等待', async () => {
@@ -109,6 +110,14 @@ describe('SidecarJudge', () => {
     try {
       await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
         .rejects.toThrow(/sidecar error: \{"code":42\}/)
+    } finally { await judge.close() }
+  })
+
+  it('成功响应带 `error: null` 时不误判为失败', async () => {
+    const nullError = `let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i);b=b.slice(i+1);const r=JSON.parse(l);process.stdout.write(JSON.stringify({id:r.id,scores:[0.5],error:null})+'\\n')}})`
+    const judge = new SidecarJudge({ spawn: () => ({ command: process.execPath, args: ['-e', nullError] }) })
+    try {
+      expect(await judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] })).toEqual([0.5])
     } finally { await judge.close() }
   })
 

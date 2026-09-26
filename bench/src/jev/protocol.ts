@@ -71,6 +71,12 @@ export class SidecarJudge implements EvidenceJudge {
   private onData(chunk: string, source: ChildProcess): void {
     // 上一代子进程的 stdout 监听器永不摘除。它若在 exit → 重新 spawn 之后才吐出残行，
     // 会拼进新一代的首行，产出一条谁也认不出的畸形行。按 child 身份过滤，迟到数据整体丢弃。
+    //
+    // 这个守卫只管「残行在换代之后才到达」这一种竞态。残行若在换代之前就已进过 buffer，
+    // 由 ensureChild 的 `this.buffer = ''` 清掉——两道防线各管一段，都不是多余的。
+    // 单测无法确定性复现这一条：真实子进程的 stdout 在 exit 时即关闭，「exit 之后才送达」的
+    // 窗口逼不出来，任何能写出的测试在无守卫时也照样通过。因此该守卫**没有**回归测试兜底，
+    // 删掉它不会让任何测试变红——改这里请自己核对，别以为有测试看着。
     if (source !== this.child) return
     this.buffer += chunk
     let index: number
@@ -91,9 +97,12 @@ export class SidecarJudge implements EvidenceJudge {
       // 侧车把失败原因放在 error 里（Task 8 的 sidecar.py 就是这么回话的）。不带上它，
       // 调用方只会看到 not-an-array——而「权重目录不存在 / 导入失败 / OOM」正是最需要原文的
       // 诊断。协议线上格式不变，只是不再把这段文字丢掉。
-      // 判 `!== undefined` 而不是 `typeof === 'string'`：数字或对象的 error 若漏下去，仍会
-      // 退化成同一个笼统的 not-an-array，等于换个类型重犯一遍静默丢弃。非字符串转成 JSON 文本。
-      if (message.error !== undefined) {
+      // `!= null` 同时放过 undefined 与 null：`!== undefined` 会把 `"error": null` 判成失败，
+      // 而 Python 的 json.dumps 只要 dict 里有这个键就会写出它——一个「成功时也带 error 键」
+      // 的侧车会被整体误拒，且失败长得跟真错误一样，比超时更难查。
+      // 之所以不用 `typeof === 'string'`：数字或对象的 error 若漏下去，仍会退化成同一个笼统的
+      // not-an-array，等于换个类型重犯一遍静默丢弃。非字符串转成 JSON 文本。
+      if (message.error != null) {
         const text = typeof message.error === 'string' ? message.error : JSON.stringify(message.error)
         p.reject(new Error(`sidecar error: ${text}`))
         continue
