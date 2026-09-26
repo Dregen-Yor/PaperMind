@@ -1333,7 +1333,7 @@ export function buildQasperTree(input: QasperSectionInput): QasperTreeResult {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run bench/src/tests/qasperTree.test.ts`
-Expected: PASS，20 个用例全绿（本节 16 个 + Task 5 的 4 个 sectionsToPages 用例）。
+Expected: PASS，**22** 个用例全绿（本节 16 个 + Task 5 的 6 个 sectionsToPages 用例）。若数字对不上，先按实际数量核对是哪些用例、别改断言去凑数。
 
 - [ ] **Step 5: 把节结构带进 EvalSample**
 
@@ -1363,24 +1363,52 @@ Expected: PASS，20 个用例全绿（本节 16 个 + Task 5 的 4 个 sectionsT
 
 **注意别改 `loadQasperDataset` 的校验**：它只对既有字段做完整性检查，新字段是给建树用的，缺了不该让整个数据集加载失败。
 
+**这一步不会让既有的 `qasper.jsonl` 长出节结构。** `loadQasperDataset` 只做 JSON 解析、不重跑 `normalizeQasperEntry`；线上那份 jsonl 是**改动之前**归一化的，且被 `.gitignore:48` 忽略、无从恢复。所以 Step 6 的冒烟刻意绕开它、直接读上游（见下）。
+
+要让**评测真正跑起来**时样本带节结构，Plan 2 开工前必须先做这个前置决策：或带备份重跑 `fetch.ts`、逐篇核对既有字段未变——`datasetFingerprint` 是白名单投影（`bench/src/evaluationContract.ts:83-95`），**新增**字段不改指纹，但 `pages` / `evidencePages` 若因上游漂移而变，指纹必变、既有基线全部失去可比性；或另立一个只存节结构的旁挂产物，原文件一字不动。两条路都别在本任务里顺手做了。
+
 - [ ] **Step 6: 用真实数据冒烟**
 
 Create `bench/scripts/tocSmoke.ts`：
 
 ```ts
 /**
- * 用真实 QASPER 数据建树并打印结构，人工核对。不属于单测。
+ * 用真实 QASPER **原始**数据建树并打印结构，人工核对。不属于单测。
+ *
+ * **刻意不读 `bench/datasets/qasper/qasper.jsonl`**，两个原因：
+ * 1) 那是已归一化的旧产物、不含节结构字段——`loadQasperDataset` 只做 JSON 解析，
+ *    不重跑 `normalizeQasperEntry`，所以 Step 5 加了字段它照样是 undefined；
+ * 2) 该文件被 .gitignore 忽略（`.gitignore:48`）、无从恢复，而重跑 fetch.ts 会覆写它。
+ *    它是全部既有基线结果所依据的语料，不能拿来做一次冒烟验证。
+ *
+ * 因此这里只从上游**只读**取 `full_text`，不写任何文件。建树只需要 `section_name`
+ * 与 `paragraphs`，直接调 `sectionsToPages` 即可：既不必复刻 `fetch.ts` 里的 qas
+ * 转置，也**不能** import `fetch.ts`——它有顶层副作用，一 import 就会拉取并覆写数据集。
  *
  * 逻辑包在 main() 里并统一 catch：这里只需要一个失败出口，出错即以退出码 1 结束。
  * 注意**不是**为了绕开转译限制——顶层 await 在 bench/ 下是可用的（bench/package.json
- * 是 "type": "module"，既有 bench/scripts/verifyTokenizer.ts 就在顶层 await；
- * 此处已实测通过）。写实现时别照抄一个不存在的约束。
- * 数据集路径走 loadQasperDataset，不自己拼——bench/src/paths.ts 的存在就是
- * 因为 `new URL(...).pathname` 会在含空格的路径上静默失效。
+ * 是 "type": "module"，既有 bench/scripts/verifyTokenizer.ts 就在顶层 await；此处已实测通过）。
  */
-import { loadQasperDataset } from '../src/datasets/qasper'
+import { sectionsToPages } from '../src/datasets/qasper'
 import { buildQasperTree } from '../src/toc/qasperTree'
 import type { TocNode } from '../../src/utils/tocTree'
+
+const ROWS_URL = 'https://datasets-server.huggingface.co/rows'
+const LIMIT = Number(process.env.QASPER_LIMIT ?? '60')
+
+interface RawRow {
+  id: string
+  full_text: { section_name: string[]; paragraphs: string[][] }
+}
+
+async function fetchRows(offset: number, length: number): Promise<RawRow[]> {
+  const url = `${ROWS_URL}?dataset=allenai%2Fqasper&config=qasper&split=validation`
+    + `&offset=${offset}&length=${length}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`QASPER 拉取失败 ${res.status}: ${(await res.text()).slice(0, 300)}`)
+  const data = await res.json() as { rows: Array<{ row: RawRow }> }
+  return data.rows.map(r => r.row)
+}
 
 function print(nodes: TocNode[], indent: string): void {
   for (const node of nodes) {
@@ -1389,31 +1417,59 @@ function print(nodes: TocNode[], indent: string): void {
   }
 }
 
+const depthOf = (node: TocNode): number =>
+  node.children.length === 0 ? node.depth : Math.max(...node.children.map(depthOf))
+
+interface Built {
+  id: string
+  sectionCount: number
+  tree: TocNode[]
+  synthesizedParents: number
+  droppedSections: number
+}
+
 async function main(): Promise<void> {
-  const samples = await loadQasperDataset()
-  console.log(`样本 ${samples.length} 篇`)
+  const rows: RawRow[] = []
+  for (let offset = 0; offset < LIMIT; offset += 100) {
+    rows.push(...await fetchRows(offset, Math.min(100, LIMIT - offset)))
+  }
+
   let withSections = 0
   let maxDepth = 0
-  for (const sample of samples) {
-    if (sample.sectionNames?.length) withSections += 1
-    for (const node of buildQasperTree({
-      sectionNames: sample.sectionNames ?? [],
-      sectionPages: sample.sectionPages ?? [],
-    }).tree) {
-      const depthOf = (n: TocNode): number => (n.children.length === 0 ? n.depth : Math.max(...n.children.map(depthOf)))
-      maxDepth = Math.max(maxDepth, depthOf(node))
+  let synthesized = 0
+  let dropped = 0
+  const invalid: string[] = []
+  const built: Built[] = []
+  for (const row of rows) {
+    const names = row.full_text.section_name
+    if (names.length > 0) withSections += 1
+    // 节结构非法是**设计内**的结果（整篇作废、不修补），真实论文里出现非相邻的
+    // 同名节完全可能。冒烟脚本必须把它统计出来而不是崩掉：这个数字直接决定树路由
+    // 在多少篇上根本用不上——那些篇会整篇回落平面检索，是结论的一部分。
+    try {
+      const { sectionPages } = sectionsToPages(names, row.full_text.paragraphs)
+      const result = buildQasperTree({ sectionNames: names, sectionPages })
+      synthesized += result.synthesizedParents
+      dropped += result.droppedSections
+      for (const node of result.tree) maxDepth = Math.max(maxDepth, depthOf(node))
+      built.push({
+        id: row.id, sectionCount: names.length, tree: result.tree,
+        synthesizedParents: result.synthesizedParents, droppedSections: result.droppedSections,
+      })
+    } catch (error) {
+      invalid.push(`${row.id}: ${(error as Error).message}`)
     }
   }
-  console.log(`带节结构的样本 ${withSections}/${samples.length}，最深 ${maxDepth} 层`)
+  console.log(`样本 ${rows.length} 篇，带节结构 ${withSections}/${rows.length}`)
+  console.log(`最深 ${maxDepth} 层，合成父节点 ${synthesized}，丢弃节 ${dropped}`)
+  console.log(`节结构非法 ${invalid.length} 篇（这些篇整篇回落平面检索）`)
+  for (const line of invalid.slice(0, 10)) console.log(`  ${line}`)
 
-  for (const sample of samples.slice(0, 3)) {
-    console.log(`\n--- ${sample.title.slice(0, 60)} (伪页 ${sample.pages.length})`)
-    const { tree, synthesizedParents, droppedSections } = buildQasperTree({
-      sectionNames: sample.sectionNames ?? [],
-      sectionPages: sample.sectionPages ?? [],
-    })
-    print(tree, '  ')
-    console.log(`  合成父节点 ${synthesizedParents}，丢弃节 ${droppedSections}`)
+  // 从**已建成的**里取前 3 篇：头 3 篇里若有一篇结构非法，未过滤就会让整个冒烟崩掉
+  for (const entry of built.slice(0, 3)) {
+    console.log(`\n--- ${entry.id}（节 ${entry.sectionCount}）`)
+    print(entry.tree, '  ')
+    console.log(`  合成父节点 ${entry.synthesizedParents}，丢弃节 ${entry.droppedSections}`)
   }
 }
 
@@ -1422,7 +1478,11 @@ main().catch(error => { console.error(error); process.exit(1) })
 
 Run: `npx tsx bench/scripts/tocSmoke.ts`
 
-Expected: 打印「带节结构的样本 `60/60`」——节结构是 QASPER 原始数据的一部分，本地 60 篇全都有（100 篇抽样实测 100/100 覆盖）。若显示 `0/60`，说明 Step 5 的字段没接上。最深应为 3 层（实测深度分布 1 层:68 / 2 层:17 / 3 层:15，与「约三分之二是单层树」一致）。随后打印的三棵树里，`pages` 必须都是合法伪页号且带内容的节点非空。
+Expected: 打印「带节结构 `60/60`」——节结构是 QASPER 原始数据的一部分，60 篇全都有（100 篇抽样实测 100/100 覆盖）。**若显示 `0/60`，说明 `full_text` 没取到，与 Step 5 无关**（本步根本不读归一化产物）。最深应为 3 层（实测深度分布 1 层:68 / 2 层:17 / 3 层:15，与「约三分之二是单层树」一致）。
+
+「节结构非法 N 篇」是本步**最有价值的观测**：它直接量化树路由覆盖不到的篇数，请把 N 连同前 10 条原因记下来写进实验报告——这批篇会整篇回落平面检索，是结论的一部分，不是脚本故障。随后打印的三棵树里，`pages` 必须都是合法伪页号，且 `synthesizedParents` 与树形自洽（页面里只有标题的导航节应为空 `pages`）。
+
+本步需要网络（对 datasets-server 的**只读**拉取，不写任何文件）。若取不到数据，如实报告并停下——**不要**改成去读本地 `qasper.jsonl`，那是被 gitignore 忽略、无从恢复的既有语料。
 
 - [ ] **Step 7: 跑全量测试与类型检查**
 
