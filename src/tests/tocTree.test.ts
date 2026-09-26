@@ -153,6 +153,9 @@ describe('traverseWithJudge —— 相对阈值', () => {
   it('每层存活数超过 topN 时按分数取前 N（同分保持文档顺序）', async () => {
     const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.5, C: 0.5 }), { alpha: 0, topN: 2 })
     expect(sel.selected.map(n => n.title)).toEqual(['A', 'B'])
+    // survivors 是切片**前**的存活数，kept 是切片**后**留下的。全文件只有这个用例会
+    // 真的截断——不在这里钉住，把 kept 写成 survivingCount 也不会有任何用例失败。
+    expect(sel.layers[0]).toMatchObject({ survivors: 3, kept: 2 })
   })
 
   it('layers 记录每一层的候选数、最高分、阈值与留存数', async () => {
@@ -274,6 +277,21 @@ describe('traverseWithJudge —— 父节点规则', () => {
     expect(sel.selected.map(n => n.title)).toEqual(['A'])
     expect(sel.emptySelectionFallback).toBe(true)
     expect(sel.emptyContentSkipped).toBe(1)   // 只有 D 存活且无内容
+  })
+
+  it('空选择回落取**文档序第一个**非空节点，不是最后一个', async () => {
+    // 既有回落用例里只有一个非空节点，first 与 last 恰好是同一个，分辨不出两种实现。
+    // 这里放两个非空节点，且让**先序在前**的那个页号更大——只有排序真的按文档序
+    // 取首个才会得到页 5；若实现取的是最后一个，会拿到页 1 而用例失败。
+    const tree: TocNode[] = [
+      node({ id: 'x', title: 'X', pages: [] }),
+      node({ id: 'a', title: 'A', pages: [5] }),
+      node({ id: 'b', title: 'B', pages: [1] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ X: 0.9, A: 0.1, B: 0.1 }), { alpha: 1, topN: 5 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A'])
+    expect(sel.selected[0].pages).toEqual([5])
+    expect(sel.emptySelectionFallback).toBe(true)
   })
 
   it('有非空节点存活时不触发兜底', async () => {
