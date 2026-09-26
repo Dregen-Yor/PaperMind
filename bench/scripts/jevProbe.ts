@@ -33,7 +33,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { benchPath } from '../src/paths'
 import { fetchQasperRows } from '../src/toc/qasperRows'
-import { normalizeQasperEntry, loadQasperDataset, type QasperEntry } from '../src/datasets/qasper'
+import { normalizeQasperEntry, type QasperEntry } from '../src/datasets/qasper'
 import { aggregateProbe, failureReason, type ProbeObservation, type ProbeSkipAccount, type ProbeSummary }
   from '../src/toc/probeMetrics'
 import { buildQasperTree } from '../src/toc/qasperTree'
@@ -153,25 +153,22 @@ async function loadRows(limit: number, useCache: boolean): Promise<RawUpstreamRo
 // ———————————————————————————— 保真门 ————————————————————————————
 
 /**
- * 加载冻结记录，供保真校验使用。优先走任务指定的 `loadQasperDataset()`。
+ * 读冻结记录供保真校验：**直接逐行 JSON.parse**，刻意不走 `loadQasperDataset()`。
  *
- * **本机例外**：本地冻结 jsonl 早于 2026-09-23 新增的「版本化参考答案」schema，
- * `loadQasperDataset` 的那条守卫会拒绝它——而该守卫服务于 Q 指标口径，与 evidence
- * 映射保真**无关**。仅此一种情况回落到直接逐行解析同一份冻结文件；其余错误
- *（文件缺失等）一律照抛。回落只改「怎么读」，比对内容一字未动。
+ * 本机冻结 jsonl 是 2026-09-04 的旧格式（无 `qualityAnswers`），而 `loadQasperDataset`
+ * 自 2026-09-23 起硬性要求版本化参考答案——它在 `src/datasets/qasper.ts:214-218` 直接抛错，
+ * 于是当前代码**根本跑不了 `--dataset qasper`**。那条守卫属 Q 指标口径，与 evidence 映射
+ * 保真无关；而保真要的 `evidencePages` / `evidenceMapping` / `unanswerable` 本题对象上都有。
+ *
+ * 绝不重跑 `fetch.ts` 覆写该文件——它被 `.gitignore` 忽略、是全部既有基线的语料，覆写会换掉 gold 页。
  */
 async function loadFrozenForFidelity(): Promise<EvalSample[]> {
-  try {
-    return await loadQasperDataset()
-  } catch (error) {
-    const message = (error as Error).message
-    if (!message.includes('缺少版本化参考答案')) throw error
-    console.warn('⚠ 本机冻结 jsonl 缺少版本化参考答案（旧 schema），loadQasperDataset 无法直接加载。')
-    console.warn('  该守卫属 Q 指标口径、与 evidence 保真无关，改为直接解析同一份冻结文件（比对内容不变）。')
-    const path = benchPath(import.meta.url, '../datasets/qasper/qasper.jsonl')
-    const content = await readFile(path, 'utf-8')
-    return content.split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as EvalSample)
-  }
+  const path = benchPath(import.meta.url, '../datasets/qasper/qasper.jsonl')
+  const content = await readFile(path, 'utf-8')
+  return content
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .map(line => JSON.parse(line) as EvalSample)
 }
 
 /**
@@ -314,7 +311,9 @@ async function main(): Promise<void> {
 
   // ——— 硬门：保真校验必须先于任何指标 ———
   const fidelity = await assertFidelity(samples)
-  console.log(`[保真校验通过] 比对论文 ${fidelity.papers} 篇 / 题目 ${fidelity.questions} 道，全部与冻结记录一致\n`)
+  console.log(`[保真校验通过] 比对论文 ${fidelity.papers} 篇 / 题目 ${fidelity.questions} 道，全部与冻结记录一致`)
+  console.log('  冻结记录来源：bench/datasets/qasper/qasper.jsonl（2026-09-04 旧格式，直接解析；')
+  console.log('                其缺 qualityAnswers，loadQasperDataset 的 Q 参考守卫不适用于本诊断链路）\n')
 
   // ——— 建树与逐题分类（与网格点无关，只做一次）———
   let attemptedQuestions = 0
@@ -339,12 +338,15 @@ async function main(): Promise<void> {
   const eligible: Eligible[] = []
   let builtPapers = 0
   for (const sample of samples) {
+    // 归一化上游行必然产出 sectionNames / sectionPages；缺失即取数路径出错。
+    // 绝不用 `?? []` 兜底：那会静默建出空树，而 traverseWithJudge 对空树立刻返回空选择、
+    // 判定器一次都不被调用，脚本却照常 exit 0——正是本探针最该防的假绿。
+    if (!sample.sectionNames || !sample.sectionPages) {
+      throw new Error(`论文 ${sample.paperId} 缺少 sectionNames/sectionPages：节结构必须来自归一化的上游行`)
+    }
     let tree: Eligible['tree']
     try {
-      tree = buildQasperTree({
-        sectionNames: sample.sectionNames ?? [],
-        sectionPages: sample.sectionPages ?? [],
-      }).tree
+      tree = buildQasperTree({ sectionNames: sample.sectionNames, sectionPages: sample.sectionPages }).tree
     } catch (error) {
       // 建树失败按原因计数并整篇跳过，绝不让单篇拖垮整轮
       const reason = failureReason(error)
