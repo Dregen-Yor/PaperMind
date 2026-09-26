@@ -10,7 +10,14 @@ export const PSEUDO_PAGE_CHARS = 3000
 
 // DEFAULT_PATH 必须走 bench/src/paths.ts 的 benchPath（fileURLToPath），
 // 不能用 new URL(...).pathname——后者保留百分号转义，路径含空格时静默失效（Task 2 I-5 的教训）
-const DEFAULT_PATH = () => benchPath(import.meta.url, '../../datasets/qasper/qasper.jsonl')
+// QASPER_PATH 可指向**补齐格式的同切片副本**（见 bench/datasets/qasper/fetch.ts 的 QASPER_OUT）。
+// 为什么需要它：磁盘上那份 `qasper.jsonl` 是 2026-09-04 的旧格式，缺 `qualityAnswers`，
+// 下面 `loadQasperDataset` 的校验会直接抛错——即当前代码在默认路径上**跑不了任何 qasper 评测**。
+// 副本必须由保真门（逐篇 `pages`、逐题 `evidencePages`/`unanswerable`/`evidenceMapping`
+// 与旧文件全一致）证明是**同一切片**才可用；切片不变则冻结纪律不受影响。
+// 不默认指过去、也不覆盖旧文件：旧文件 gitignored，覆写后无法从 git 恢复。
+const DEFAULT_PATH = () => process.env.QASPER_PATH
+  ?? benchPath(import.meta.url, '../../datasets/qasper/qasper.jsonl')
 
 /** QASPER 原始条目（HuggingFace allenai/qasper 的字段布局）。 */
 export interface QasperEntry {

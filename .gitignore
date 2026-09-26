@@ -45,7 +45,7 @@ bench/cache/
 bench/results/
 bench/minibatch/
 papermind-speed-demo*.json
-bench/datasets/qasper/qasper.jsonl
+bench/datasets/qasper/*.jsonl
 bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/semantic-headings.pdf

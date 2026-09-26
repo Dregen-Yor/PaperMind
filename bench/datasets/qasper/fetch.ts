@@ -8,7 +8,13 @@ const DATASET = 'allenai/qasper'
 const CONFIG = 'qasper'
 const SPLIT = 'validation'
 const PAGE_SIZE = 100
-const OUT_PATH = () => benchPath(import.meta.url, './qasper.jsonl')
+/**
+ * 输出路径。默认仍是原位——但**补齐格式的副本务必用 `QASPER_OUT` 指到新文件**：
+ * 直接覆写会换掉已记录基线所依赖的 gold 页，而该文件是 gitignored 的，
+ * 覆写之后**无法从 git 恢复**。副本生成后必须先过保真门（逐篇 `pages`、逐题
+ * `evidencePages` 与冻结文件全一致）才能拿去做对照。
+ */
+const OUT_PATH = () => process.env.QASPER_OUT ?? benchPath(import.meta.url, './qasper.jsonl')
 
 /** 目标论文篇数；QASPER validation split 共 281 篇。 */
 const LIMIT = Number(process.env.QASPER_LIMIT ?? '60')
