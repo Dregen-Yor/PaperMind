@@ -40,11 +40,16 @@ export function defaultSpawn(opts: MlxJudgeOptions = {}): SidecarSpawn {
  * 会让 Node 事件循环一直活着、脚本挂住不退出。只返回 `EvidenceJudge` 就没法关。
  */
 export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge & { close: () => Promise<void> } {
+  const batchSize = opts.batchSize ?? 16
+  // 刻意抛错而非 `Math.max(1, …)` 夹紧：0 会让步进永不前进、负数反向走、非整数切出小数下标，
+  // 三种都会让 `judge()` 静默卡死或给出错位切片。调用方要的是 0 就该当场听到，而不是悄悄拿到 1。
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new RangeError(`batchSize 必须是正整数，收到 ${batchSize}`)
+  }
   const inner = new SidecarJudge({
     spawn: defaultSpawn(opts),
     ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
   })
-  const batchSize = opts.batchSize ?? 16
   return {
     async judge(input: JudgeInput): Promise<number[]> {
       const out: number[] = []
