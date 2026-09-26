@@ -4,7 +4,7 @@ import { sectionsToPages, PSEUDO_PAGE_CHARS } from '../datasets/qasper'
 describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
   it('节的页区间覆盖其内容真正落入的伪页', () => {
     const names = ['Intro', 'Method']
-    // 每段 1200 字符：Intro 占 p0，Method 起于 p0 尾或 p1（由打包决定）
+    // 每段 1200 字符：标题 + 两段共约 2415 字符 < 3000，两节都落在 p0
     const sections = [['x'.repeat(1200)], ['y'.repeat(1200)]]
     const { pages, sectionPages } = sectionsToPages(names, sections)
     expect(sectionPages).toHaveLength(2)
@@ -37,8 +37,11 @@ describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
 
   it('不改变既有输出：pages 与 paragraphToPage 对固定输入产出确定值', () => {
     // 必须拿**字面量**钉。比两次调用（`expect(f(x)).toBe(f(x))`）是拿函数与自己比，
-    // 名字再像「逐字不变」也不可能失败。下面的期望值是本次改动前实现的实际输出：
-    // 封页条件、标题与首段的耦合、段落切片任意一处被改都会让它变红。
+    // 名字再像「逐字不变」也不可能失败。下面的期望值是本次改动前实现的实际输出。
+    // 这份输入约 24 字符、全部落在单页，所以只钉得住**段落切片与标题拼接**的产物：
+    // 切片改成从 0 开始、标题不再拼接等会让它变红。它**钉不住**封页条件
+    //（`PSEUDO_PAGE_CHARS` 提到 10000、把 `>` 改成 `>=` 都照绿——封页另见下面的
+    //「跨封页边界」用例），也钉不住「标题与首段同页」的耦合（拆成两次 append 输出不变）。
     const { pages, paragraphToPage } = sectionsToPages(['A', 'B', 'C'], [['a1', 'a2'], ['b1'], ['c1', 'c2', 'c3']])
     expect(paragraphToPage).toEqual([0, 0, 0, 0, 0, 0])
     expect(pages).toEqual(['A\n\na1\n\na2\n\nB\n\nb1\n\nC\n\nc1\n\nc2\n\nc3'])
@@ -54,5 +57,15 @@ describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
     expect(paragraphToPage).toEqual([0, 1])
     expect(sectionPages).toEqual([[0], [1]])
     expect(pages[1]).toBe(`Method\n\n${'b'.repeat(200)}`)
+  })
+
+  it('一节跨多页时记录完整页区间，不止首页或末页', () => {
+    // 全文件只有这条用例让 sectionPages 的条目长度 > 1。若 note() 改造得只记首次
+    // 或只记末次（例如 touched = [pages.length]），其余用例全绿——而「页区间」
+    // 正是这个返回值的全部意义。
+    const { pages, paragraphToPage, sectionPages } = sectionsToPages(['S'], [['x'.repeat(2000), 'y'.repeat(2000)]])
+    expect(pages).toHaveLength(2)
+    expect(paragraphToPage).toEqual([0, 1])
+    expect(sectionPages).toEqual([[0, 1]])
   })
 })

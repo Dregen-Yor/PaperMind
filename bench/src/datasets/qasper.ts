@@ -68,7 +68,10 @@ export function sectionsToPages(sectionNames: string[], sections: string[][]): {
   pages: string[]
   paragraphToPage: number[]
   /**
-   * 每节内容实际落到的伪页号，升序。与 sectionNames 同序同长；空数组表示该节无内容。
+   * 每节内容实际落到的伪页号，升序。与 sectionNames 同序同长。空数组表示该节没有可归属的
+   * 内容页：既包括「只有标题、没有段落」的导航节点，也包括标题为空白且段落少于两段的节
+   * （标题为空时两个标题分支都不执行，段落循环又从下标 1 开始，整节既不产文本也不记页；
+   * 标题为空、段落 ≥2 的节则只静默丢掉首段）。这是既有的边界行为，本次改动未涉及。
    * 由下面这段打包循环**顺手记录**，不另起一套实现——两套实现会在封页边界上错开一页，
    * 而指标照常输出数字，是静默失真。
    */
@@ -89,7 +92,8 @@ export function sectionsToPages(sectionNames: string[], sections: string[][]): {
     bufferLen += text.length
   }
   // 必须在每次 append **之后**调用：append 可能先封页，此时 pages.length 才是
-  // 这份内容真正落到的页号。封页前后的 pages.length 不同，顺序错了就整体偏一页。
+  // 这份内容真正落到的页号。封页前后的 pages.length 不同；顺序错了，跨封页边界的
+  // 那些记录会偏一页。
   const note = (touched: number[]) => {
     const page = pages.length
     if (touched[touched.length - 1] !== page) touched.push(page)
