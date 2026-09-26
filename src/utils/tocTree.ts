@@ -82,7 +82,7 @@ export interface TocSelection {
    * 调用方要按 `depth` 自行聚合。
    */
   layers: LayerDiagnostic[]
-  /** 因 pages 为空被排除出 selected 的节点数 */
+  /** **存活**且因 pages 为空而未被收为证据的节点数；被阈值/topN 淘汰的空节点不计入 */
   emptyContentSkipped: number
   /** 存活节点全无内容、于是回落到文档首个非空节点时置位 */
   emptySelectionFallback: boolean
@@ -142,8 +142,12 @@ function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
  * 未校准的概率免疫——这正好对症该 checkpoint 的温度被 clamp 那条警告。
  *
  * 空内容过滤必须发生在**递归内部**，不能放到最后统一过滤：放到最后的话，
- * 下探会「看起来有收获」（返回一批马上要被丢掉的空节点）而父节点兜底永不触发，
- * 最终静默产出空上下文。
+ * 下探会「看起来有收获」（返回一批马上要被丢掉的空节点），父节点兜底永不触发，
+ * 于是一个子节点全为空的父节点会被丢掉。注意损失是**静默的部分丢失**，不是空上下文
+ * ——只要别的分支还有内容，空选择回落就不会触发，丢掉的那个父节点也就没有任何信号。
+ *
+ * 另注：topN 按分数截断发生在内容过滤**之前**，因此一层可能把配额花在空导航节点上、
+ * 颗粒无收，而分数略低的有内容节点已被截掉。这是刻意的（先按相关性取前 N），但值得知道。
  */
 export async function traverseWithJudge(
   tree: TocNode[],

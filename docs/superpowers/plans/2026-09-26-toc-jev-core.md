@@ -522,7 +522,7 @@ export interface TocSelection {
    * 调用方要按 `depth` 自行聚合。
    */
   layers: LayerDiagnostic[]
-  /** 因 pages 为空被排除出 selected 的节点数 */
+  /** **存活**且因 pages 为空而未被收为证据的节点数；被阈值/topN 淘汰的空节点不计入 */
   emptyContentSkipped: number
   /** 存活节点全无内容、于是回落到文档首个非空节点时置位 */
   emptySelectionFallback: boolean
@@ -652,7 +652,7 @@ git commit -m "feat(jev): traverse the tree with a layer-relative threshold"
 - Modify: `src/utils/tocTree.ts`
 - Test: `src/tests/tocTree.test.ts`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 追加到 `src/tests/tocTree.test.ts`：
 
@@ -678,6 +678,25 @@ describe('traverseWithJudge —— 父节点规则', () => {
     const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0.9, A1: 0.8 }), { alpha: 0, topN: 5 })
     expect(sel.selected.map(n => n.title)).toEqual(['A'])
     expect(sel.emptyContentSkipped).toBe(1)
+    // 兜底是「父节点自己顶上」，不是「空选择回落」。少了这一条，把过滤挪到最后统一做
+    // 的实现会由空选择回落交出同一个 ['A']，用例照样全绿——它唯一能分辨的观测量就是这个标志。
+    expect(sel.emptySelectionFallback).toBe(false)
+  })
+
+  it('兜底的父节点不因别的分支有内容而被丢掉', async () => {
+    // 「过滤必须发生在递归内部」的**唯一**判据。若把空内容过滤挪到最后统一做：
+    // A 的下探会返回 [A1]（非空）→ A 自己永不兜底、被静默丢掉；而 B 仍有内容，
+    // 空选择回落不会触发，损失就此无声。上面那条只有 A 一个分支，兜底与回落恰好
+    // 给出同一个节点，分辨不出两种实现——必须有第二个有内容的分支才拆得开。
+    const tree: TocNode[] = [
+      node({ id: 'a', title: 'A', pages: [7], children: [
+        node({ id: 'a1', title: 'A1', path: ['A'], depth: 1, pages: [] }),
+      ] }),
+      node({ id: 'b', title: 'B', pages: [8] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0.9, A1: 0.8, B: 0.7 }), { alpha: 0, topN: 9 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A', 'B'])
+    expect(sel.emptyContentSkipped).toBe(1)
   })
 
   it('无内容的叶节点绝不被收为证据', async () => {
@@ -688,6 +707,24 @@ describe('traverseWithJudge —— 父节点规则', () => {
     const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0, D: 0.9 }), { alpha: 0, topN: 5 })
     expect(sel.selected.map(n => n.title)).toEqual(['A'])
     expect(sel.emptyContentSkipped).toBe(1)
+    // 跳过了空节点但仍有内容存活 → 不该置位。否则 `emptySelectionFallback = skipped > 0`
+    // 这类写反的实现会蒙混过关（它在「全空」用例上恰好也对）。
+    expect(sel.emptySelectionFallback).toBe(false)
+  })
+
+  it('空父节点的子层也全空时：两者都计数，绝不以空节点收尾', async () => {
+    // 钉住 `else if (node.pages.length === 0) emptyContentSkipped += 1` 那一支：
+    // 没有这条用例，把它改成 `collected.push(node)` 会让一个 pages 为空的父节点
+    // 混进 selected，而其余用例全绿——「无内容节点绝不被收为证据」就此失守。
+    const tree: TocNode[] = [
+      node({ id: 'p', title: 'P', pages: [], children: [
+        node({ id: 'p1', title: 'P1', path: ['P'], depth: 1, pages: [] }),
+      ] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ P: 0.9, P1: 0.8 }), { alpha: 0, topN: 5 })
+    expect(sel.selected).toEqual([])
+    expect(sel.emptyContentSkipped).toBe(2)   // 子节点 1 次 + 父节点兜底失败 1 次
+    expect(sel.emptySelectionFallback).toBe(false)   // 树里没有任何内容节点，无从回落
   })
 
   it('存活节点全无内容时，回落到文档首个非空节点并置位', async () => {
@@ -707,10 +744,15 @@ describe('traverseWithJudge —— 父节点规则', () => {
     expect(sel.emptySelectionFallback).toBe(false)
   })
 
-  it('selected 按首个页号升序，与文档顺序一致', async () => {
-    const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.9, A2: 0.9, B: 0.9, B1: 0.9 }), { alpha: 0, topN: 9 })
-    const pages = sel.selected.map(n => n.pages[0])
-    expect(pages).toEqual([...pages].sort((a, b) => a - b))
+  it('selected 按首个页号升序：先序与页序相反时排序真的起作用', async () => {
+    // 拿 NESTED 钉不住排序——它的先序本来就升序，且没有任何 topN 重排，把 sort 整个
+    // 删掉也照过。这里刻意让先序是 [X(5), Y(1)]，只有真的排过序才会得到 [1, 5]。
+    const tree: TocNode[] = [
+      node({ id: 'x', title: 'X', pages: [5] }),
+      node({ id: 'y', title: 'Y', pages: [1] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ X: 0.9, Y: 0.9 }), { alpha: 0, topN: 9 })
+    expect(sel.selected.map(n => n.pages[0])).toEqual([1, 5])
   })
 
   it('父节点下探时 layers 记录两层', async () => {
@@ -721,23 +763,23 @@ describe('traverseWithJudge —— 父节点规则', () => {
 })
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `npx vitest run src/tests/tocTree.test.ts -t "父节点规则"`
 
-Expected: **4 个失败、3 个通过**。
+Expected: **5 个失败、4 个通过**。
 
-失败的是「下探颗粒无收时父节点兜底」「无内容的叶节点绝不被收为证据」「存活节点全无内容时回落」「selected 按首个页号升序」——Task 3 把 `pages` 为空的节点原样收了进来。典型报错：
+失败的是「下探颗粒无收时父节点兜底」「兜底的父节点不因别的分支有内容而被丢掉」「无内容的叶节点绝不被收为证据」「空父节点的子层也全空时」「存活节点全无内容时回落」。典型报错：
 
 ```
 AssertionError: expected [ 'A1' ] to deeply equal [ 'A' ]
 ```
 
-「selected 按首个页号升序」那条会以更隐晦的方式失败：空 `pages` 让 `a.pages[0] - b.pages[0]` 得到 `NaN`，排序结果不稳定——**这正是必须先写测试的原因**，这类错误不会报错，只会悄悄产出乱序上下文。
+通过的是「下探的父节点本身不作为证据」（Task 3 已经会下探）、「有非空节点存活时不触发兜底」「selected 按首个页号升序」「父节点下探时 layers 记录两层」。若前四条里任何一条没有失败，说明 Task 3 定义的那个 `NESTED` fixture 与预期不符，先回去修它再继续。
 
-通过的是「下探的父节点本身不作为证据」（Task 3 已经会下探）、「有非空节点存活时不触发兜底」（`emptySelectionFallback` 恒为 `false`）、「父节点下探时 layers 记录两层」（与空内容无关）。若这三条里任何一条失败，说明 Task 3 定义的那个 `NESTED` fixture 与预期不符，先回去修它再继续。
+> **为什么「selected 按首个页号升序」不会失败**（初稿曾断言它会失败，是错的）：`NESTED` 的每个节点都带非空 `pages`，其中唯一可能为空的候选是父节点 A/B，而它们有子节点、会下探，根本走不到最后那次 `sort`，因此 `a.pages[0] - b.pages[0]` 不会算出 `NaN`。这条用例实际只是一致性校验，钉不住 `NaN` 失序。Task 4 之后空 `pages` 节点在下探内部就被滤掉，到不了 `sort`，那个隐患是**结构上消除**的，不是被这条用例钉住的。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 替换 `traverseWithJudge` 中的 `descend` 循环体与返回值。
 
@@ -795,31 +837,43 @@ Task 3 在 `collected.push(...(fromChildren.length > 0 ? fromChildren : [node]))
 
 ```ts
  * 空内容过滤必须发生在**递归内部**，不能放到最后统一过滤：放到最后的话，
- * 下探会「看起来有收获」（返回一批马上要被丢掉的空节点）而父节点兜底永不触发，
- * 最终静默产出空上下文。
+ * 下探会「看起来有收获」（返回一批马上要被丢掉的空节点），父节点兜底永不触发，
+ * 于是一个子节点全为空的父节点会被丢掉。注意损失是**静默的部分丢失**，不是空上下文
+ * ——只要别的分支还有内容，空选择回落就不会触发，丢掉的那个父节点也就没有任何信号。
+ *
+ * 另注：topN 按分数截断发生在内容过滤**之前**，因此一层可能把配额花在空导航节点上、
+ * 颗粒无收，而分数略低的有内容节点已被截掉。这是刻意的（先按相关性取前 N），但值得知道。
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run src/tests/tocTree.test.ts`
-Expected: PASS，27 个用例全绿（20 + 本任务新增 7）。
+Expected: PASS，29 个用例全绿（20 + 本任务新增 9）。
 
-- [ ] **Step 5: 检查覆盖**
+- [x] **Step 5: 检查覆盖**
 
 Run: `npx vitest run src/tests/tocTree.test.ts --coverage.enabled --coverage.include='src/utils/tocTree.ts'`
 Expected: PASS，`tocTree.ts` 行覆盖 ≥ 90%。
 
-- [ ] **Step 6: 确认纯函数没被污染**
+> **本机跑不了**：`@vitest/coverage-v8` 未安装，该命令直接报 `MISSING DEPENDENCY`，行覆盖率数字拿不到。不为一个诊断步骤新增依赖。行覆盖率本身也不足以说明问题——真正要证明的是**关键分支是活的**，这一点用变异检验更有力：本任务交付时逐条验过 `depth + 1`、`collected.push(...fromChildren)`、空父节点兜底失败三处，改坏各自都有具名用例变红。
+
+- [x] **Step 6: 确认纯函数没被污染**
 
 Run: `grep -n "pdfjs\|node:fs\|node:child_process\|fetch(" src/utils/tocTree.ts src/utils/evidenceJudge.ts`
 Expected: **无输出**。这两个文件必须不认识 PDF、文件系统、子进程与网络——这是 §1 解耦设计的全部意义，也是单测能在任何机器上跑的前提。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/utils/tocTree.ts src/tests/tocTree.test.ts
 git commit -m "feat(jev): skip contentless nodes and fall back when nothing is selectable"
 ```
+
+> **复盘（质量评审后）**：本任务实际落了两个提交——`52bd431` 是上面的实现，随后质量评审判定 **NOT APPROVED**：把整份实现按评审给的方式回归（把空内容过滤从递归内部挪到最后统一做），**7 条用例全绿**，一条都没抓住。根因是空选择回落在每一种「全空」场景里都恰好补出同一个结果，把两种实现抹平了；唯一能拆开它们的形状（一个子节点全为空的存活父节点 **加上** 另一条有内容的分支）当时没有任何用例。
+>
+> 评审还指出三处：`selected 按首个页号升序` 拿先序本就升序的 `NESTED` 做 fixture，等于在断言「数组等于自己排序后的样子」，把 `sort` 删掉也照过；`emptyContentSkipped` 那句注释比实际语义宽（被阈值/topN 淘汰的空节点并不计入）；函数文档里「最终静默产出空上下文」是**错的**——回落保证上下文非空，真实损失是**静默的部分丢失**。
+>
+> 随后补了 2 条用例（混合分支兜底、空父节点子层全空），给两条已有用例补上 `emptySelectionFallback` 断言，把排序用例换成先序与页序相反的 fixture，并订正两处注释。回归检验：同一次「挪到最后」的变异现在让 **3 条**用例变红；`else if (node.pages.length === 0)` 改成 `collected.push(node)` 让另外 **1 条**变红。
 
 ---
 
@@ -940,8 +994,11 @@ export function sectionsToPages(sectionNames: string[], sections: string[][]): {
       note(touched)
       paragraphToPage.push(pages.length)
     } else if (heading) {
+      // 只带标题、没有段落的节是**导航节点**：标题照样进页面正文，但本节不记为
+      // 「携带内容」——sectionPages 留空数组，Task 6 据此把它建成 pages: [] 的节点。
+      // 这里刻意**不**调 note()：note 会把该页记成本节的内容页，空节就变成有内容的
+      // 节点，于是 tocNodePageSpan 会让一个只有标题的节把整页当成自己的证据。
       append(heading)
-      note(touched)
     }
     for (const paragraph of paragraphs.slice(firstParagraph === undefined ? 0 : 1)) {
       append(paragraph)

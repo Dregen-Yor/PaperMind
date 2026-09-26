@@ -214,6 +214,26 @@ describe('traverseWithJudge —— 父节点规则', () => {
     const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0.9, A1: 0.8 }), { alpha: 0, topN: 5 })
     expect(sel.selected.map(n => n.title)).toEqual(['A'])
     expect(sel.emptyContentSkipped).toBe(1)
+    // 兜底是「父节点自己顶上」，不是「空选择回落」。少了这一条，把过滤挪到最后统一做
+    // 的实现会由空选择回落交出同一个 ['A']，用例照样全绿——它唯一能分辨的观测量就是这个标志。
+    expect(sel.emptySelectionFallback).toBe(false)
+  })
+
+  it('兜底的父节点不因别的分支有内容而被丢掉', async () => {
+    // 「过滤必须发生在递归内部」的**唯一**判据。若把空内容过滤挪到最后统一做：
+    // A 的下探会返回 [A1]（非空）→ A 自己永不兜底、被静默丢掉；而 B 仍有内容，
+    // 空选择回落不会触发，损失就此无声。上面那条只有 A 一个分支，兜底与回落恰好
+    // 给出同一个节点，分辨不出两种实现——必须有第二个有内容的分支才拆得开。
+    const tree: TocNode[] = [
+      node({ id: 'a', title: 'A', pages: [7], children: [
+        node({ id: 'a1', title: 'A1', path: ['A'], depth: 1, pages: [] }),
+      ] }),
+      node({ id: 'b', title: 'B', pages: [8] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0.9, A1: 0.8, B: 0.7 }), { alpha: 0, topN: 9 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A', 'B'])
+    expect(sel.emptyContentSkipped).toBe(1)
+    expect(sel.emptySelectionFallback).toBe(false)
   })
 
   it('无内容的叶节点绝不被收为证据', async () => {
@@ -224,6 +244,24 @@ describe('traverseWithJudge —— 父节点规则', () => {
     const sel = await traverseWithJudge(tree, 'q', fixedJudge({ A: 0, D: 0.9 }), { alpha: 0, topN: 5 })
     expect(sel.selected.map(n => n.title)).toEqual(['A'])
     expect(sel.emptyContentSkipped).toBe(1)
+    // 跳过了空节点但仍有内容存活 → 不该置位。否则 `emptySelectionFallback = skipped > 0`
+    // 这类写反的实现会蒙混过关（它在「全空」用例上恰好也对）。
+    expect(sel.emptySelectionFallback).toBe(false)
+  })
+
+  it('空父节点的子层也全空时：两者都计数，绝不以空节点收尾', async () => {
+    // 钉住 `else if (node.pages.length === 0) emptyContentSkipped += 1` 那一支：
+    // 没有这条用例，把它改成 `collected.push(node)` 会让一个 pages 为空的父节点
+    // 混进 selected，而其余用例全绿——「无内容节点绝不被收为证据」就此失守。
+    const tree: TocNode[] = [
+      node({ id: 'p', title: 'P', pages: [], children: [
+        node({ id: 'p1', title: 'P1', path: ['P'], depth: 1, pages: [] }),
+      ] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ P: 0.9, P1: 0.8 }), { alpha: 0, topN: 5 })
+    expect(sel.selected).toEqual([])
+    expect(sel.emptyContentSkipped).toBe(2)   // 子节点 1 次 + 父节点兜底失败 1 次
+    expect(sel.emptySelectionFallback).toBe(false)   // 树里没有任何内容节点，无从回落
   })
 
   it('存活节点全无内容时，回落到文档首个非空节点并置位', async () => {
@@ -243,10 +281,15 @@ describe('traverseWithJudge —— 父节点规则', () => {
     expect(sel.emptySelectionFallback).toBe(false)
   })
 
-  it('selected 按首个页号升序，与文档顺序一致', async () => {
-    const sel = await traverseWithJudge(NESTED(), 'q', fixedJudge({ A: 0.9, A1: 0.9, A2: 0.9, B: 0.9, B1: 0.9 }), { alpha: 0, topN: 9 })
-    const pages = sel.selected.map(n => n.pages[0])
-    expect(pages).toEqual([...pages].sort((a, b) => a - b))
+  it('selected 按首个页号升序：先序与页序相反时排序真的起作用', async () => {
+    // 拿 NESTED 钉不住排序——它的先序本来就升序，且没有任何 topN 重排，把 sort 整个
+    // 删掉也照过。这里刻意让先序是 [X(5), Y(1)]，只有真的排过序才会得到 [1, 5]。
+    const tree: TocNode[] = [
+      node({ id: 'x', title: 'X', pages: [5] }),
+      node({ id: 'y', title: 'Y', pages: [1] }),
+    ]
+    const sel = await traverseWithJudge(tree, 'q', fixedJudge({ X: 0.9, Y: 0.9 }), { alpha: 0, topN: 9 })
+    expect(sel.selected.map(n => n.pages[0])).toEqual([1, 5])
   })
 
   it('父节点下探时 layers 记录两层', async () => {
