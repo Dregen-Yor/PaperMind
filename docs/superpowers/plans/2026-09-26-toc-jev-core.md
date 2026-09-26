@@ -1845,7 +1845,7 @@ printf '%s\n' '{"id":1,"query":"How many attention heads does the Transformer us
   | models/laya/.venv/bin/python bench/src/jev/sidecar.py models/laya/laya-mlx
 ```
 
-Expected: 一行 JSON，`scores` 两项且第一项**明显高于**第二项（探针实测同一节点 0.1490 vs 掉出前八量级）。若两项都接近，检查 `INSTRUCTION` 是否用了反引号引用 `section` / `question`——探针确认过，不引用时模型看不到输入。
+Expected: 一行 JSON，`scores` 两项且第一项**明显高于**第二项（2026-09-26 实跑：`[0.0985, 0.0634]`，前者是 `Multi-Head Attention`、后者是 `Conclusion`）。分数低是正常的——温度 >1 把 softmax 压平，别指望接近 1；要看的只是**次序**。若两项都接近，检查 `INSTRUCTION` 是否用了反引号引用 `section` / `question`——探针确认过，不引用时模型看不到输入。
 
 - [ ] **Step 3: 写 MLX 判定实现**
 
@@ -1856,7 +1856,11 @@ Create `bench/src/jev/mlxJudge.ts`：
  * `EvidenceJudge` 的 MLX 实现：把判定委托给 Python 侧车。
  *
  * 批量切分是刻意的：侧车逐节点调用，一次请求塞太多节点会让单次往返变长，
- * 而超时是按请求计的。按 `batchSize` 切分后，单批失败只影响该批。
+ * 而超时是按请求计的。按 `batchSize` 切分把单次往返的时延与失败面都限制在一批之内。
+ *
+ * **切分不提供失败隔离**：批间是串行 `await`，第 i 批抛错会直接 reject 整个 `judge()`、
+ * 放弃 i+1..n 批。按 §4 的口径这仍然是对的——判定失败本就是**整篇**回落到 `passage-hybrid`，
+ * 不是逐批降级。别把 batchSize 当成「坏一批只丢一批」的保险。
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -1882,8 +1886,14 @@ export function defaultSpawn(opts: MlxJudgeOptions = {}): SidecarSpawn {
   return () => ({ command: python, args: [script, model] })
 }
 
-/** 批量切分的 EvidenceJudge。每批独立往返，批间串行以固定单条判定的时延特征。 */
-export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge {
+/**
+ * 批量切分的 EvidenceJudge。每批独立往返，批间串行以固定单条判定的时延特征。
+ *
+ * 返回类型刻意带上 `close`：`SidecarJudge` 已经实现了它，委托是零成本；而任何长跑调用方
+ * （本任务的冒烟脚本、Plan 2 的 runner）收尾时都必须关掉子进程，否则侧车的 stdio 管道
+ * 会让 Node 事件循环一直活着、脚本挂住不退出。只返回 `EvidenceJudge` 就没法关。
+ */
+export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge & { close: () => Promise<void> } {
   const inner = new SidecarJudge({
     spawn: defaultSpawn(opts),
     ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
@@ -1897,6 +1907,7 @@ export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge {
       }
       return out
     },
+    close: () => inner.close(),
   }
 }
 ```
@@ -1926,6 +1937,9 @@ Create `bench/src/toc/qasperRows.ts`：
  */
 export interface QasperRawRow {
   id: string
+  title: string
+  /** 与 `qas.answers` 同序的并列数组——datasets-server 把「list of struct」列式化了。 */
+  qas: { question: string[] }
   full_text: { section_name: string[]; paragraphs: string[][] }
 }
 
@@ -1957,7 +1971,13 @@ Create `bench/scripts/jevSmoke.ts`：
 
 ```ts
 /**
- * Jev 判定冒烟：用真实 QASPER 论文确认本地权重可用、概率有区分度。
+ * Jev 判定冒烟：确认侧车能起、判定器真的被调用，并把选择打出来人工核对。
+ *
+ * **能证明的**：`laya_mlx` 能加载本地权重、协议往返通、`traverseWithJudge` 走到了判定器、返回的分数合法。
+ * **不能证明的**：概率有区分度。上游第一篇论文（`fetchQasperRows(1)` 给的是 `1912.01214`，XLM 那篇）
+ * 若与问题不搭，模型输出就是噪声——人工看输出分不出「判定器坏了」和「问题不属这篇论文」。
+ * 所以这里**用论文自己的问题**（`qas.question[0]`），让「选中是否相关」成为一件可判断的事。
+ * 区分度的判据是 Step 2 的合成节点对照，以及后续的 α/N 网格，不是本脚本。
  *
  * **刻意不走 `loadQasperDataset` 取节结构**：冻结数据集不含节结构字段（见 `qasperRows.ts` 的说明），
  * 拿到的会是 `undefined`，`?? []` 会静默建出空树，而空树在 `tocTree.ts:162` 就返回——
@@ -1972,9 +1992,6 @@ import { createMlxJudge } from '../src/jev/mlxJudge'
 import { buildQasperTree } from '../src/toc/qasperTree'
 import { traverseWithJudge } from '../../src/utils/tocTree'
 
-/** 固定问题（不用数据集里的）：探针已确认 Transformer 论文的 Multi-Head Attention 节排第一，期望因此是确定的。 */
-const QUERY = 'How many attention heads does the Transformer use?'
-
 async function main(): Promise<void> {
   const [row] = await fetchQasperRows(1)
   const { sectionPages } = sectionsToPages(row.full_text.section_name, row.full_text.paragraphs)
@@ -1984,18 +2001,25 @@ async function main(): Promise<void> {
   // 冒烟会在「判定器根本没跑」的情况下报绿——这正是本脚本最该防的假成功。
   if (tree.length === 0) throw new Error('建树结果为空：上游节结构字段可能变了，冒烟无法成立')
 
-  console.log(`论文: ${row.id}`)
-  console.log(`问题: ${QUERY}`)
+  // 用论文**自己的**问题。写死一个固定问题会与「第一篇论文」错配，使「选中是否相关」无从判断——
+  // `qas.question` 与 `qas.answers` 同序并列，取第 0 个不需要 fetch.ts 那套 list-of-struct 转置。
+  const query = row.qas.question[0]
+  if (!query) throw new Error('该论文没有问题文本，冒烟无法成立')
+
+  console.log(`论文: ${row.title.slice(0, 60)}（${row.id}）`)
+  console.log(`问题: ${query}`)
   console.log(`树: 顶层 ${tree.length} 个节点`)
 
   const judge = createMlxJudge()
   try {
     const started = Date.now()
-    // alpha=0.5 只是冒烟取值，不是实验选定格点；真的 α 网格见设计文档 §3.2。
-    const sel = await traverseWithJudge(tree, QUERY, judge, { alpha: 0.5, topN: 2 })
+    // alpha=0.9 而非 0.5：这批概率被温度压得很窄，实测 α=0.5 时每层 survivors === candidates
+    // （6/6、3/3、2/2），层内阈值一个都没滤掉、全是 top-N 在选。冒烟要真的走到阈值分支才有意义。
+    // 0.9 只是冒烟取值，不是实验选定格点；α/N 网格属 Plan 2，见设计文档 §3.2。
+    const sel = await traverseWithJudge(tree, query, judge, { alpha: 0.9, topN: 2 })
     console.log(`遍历耗时 ${Date.now() - started}ms`)
-    // layers 为空 == 判定器一次都没被调用（traverseWithJudge 对空节点直接返回）。
-    // 这条断言是本脚本的承重墙：没有它，上面所有打印都可能在「没跑模型」时照常出现。
+    // 这条其实是**冗余**的：树非空时 traverseWithJudge 必然至少 push 一层（tocTree.ts:162 只在
+    // nodes 为空时短路）。留作双保险，但别把它当防线——防假绿的是上面那条 tree.length 断言。
     if (sel.layers.length === 0) throw new Error('遍历未调用判定器（layers 为空），冒烟不成立')
     console.log('逐层诊断:', JSON.stringify(sel.layers, null, 2))
     console.log('选中:', sel.selected.map(n => `${n.title} pages=[${n.pages.join(',')}]`))
@@ -2009,7 +2033,7 @@ main().catch(error => { console.error(error); process.exit(1) })
 
 Run: `npx tsx bench/scripts/jevSmoke.ts`
 
-Expected: 打印树规模、**非零**的 `layers` 逐层诊断、遍历耗时（量级应为数百毫秒；`layers` 为空即抛错，不会再出现「0ms 且报绿」），且**选中的节点与问题相关**（探针预期 `Multi-Head Attention` 入选）。若选中明显无关，先确认 Step 2 的区分度，再回来查判定节点里 `path` 是否带上了父路径。
+Expected: 打印论文标题与**该论文自己的问题**、非零的 `layers` 逐层诊断、遍历耗时（量级数百毫秒）。人工核对**选中的节与该问题是否相关**——这是本脚本唯一的实质判据，也正是它改用论文自身问题的原因。若选中明显无关，**先确认那个问题是否真属于这篇论文**（换一篇、或改用同一篇的另一问），再回来查判定节点里 `path` 是否带上了父路径；**不要**据此断定判定器坏了——本脚本不声称概率有区分度。
 
 - [ ] **Step 5: 跑全量测试与类型检查**
 
