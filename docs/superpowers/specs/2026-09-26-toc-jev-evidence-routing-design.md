@@ -68,8 +68,8 @@ Model Architecture  p2    ← 三个顶层兄弟挤在同一页
 
 ```
 src/utils/tocTree.ts           纯函数，零运行时依赖
-  buildTocTree(pages, outline) → TocNode[]
-  traverseWithJudge(tree, judge, opts) → SelectionResult
+  buildTocTree(outline, pageCount) → TocNode[]
+  traverseWithJudge(tree, query, judge, opts) → SelectionResult
 
 src/utils/evidenceJudge.ts     纯接口
   interface EvidenceJudge { judge(input: JudgeInput): Promise<number[]> }
@@ -115,6 +115,7 @@ bench/src/jev/                 实验专属，不入产品
 - `α = 1` 退化为「每层只保留并列最高者」
 - **优点**：对未校准概率免疫（正好对症 temperature clamp 那条警告），且不需要任何标注数据
 - **缺点**：该层最高分若本身是噪声，噪声也被放大保留，靠 top-N 兜底
+- **推论（必须写死）**：`α ≤ 1` 且分数 `≥ 0` 时，取得本层最高分的节点恒满足 `score ≥ α × max`，因此**「阈值把整层滤光」在算术上不可达**（全零分时 `θ = 0`，亦然）。这条推论删掉了原设计里「阈值滤光 → 取 top-1」的回落路径：它不可能被触发。唯一能让选择变空的途径见 §2.3。
 
 `α` 与 `N` 都是实验扫描旋钮，在设计中不拍死具体值。
 
@@ -125,8 +126,15 @@ bench/src/jev/                 实验专属，不入产品
 **父节点何时成为证据，必须按以下规则定死**（否则会出现两种实现）：
 
 - 存活且**有子节点** → 下探，父节点本身**不**直接收为证据（它只是导航；其页区间会通过子节点间接进入上下文）
-- 存活且**无子节点** → 收为证据
-- 存活、有子节点，但**所有子节点均被阈值滤光** → 父节点兜底收为证据，避免「下探后颗粒无收」
+- 存活且**无子节点**、区间非空 → 收为证据
+- 存活且**无子节点**、但区间为空（同页兄弟，`endPage === startPage − 1`）→ 不选，计入 `emptyRangeSkipped`
+- 存活、有子节点，但**下探颗粒无收** → 父节点兜底收为证据，避免「下探后颗粒无收」
+
+注意第三条兜底的触发条件**不是**「子节点全被阈值滤光」——按 §2.2 的推论那不可能发生。真正能让下探颗粒无收的只有**空区间**：活着的那批子节点恰好都与下一个兄弟同页而被压空，不携带任何页内容。
+
+由此得到一条实现约束：**空区间过滤必须发生在递归内部**，不能放到最后统一过滤。放到最后的话，下探会「看起来有收获」（返回了一批马上要被丢掉的空节点）而父节点兜底永不触发，最终静默产出空上下文。
+
+父节点自身**恒非空**（`endPage = max(startPage, 所有子节点 endPage) ≥ startPage`），所以兜底一定拿得到东西。空区间只可能出现在叶节点。
 
 收集阶段**不设独立预算**：所有存活叶节点的原文交给 `materializeContext`，由其按统一 token 预算裁剪。这样预算只有一个来源，不会出现「收集时截一次、物化时再截一次」的双重口径。
 
@@ -194,7 +202,7 @@ Jev 臂与 `passage-hybrid` 一样是**回答前零 LLM 调用**。因此相对�
 | 页码部分解析失败 | 部分条目 dest 解析不出 | 该条目标记不可用但**保留树**；顶层全失败则等同「无 outline」 | `unresolvedEntries:n` |
 | 侧车不可用 | 启动失败 / 崩溃 / 超时 | 该篇 → `passage-hybrid` | `judgeUnavailable:true` |
 | Jev 返回异常 | NaN / 越界 / 批量长度不匹配 | 该篇 → `passage-hybrid`（不拿垃圾概率继续跑） | `judgeDegraded:'invalid-output'` |
-| 阈值滤光 | 所有节点被阈值滤掉 | 取 top-1 兜底（对齐 `scoreAndSelect` 解析失败取首节点的既有行为） | `emptySelectionFallback:true` |
+| 空区间滤光 | 存活节点全是空区间（同页兄弟），无一携带页内容 | 回落文档顺序里首个非空节点（对齐 `scoreAndSelect` 解析失败取首节点的既有行为）。该节点必然存在：段末顶层节点恒非空 | `emptySelectionFallback:true` |
 | 预算截断 | 选中节点超预算 | 保留能进入的部分，`truncated` 如实置位（沿用 `materializeContext`） | 既有字段 |
 
 三条纪律：**绝不静默**（每次回落写结构化诊断，bench 统计回落率作为一类结果）、**不修补**、**侧车崩溃按篇隔离**（一次崩溃不得拖垮整轮实验；判定无副作用，重启后可重试）。
@@ -203,7 +211,7 @@ Jev 臂与 `passage-hybrid` 一样是**回答前零 LLM 调用**。因此相对�
 
 | 文件 | 覆盖 | 关键点 |
 |---|---|---|
-| `src/tests/tocTree.test.ts` | 建树 + 遍历纯函数 | 同页兄弟绝不产出负区间；父节点区间含引导正文；末节点延伸到文末；成环 / 空标题 / 深度超限；无 outline 返回空树而非抛错；相对阈值两个退化端点（`α=0` / `α=1`）；top-N 截断；**父节点下探时不作为证据**；**子节点全被滤光时父节点兜底**；空选择兜底 |
+| `src/tests/tocTree.test.ts` | 建树 + 遍历纯函数 | 同页兄弟绝不产出负区间；父节点区间含引导正文；末节点延伸到文末；成环 / 空标题 / 深度超限；无 outline 返回空树而非抛错；相对阈值两个退化端点（`α=0` / `α=1`）；最高分节点在任意 `α∈[0,1]` 下恒存活（钉死「阈值滤光不可达」）；top-N 截断；**父节点下探时不作为证据**；**子节点全是空区间时父节点兜底**；**存活节点全是空区间时回落首个非空节点** |
 | `src/tests/evidenceJudge.test.ts` | 接口契约（注入假实现） | 批量语义、返回长度校验、NaN 拒绝 |
 | `bench/src/tests/jevSidecar.test.ts` | 侧车协议 | JSON-lines 往返、崩溃重启、超时——**全部用假侧车** |
 
