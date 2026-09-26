@@ -66,13 +66,20 @@ export interface LayerDiagnostic {
   candidates: number
   maxScore: number
   threshold: number
+  /** 通过层内阈值的节点数（top-N 截断**之前**） */
   survivors: number
-  descended: number
+  /** 阈值存活后再截 top-N 留下的节点数；**含叶子**，不表示「下探过」 */
+  kept: number
 }
 
 export interface TocSelection {
-  /** 收为证据的节点，按首个个页号升序 */
+  /** 收为证据的节点，按首个页号升序 */
   selected: TocNode[]
+  /**
+   * 每个判定调用一条，按 DFS 先序排列——**不是**按深度索引。同一 `depth`
+   * 可能出现多条（多个存活分支各自下探一层，且彼此不相邻），拿下标当层号会错；
+   * 调用方要按 `depth` 自行聚合。
+   */
   layers: LayerDiagnostic[]
   /** 因 pages 为空被排除出 selected 的节点数 */
   emptyContentSkipped: number
@@ -80,25 +87,44 @@ export interface TocSelection {
   emptySelectionFallback: boolean
 }
 
+/** 一次层内筛选的结果：留下的节点，以及阈值存活数（切片前）。 */
+interface SurvivorResult {
+  nodes: TocNode[]
+  survivingCount: number
+}
+
 const toJudgeNode = (n: TocNode): JudgeNode => ({ id: n.id, title: n.title, path: n.path })
 
-/** 稳定排序取前 topN：同分保持原有文档顺序。 */
-function topNSurvivors(nodes: TocNode[], scores: number[], threshold: number, topN: number): TocNode[] {
+/**
+ * 稳定排序取前 topN：同分保持原有文档顺序。
+ *
+ * 一并返回 `survivingCount`（过滤后、切片前的长度）：诊断里的 `survivors` 与
+ * 这里留下的节点出自**同一次** `>= threshold` 判定。若让调用方另写一遍这个比较，
+ * 日后比较式改了、或这里加了分数下限/去重，诊断就会悄悄报出一个不再描述该阶段的数字。
+ */
+function topNSurvivors(nodes: TocNode[], scores: number[], threshold: number, topN: number): SurvivorResult {
   const surviving = nodes
     .map((node, i) => ({ node, score: scores[i], order: i }))
     .filter(s => s.score >= threshold)
-  if (surviving.length <= topN) return surviving.map(s => s.node)
-  return surviving
-    .sort((a, b) => (b.score - a.score) || (a.order - b.order))
-    .slice(0, topN)
-    .map(s => s.node)
+  const survivingCount = surviving.length
+  if (survivingCount <= topN) return { nodes: surviving.map(s => s.node), survivingCount }
+  return {
+    nodes: surviving
+      .sort((a, b) => (b.score - a.score) || (a.order - b.order))
+      .slice(0, topN)
+      .map(s => s.node),
+    survivingCount,
+  }
 }
 
 /**
  * 按文档顺序（先序）找第一个 `pages` 非空的节点。
  * 只要树里还有一个带内容的节点就必有结果——供空选择时兜底。
+ *
+ * 本模块内部使用（Task 4 的空选择回落），刻意不导出：调用方一律经
+ * `traverseWithJudge` 走完整条链路，不需要单独拿到这个查找。
  */
-export function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
+function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
   for (const node of nodes) {
     if (node.pages.length > 0) return node
     const found = firstNodeWithContent(node.children)
@@ -114,7 +140,9 @@ export function firstNodeWithContent(nodes: TocNode[]): TocNode | undefined {
  * 概率整体压在 0.03–0.39，任何固定绝对阈值都会把整层滤光。相对阈值同时对
  * 未校准的概率免疫——这正好对症该 checkpoint 的温度被 clamp 那条警告。
  *
- * 本步只实现阈值与 top-N；父节点规则、空内容节点与空选择兜底由 Task 4 补上。
+ * 本步只实现阈值与 top-N。父节点的「空子层回落」表达式已经写好，但对
+ * α∈[0,1]、topN≥1 目前**不可达**——argmax 恒通过阈值，故非空子层至少产出一个
+ * 节点；要等 Task 4 补上空内容过滤，子层才可能被整体剔除而激活它。空选择兜底同样留给 Task 4。
  */
 export async function traverseWithJudge(
   tree: TocNode[],
@@ -131,14 +159,14 @@ export async function traverseWithJudge(
     const scores = assertJudgeOutput(await judge.judge({ query, nodes: nodes.map(toJudgeNode) }), nodes.length)
     const maxScore = Math.max(...scores)
     const threshold = opts.alpha * maxScore
-    const survivors = topNSurvivors(nodes, scores, threshold, opts.topN)
+    const { nodes: survivors, survivingCount } = topNSurvivors(nodes, scores, threshold, opts.topN)
     layers.push({
       depth,
       candidates: nodes.length,
       maxScore,
       threshold,
-      survivors: scores.filter(s => s >= threshold).length,
-      descended: survivors.length,
+      survivors: survivingCount,
+      kept: survivors.length,
     })
 
     const collected: TocNode[] = []
@@ -148,6 +176,9 @@ export async function traverseWithJudge(
         continue
       }
       const fromChildren = await descend(node.children, depth + 1)
+      // 这一支目前不可达：argmax 恒通过阈值，非空子层至少产出一个节点，故
+      // fromChildren 永不为空。Task 4 加空内容过滤后，子层可能被整体剔除，
+      // 那时才需要「子层空则收父节点」。谁把它"简化"成 fromChildren 会弄坏 Task 4。
       collected.push(...(fromChildren.length > 0 ? fromChildren : [node]))
     }
     return collected

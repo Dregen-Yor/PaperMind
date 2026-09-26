@@ -99,6 +99,23 @@ const FLAT = (): TocNode[] => [
   node({ id: 'c', title: 'C', pages: [2] }),
 ]
 
+/** 两层树 A[A1, A2] / B[B1]；父节点各自也带一页，确保它们本有资格进 selected */
+const NESTED = (): TocNode[] => [
+  node({
+    id: 'a', title: 'A', pages: [0],
+    children: [
+      node({ id: 'a1', title: 'A1', path: ['A'], depth: 1, pages: [1] }),
+      node({ id: 'a2', title: 'A2', path: ['A'], depth: 1, pages: [2] }),
+    ],
+  }),
+  node({
+    id: 'b', title: 'B', pages: [3],
+    children: [
+      node({ id: 'b1', title: 'B1', path: ['B'], depth: 1, pages: [4] }),
+    ],
+  }),
+]
+
 describe('traverseWithJudge —— 相对阈值', () => {
   it('alpha=0 时阈值退化为 0，全部候选存活（纯 top-N 模式）', async () => {
     const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha: 0, topN: 10 })
@@ -121,7 +138,10 @@ describe('traverseWithJudge —— 相对阈值', () => {
     // 设计里已删掉；本用例把该推论钉死，防止有人日后"补"一个不可能的兜底。
     for (const alpha of [0, 0.25, 0.5, 0.75, 1]) {
       const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha, topN: 10 })
-      expect(sel.selected.map(n => n.title)).toContain('A')
+      // 钉的是**打分阶段**：θ ≤ max ⇒ argmax 必过阈值。刻意不看 selected——
+      // Task 4 起空 pages 节点会被移出 selected，那时这条断言会因与本事无关的理由失败。
+      expect(sel.layers[0].threshold).toBeLessThanOrEqual(sel.layers[0].maxScore)
+      expect(sel.layers[0].survivors).toBeGreaterThanOrEqual(1)
     }
   })
 
@@ -135,12 +155,39 @@ describe('traverseWithJudge —— 相对阈值', () => {
     expect(sel.selected.map(n => n.title)).toEqual(['A', 'B'])
   })
 
-  it('layers 记录每一层的候选数、最高分、阈值与下探数', async () => {
+  it('layers 记录每一层的候选数、最高分、阈值与留存数', async () => {
     const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha: 0.5, topN: 10 })
     expect(sel.layers).toHaveLength(1)
     expect(sel.layers[0]).toMatchObject({
-      depth: 0, candidates: 3, maxScore: 0.9, threshold: 0.45, survivors: 1, descended: 1,
+      depth: 0, candidates: 3, maxScore: 0.9, threshold: 0.45, survivors: 1, kept: 1,
     })
+  })
+
+  it('有子节点的存活者继续下探：父节点不进 selected，子节点进，layers 按先序记录两层', async () => {
+    const sel = await traverseWithJudge(
+      NESTED(), 'q', fixedJudge({ A: 0.9, B: 0.4, A1: 0.5, A2: 0.2, B1: 0.3 }), { alpha: 0, topN: 9 },
+    )
+    // 父节点有子层，改收集子层结果，父节点自身**不**进 selected
+    expect(sel.selected.map(n => n.title)).toEqual(['A1', 'A2', 'B1'])
+    expect(sel.selected.map(n => n.title)).not.toContain('A')
+    expect(sel.selected.map(n => n.title)).not.toContain('B')
+    // 一次判定一条、DFS 先序：根层 depth 0 之后跟着 A 子层与 B 子层两条 depth 1
+    expect(sel.layers.map(l => l.depth)).toEqual([0, 1, 1])
+    expect(sel.layers[0]).toMatchObject({ depth: 0, candidates: 2, survivors: 2, kept: 2 })
+    expect(sel.layers[1]).toMatchObject({ depth: 1, candidates: 2, survivors: 2, kept: 2 })
+    expect(sel.layers[2]).toMatchObject({ depth: 1, candidates: 1, survivors: 1, kept: 1 })
+  })
+
+  it('空树不调判定器、不产诊断，两个计数器保持默认', async () => {
+    let called = 0
+    const judge: EvidenceJudge = { async judge() { called += 1; return [] } }
+    const sel = await traverseWithJudge([], 'q', judge, { alpha: 0.5, topN: 10 })
+    expect(sel.selected).toEqual([])
+    expect(sel.layers).toEqual([])
+    expect(sel.emptyContentSkipped).toBe(0)
+    expect(sel.emptySelectionFallback).toBe(false)
+    // nodes.length === 0 的守卫在**调用判定器之前**返回，因此判定器一次都没被叫到
+    expect(called).toBe(0)
   })
 
   it('判定器返回垃圾时向上抛，不吞掉', async () => {
