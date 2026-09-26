@@ -44,11 +44,13 @@ export class SidecarJudge implements EvidenceJudge {
     const { command, args } = this.opts.spawn()
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'inherit'] })
     child.stdout!.setEncoding('utf8')
-    child.stdout!.on('data', (chunk: string) => this.onData(chunk))
+    child.stdout!.on('data', (chunk: string) => this.onData(chunk, child))
     // 侧车立刻退出、而这次写入还没冲刷完时，stdin 会触发 EPIPE。没有这个 handler 它会
     // 变成 unhandled 'error' 事件把进程整个带崩，而不是让调用方收到一个可回落的 reject。
     // （写入在子进程退出之前就冲刷完时不会报 EPIPE——那种情况下它被静默丢弃。）
     child.stdin!.on('error', () => { /* 由 exit 事件统一收尾 */ })
+    // exit / error 各自每代子进程最多触发一次，且 failAll 会立刻把 this.child 清空，
+    // 所以上一代的迟到事件不可能误伤新一代的在途请求——这两个 handler 刻意不加 child 身份判断。
     child.on('exit', () => this.failAll(new Error('sidecar exited')))
     child.on('error', (error) => this.failAll(new Error(`sidecar spawn failed: ${error.message}`)))
     this.buffer = ''
@@ -66,7 +68,10 @@ export class SidecarJudge implements EvidenceJudge {
     this.child = undefined
   }
 
-  private onData(chunk: string): void {
+  private onData(chunk: string, source: ChildProcess): void {
+    // 上一代子进程的 stdout 监听器永不摘除。它若在 exit → 重新 spawn 之后才吐出残行，
+    // 会拼进新一代的首行，产出一条谁也认不出的畸形行。按 child 身份过滤，迟到数据整体丢弃。
+    if (source !== this.child) return
     this.buffer += chunk
     let index: number
     while ((index = this.buffer.indexOf('\n')) >= 0) {
@@ -74,7 +79,10 @@ export class SidecarJudge implements EvidenceJudge {
       this.buffer = this.buffer.slice(index + 1)
       if (line.trim() === '') continue
       let message: { id?: unknown; scores?: unknown; error?: unknown }
+      // 解析失败的行无法归属到任何 id，只能丢弃——由该请求自己的超时兜底。这里刻意**不**
+      // failAll：一条坏行会连坐并发中的其余请求，而超时至少能把影响限制在真正的那一条上。
       try { message = JSON.parse(line) } catch { continue }
+      // id 非数字同样无法配对；同上，交给超时。
       if (typeof message.id !== 'number') continue
       const p = this.pending.get(message.id)
       if (!p) continue
@@ -83,8 +91,11 @@ export class SidecarJudge implements EvidenceJudge {
       // 侧车把失败原因放在 error 里（Task 8 的 sidecar.py 就是这么回话的）。不带上它，
       // 调用方只会看到 not-an-array——而「权重目录不存在 / 导入失败 / OOM」正是最需要原文的
       // 诊断。协议线上格式不变，只是不再把这段文字丢掉。
-      if (typeof message.error === 'string') {
-        p.reject(new Error(`sidecar error: ${message.error}`))
+      // 判 `!== undefined` 而不是 `typeof === 'string'`：数字或对象的 error 若漏下去，仍会
+      // 退化成同一个笼统的 not-an-array，等于换个类型重犯一遍静默丢弃。非字符串转成 JSON 文本。
+      if (message.error !== undefined) {
+        const text = typeof message.error === 'string' ? message.error : JSON.stringify(message.error)
+        p.reject(new Error(`sidecar error: ${text}`))
         continue
       }
       try {

@@ -70,33 +70,46 @@ describe('SidecarJudge', () => {
       spawn: () => ({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] }),
       timeoutMs: 200,
     })
-    await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
-      .rejects.toThrow(/timeout/)
-    await judge.close()
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
+        .rejects.toThrow(/timeout/)
+    } finally { await judge.close() }
   })
 
   it('返回长度与候选不匹配时抛错', async () => {
     const lying = `let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i);b=b.slice(i+1);const r=JSON.parse(l);process.stdout.write(JSON.stringify({id:r.id,scores:[0.5]})+'\\n')}})`
     const judge = new SidecarJudge({ spawn: () => ({ command: process.execPath, args: ['-e', lying] }) })
-    await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }, { id: 'b', title: 'b', path: [] }] }))
-      .rejects.toThrow(/length-mismatch/)
-    await judge.close()
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }, { id: 'b', title: 'b', path: [] }] }))
+        .rejects.toThrow(/length-mismatch/)
+    } finally { await judge.close() }
   })
 
   it('越界概率在协议边界被拒，不喂给阈值计算', async () => {
     const bad = `let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i);b=b.slice(i+1);const r=JSON.parse(l);process.stdout.write(JSON.stringify({id:r.id,scores:[1.5]})+'\\n')}})`
     const judge = new SidecarJudge({ spawn: () => ({ command: process.execPath, args: ['-e', bad] }) })
-    await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
-      .rejects.toThrow(/invalid-score/)
-    await judge.close()
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
+        .rejects.toThrow(/invalid-score/)
+    } finally { await judge.close() }
   })
 
   it('侧车回报 error 字段时带出原文，而不是笼统的 not-an-array', async () => {
     const failing = `let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i);b=b.slice(i+1);const r=JSON.parse(l);process.stdout.write(JSON.stringify({id:r.id,error:'FileNotFoundError: model dir missing'})+'\\n')}})`
     const judge = new SidecarJudge({ spawn: () => ({ command: process.execPath, args: ['-e', failing] }) })
-    await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
-      .rejects.toThrow(/sidecar error: FileNotFoundError/)
-    await judge.close()
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
+        .rejects.toThrow(/sidecar error: FileNotFoundError/)
+    } finally { await judge.close() }
+  })
+
+  it('非字符串 error 也要带出原文，不能退化成 not-an-array', async () => {
+    const failing = `let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i);b=b.slice(i+1);const r=JSON.parse(l);process.stdout.write(JSON.stringify({id:r.id,error:{code:42}})+'\\n')}})`
+    const judge = new SidecarJudge({ spawn: () => ({ command: process.execPath, args: ['-e', failing] }) })
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
+        .rejects.toThrow(/sidecar error: \{"code":42\}/)
+    } finally { await judge.close() }
   })
 
   it('命令不存在时抛出 spawn 失败，而不是 TypeError 或挂起', async () => {
@@ -104,9 +117,10 @@ describe('SidecarJudge', () => {
       spawn: () => ({ command: '/nonexistent/definitely-not-here', args: [] }),
       timeoutMs: 2000,
     })
-    await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
-      .rejects.toThrow(/sidecar spawn failed/)
-    await judge.close()
+    try {
+      await expect(judge.judge({ query: 'q', nodes: [{ id: 'a', title: 'a', path: [] }] }))
+        .rejects.toThrow(/sidecar spawn failed/)
+    } finally { await judge.close() }
   })
 })
 
