@@ -29,18 +29,30 @@ describe('sectionsToPages —— sectionPages 与 pages 同源', () => {
   })
 
   it('无内容的节得到空数组', () => {
-    const { sectionPages } = sectionsToPages(['Empty', 'Real'], [[], ['body']])
+    const { pages, sectionPages } = sectionsToPages(['Empty', 'Real'], [[], ['body']])
     expect(sectionPages[0]).toEqual([])
     expect(sectionPages[1].length).toBeGreaterThan(0)
+    expect(pages.join('\u0000')).toContain('Empty')
   })
 
-  it('不改变既有输出：pages 与 paragraphToPage 逐字不变', () => {
-    const names = ['A', 'B', 'C']
-    const sections = [['a1', 'a2'], ['b1'], ['c1', 'c2', 'c3']]
-    const out = sectionsToPages(names, sections)
-    // 这三个不变量是 evidencePages 的基础，任何重构都不得动摇
-    expect(out.paragraphToPage).toHaveLength(sections.flat().length)
-    expect(out.pages.join('\u0000')).toBe(sectionsToPages(names, sections).pages.join('\u0000'))
-    for (const p of out.paragraphToPage) expect(p).toBeLessThan(out.pages.length)
+  it('不改变既有输出：pages 与 paragraphToPage 对固定输入产出确定值', () => {
+    // 必须拿**字面量**钉。比两次调用（`expect(f(x)).toBe(f(x))`）是拿函数与自己比，
+    // 名字再像「逐字不变」也不可能失败。下面的期望值是本次改动前实现的实际输出：
+    // 封页条件、标题与首段的耦合、段落切片任意一处被改都会让它变红。
+    const { pages, paragraphToPage } = sectionsToPages(['A', 'B', 'C'], [['a1', 'a2'], ['b1'], ['c1', 'c2', 'c3']])
+    expect(paragraphToPage).toEqual([0, 0, 0, 0, 0, 0])
+    expect(pages).toEqual(['A\n\na1\n\na2\n\nB\n\nb1\n\nC\n\nc1\n\nc2\n\nc3'])
+  })
+
+  it('跨封页边界时节号随之 +1（节区间与打包同源的关键场景）', () => {
+    // 单页输入钉不住封页条件：`PSEUDO_PAGE_CHARS` 或 `bufferLen + text.length > …`
+    // 被改动时单页 golden 照过。这里先顶满第一页，再验证第二节确实落到**第二页**。
+    const names = ['Filler', 'Method']
+    const sections = [['a'.repeat(PSEUDO_PAGE_CHARS - 100)], ['b'.repeat(200)]]
+    const { pages, paragraphToPage, sectionPages } = sectionsToPages(names, sections)
+    expect(pages).toHaveLength(2)
+    expect(paragraphToPage).toEqual([0, 1])
+    expect(sectionPages).toEqual([[0], [1]])
+    expect(pages[1]).toBe(`Method\n\n${'b'.repeat(200)}`)
   })
 })
