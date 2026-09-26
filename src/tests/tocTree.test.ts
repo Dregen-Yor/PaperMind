@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { tocNodePageSpan, tocSelectionToContextGroups, type TocNode } from '../utils/tocTree'
+import { tocNodePageSpan, tocSelectionToContextGroups, traverseWithJudge, type TocNode } from '../utils/tocTree'
+import type { EvidenceJudge } from '../utils/evidenceJudge'
 
 /** 造一个节点；只给本任务用到的字段，children 默认空 */
 const node = (over: Partial<TocNode> & { id: string; title: string }): TocNode => ({
@@ -83,5 +84,67 @@ describe('tocSelectionToContextGroups', () => {
     ], PAGES)
     expect(groups).toHaveLength(2)
     expect(groups.every(g => g.pieces[0].page === 3)).toBe(true)
+  })
+})
+
+/** 按标题查表返回概率的假判定器；查不到返回 0 */
+const fixedJudge = (table: Record<string, number>): EvidenceJudge => ({
+  async judge({ nodes }) { return nodes.map(n => table[n.title] ?? 0) },
+})
+
+/** 三个同层叶节点，标题 A/B/C */
+const FLAT = (): TocNode[] => [
+  node({ id: 'a', title: 'A', pages: [0] }),
+  node({ id: 'b', title: 'B', pages: [1] }),
+  node({ id: 'c', title: 'C', pages: [2] }),
+]
+
+describe('traverseWithJudge —— 相对阈值', () => {
+  it('alpha=0 时阈值退化为 0，全部候选存活（纯 top-N 模式）', async () => {
+    const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha: 0, topN: 10 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A', 'B', 'C'])
+  })
+
+  it('alpha=1 时阈值等于层内最高分，只有并列最高者存活', async () => {
+    const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha: 1, topN: 10 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A'])
+  })
+
+  it('阈值取层内相对值：整体分数偏低时高分区仍能存活', async () => {
+    // 实测 Jev 的概率上限只有约 0.393，任何固定绝对阈值（如 0.5）都会把整层滤光
+    const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.39, B: 0.3, C: 0.01 }), { alpha: 0.9, topN: 10 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A'])
+  })
+
+  it('最高分节点在任意 alpha∈[0,1] 下都存活（阈值滤光在算术上不可达）', async () => {
+    // θ = α × max 且 α ≤ 1 时，argmax 恒满足 score ≥ θ。这条回落路径是死代码，
+    // 设计里已删掉；本用例把该推论钉死，防止有人日后"补"一个不可能的兜底。
+    for (const alpha of [0, 0.25, 0.5, 0.75, 1]) {
+      const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha, topN: 10 })
+      expect(sel.selected.map(n => n.title)).toContain('A')
+    }
+  })
+
+  it('全部候选同分时，alpha=1 让它们全部存活', async () => {
+    const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.4, B: 0.4, C: 0.4 }), { alpha: 1, topN: 10 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A', 'B', 'C'])
+  })
+
+  it('每层存活数超过 topN 时按分数取前 N（同分保持文档顺序）', async () => {
+    const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.5, C: 0.5 }), { alpha: 0, topN: 2 })
+    expect(sel.selected.map(n => n.title)).toEqual(['A', 'B'])
+  })
+
+  it('layers 记录每一层的候选数、最高分、阈值与下探数', async () => {
+    const sel = await traverseWithJudge(FLAT(), 'q', fixedJudge({ A: 0.9, B: 0.1, C: 0 }), { alpha: 0.5, topN: 10 })
+    expect(sel.layers).toHaveLength(1)
+    expect(sel.layers[0]).toMatchObject({
+      depth: 0, candidates: 3, maxScore: 0.9, threshold: 0.45, survivors: 1, descended: 1,
+    })
+  })
+
+  it('判定器返回垃圾时向上抛，不吞掉', async () => {
+    const bad: EvidenceJudge = { async judge({ nodes }) { return nodes.map(() => Number.NaN) } }
+    await expect(traverseWithJudge(FLAT(), 'q', bad, { alpha: 0.5, topN: 10 })).rejects.toThrow('invalid-score')
   })
 })
