@@ -7,6 +7,9 @@
  */
 export interface QasperRawRow {
   id: string
+  title: string
+  /** 与 `qas.answers` 同序的并列数组——datasets-server 把「list of struct」列式化了。 */
+  qas: { question: string[] }
   full_text: { section_name: string[]; paragraphs: string[][] }
 }
 

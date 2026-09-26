@@ -2,7 +2,11 @@
  * `EvidenceJudge` 的 MLX 实现：把判定委托给 Python 侧车。
  *
  * 批量切分是刻意的：侧车逐节点调用，一次请求塞太多节点会让单次往返变长，
- * 而超时是按请求计的。按 `batchSize` 切分后，单批失败只影响该批。
+ * 而超时是按请求计的。按 `batchSize` 切分把单次往返的时延与失败面都限制在一批之内。
+ *
+ * **切分不提供失败隔离**：批间是串行 `await`，第 i 批抛错会直接 reject 整个 `judge()`、
+ * 放弃 i+1..n 批。按 §4 的口径这仍然是对的——判定失败本就是**整篇**回落到 `passage-hybrid`，
+ * 不是逐批降级。别把 batchSize 当成「坏一批只丢一批」的保险。
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -28,7 +32,13 @@ export function defaultSpawn(opts: MlxJudgeOptions = {}): SidecarSpawn {
   return () => ({ command: python, args: [script, model] })
 }
 
-/** 批量切分的 EvidenceJudge。每批独立往返，批间串行以固定单条判定的时延特征。 */
+/**
+ * 批量切分的 EvidenceJudge。每批独立往返，批间串行以固定单条判定的时延特征。
+ *
+ * 返回类型刻意带上 `close`：`SidecarJudge` 已经实现了它，委托是零成本；而任何长跑调用方
+ * （本任务的冒烟脚本、Plan 2 的 runner）收尾时都必须关掉子进程，否则侧车的 stdio 管道
+ * 会让 Node 事件循环一直活着、脚本挂住不退出。只返回 `EvidenceJudge` 就没法关。
+ */
 export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge & { close: () => Promise<void> } {
   const inner = new SidecarJudge({
     spawn: defaultSpawn(opts),
@@ -43,8 +53,6 @@ export function createMlxJudge(opts: MlxJudgeOptions = {}): EvidenceJudge & { cl
       }
       return out
     },
-    // 暴露给冒烟脚本显式收尾：不 close 的话，侧车子进程的 stdio 管道仍是 Node 事件循环里的
-    // 活动句柄，脚本会一直挂着不退出。委托给内层 SidecarJudge 的 close()。
     close: () => inner.close(),
   }
 }
