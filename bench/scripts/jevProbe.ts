@@ -371,7 +371,7 @@ async function main(): Promise<void> {
 
   const judge = createMlxJudge()
   try {
-    // 记忆化判定器**按篇**建树后逐篇替换：跨篇节点签名可能撞车，按篇隔离最省心
+    // 记忆化判定器**按篇**建立：节点 id（S000…）逐篇复用，跨篇签名可能撞车，按篇隔离最稳妥
     const memosByPaper = new Map<string, EvidenceJudge>()
     const judgeFor = (paperId: string): EvidenceJudge => {
       let memo = memosByPaper.get(paperId)
