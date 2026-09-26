@@ -130,7 +130,7 @@ bench/src/jev/                  实验专属，不入产品
 | 节点 `title` = 节名按 ` ::: ` 切分后的**末段**，`path` = 之前的各段，各段 `trim()` | ` ::: ` 是 QASPER 的层级编码；trim 是必要的——实测存在 `'Dogmatism in the Reddit Community '`（尾随空格）这类脏值 |
 | 按 `path` 前缀还原父子关系；**父节点缺条目时合成一个**（`pages` 为空） | 实测父节点通常自带条目，但不保证每篇都如此。合成的父节点只作导航，不携带正文 |
 | 节点 `pages` = **该节内容实际落到的伪页号**，升序 | 见下 |
-| 节无任何内容（标题空且无段落）→ 整条丢弃 | 它不会进入任何一次判定 |
+| 节名 ` ::: ` 切分后无非空层名 → 整条丢弃 | 它不会进入任何一次判定。只带标题、没有段落的节**不**在此列：它保留成 `pages` 为空的导航节点 |
 
 **`pages` 必须由 `sectionsToPages` 的同一段打包循环产出，不得另写一套。** 这是本设计最容易出错的地方：`bench/src/datasets/qasper.ts` 的 `sectionsToPages` 决定了伪页边界，`evidencePages` 由它产出；节区间若用另一个实现算，两边会在边界上错开一页，而指标照常输出数字，**静默失真**。做法是给 `sectionsToPages` 增加一个返回值 `sectionPages`（`number[][]`，与 `sectionNames` 同序同长），在原循环里顺手记录，**不改动它已产出的 `pages` 与 `paragraphToPage`**（改那两者会让全部缓存与既有结果失效）。
 
@@ -236,9 +236,9 @@ bench/src/jev/                  实验专属，不入产品
 | 失败点 | 触发 | 回落 | 诊断字段 |
 |---|---|---|---|
 | 无节结构 | `section_name` 为空 | 该篇 → `passage-hybrid` | `tocUnavailable:'no-sections'` |
-| 节结构非法 | 空标题 / 层级过深（> `MAX_TOC_DEPTH`）/ 自嵌套 | 该篇 → `passage-hybrid`（整棵作废，不修补） | `tocUnavailable:'invalid-sections'` |
+| 节结构非法 | 层级过深（> `MAX_TOC_DEPTH`）/ 自嵌套 | 该篇 → `passage-hybrid`（整棵作废，不修补） | `tocUnavailable:'invalid-sections'` |
 | 父节点缺条目 | `A ::: B` 存在但 `A` 无独立条目 | 合成父节点（`pages` 为空），**保留树**，只作导航 | `synthesizedParents:n` |
-| 节无内容 | 标题空且无段落 | 丢弃该节点 | `droppedSections:n` |
+| 节名全空 | ` ::: ` 切分后无非空层名 | 不建节点、计入 `droppedSections`（**刻意不算非法**：局部噪声不该让整篇回落） | `droppedSections:n` |
 | 侧车不可用 | 启动失败 / 崩溃 / 超时 | 该篇 → `passage-hybrid` | `judgeUnavailable:true` |
 | Jev 返回异常 | NaN / 越界 / 批量长度不匹配 | 该篇 → `passage-hybrid`（不拿垃圾概率继续跑） | `judgeDegraded:'invalid-output'` |
 | 空选择 | 存活节点全无 `pages` | 回落文档顺序首个 `pages` 非空的节点 | `emptySelectionFallback:true` |
