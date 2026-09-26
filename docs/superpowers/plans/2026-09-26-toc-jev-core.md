@@ -174,7 +174,7 @@ git commit -m "feat(jev): add the runtime-agnostic EvidenceJudge interface"
 - Create: `src/utils/tocTree.ts`
 - Test: `src/tests/tocTree.test.ts`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 Create `src/tests/tocTree.test.ts`：
 
@@ -214,6 +214,27 @@ describe('tocNodePageSpan', () => {
     const n = node({ id: 'a', title: 'A', pages: [99] })
     expect(() => tocNodePageSpan(n, PAGES)).toThrow('toc-page-out-of-range')
   })
+
+  it('越界错误带上节点 id 与页号，便于在批量运行里定位', () => {
+    // 上百篇批量跑时，裸的错误码无从追溯是哪个节点、哪一页
+    const n = node({ id: 'a', title: 'A', pages: [99] })
+    expect(() => tocNodePageSpan(n, PAGES)).toThrow('toc-page-out-of-range: a#99')
+  })
+
+  it('拒绝负数与非整数页号——这正是旧「算术推导区间」路线会产出的东西', () => {
+    // 把守卫简化成只剩 `page >= pages.length` 时，这两条会静默通过，
+    // 然后在物化器的 piece.text.trim() 上以离现场很远的方式炸掉。
+    expect(() => tocNodePageSpan(node({ id: 'a', title: 'A', pages: [-1] }), PAGES))
+      .toThrow('toc-page-out-of-range')
+    expect(() => tocNodePageSpan(node({ id: 'a', title: 'A', pages: [1.5] }), PAGES))
+      .toThrow('toc-page-out-of-range')
+  })
+
+  it('恰好等于 pages.length - 1 的页号被接受（上边界，不是越界）', () => {
+    // PAGES 有 8 项，合法下标是 0..7——把边界写成「拒绝」是很容易犯的差一错误
+    const n = node({ id: 'a', title: 'A', pages: [7] })
+    expect(tocNodePageSpan(n, PAGES)).toEqual([{ page: 7, text: 'p7' }])
+  })
 })
 
 describe('tocSelectionToContextGroups', () => {
@@ -228,9 +249,11 @@ describe('tocSelectionToContextGroups', () => {
   })
 
   it('pages 为空的节点被跳过，不产生空组', () => {
+    // 空节点刻意放**最后**：放在最前时，「跳过空节点」与「丢掉第一个元素」
+    // 两种实现给出同一个结果，用例就失去了它名字所声称的鉴别力。
     const groups = tocSelectionToContextGroups([
-      node({ id: 'a', title: 'A' }),
       node({ id: 'b', title: 'B', pages: [2] }),
+      node({ id: 'a', title: 'A' }),
     ], PAGES)
     expect(groups).toHaveLength(1)
     expect(groups[0].pieces.map(p => p.page)).toEqual([2])
@@ -247,12 +270,12 @@ describe('tocSelectionToContextGroups', () => {
 })
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `npx vitest run src/tests/tocTree.test.ts`
 Expected: FAIL，`Failed to resolve import "../utils/tocTree"`。
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 Create `src/utils/tocTree.ts`：
 
@@ -287,13 +310,18 @@ export interface TocNode {
  *
  * 页号越界直接抛错：静默产出 `undefined` 文本会在物化器的 `text.trim()` 上炸掉，
  * 错误离现场很远；而越界是构造器的编程错误，不是运行时数据问题。
+ *
+ * `page < 0` 与非整数这两个子句**不是装饰**：它们正是被本设计删掉的「算术推导
+ * 页区间」路线会产出的东西。若把守卫简化成只剩 `page >= pages.length`，测试
+ * 依然全绿，而 `pages[-1]` 会悄悄产出 `undefined` 文本——在下游很远处才炸。
+ * 错误信息带上节点 id 与页号：批量跑上百篇时，裸的错误码无从追溯。
  */
 export function tocNodePageSpan(node: TocNode, pages: string[]): ContextPiece[] {
   return [...node.pages]
     .sort((a, b) => a - b)
     .map((page, index) => {
       if (!Number.isInteger(page) || page < 0 || page >= pages.length) {
-        throw new Error('toc-page-out-of-range')
+        throw new Error(`toc-page-out-of-range: ${node.id}#${page}`)
       }
       return { page, text: index === 0 ? pages[page] : `\n\n${pages[page]}` }
     })
@@ -310,17 +338,17 @@ export function tocSelectionToContextGroups(selected: TocNode[], pages: string[]
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `npx vitest run src/tests/tocTree.test.ts`
-Expected: PASS，7 个用例全绿。
+Expected: PASS，10 个用例全绿（tocNodePageSpan 7 + tocSelectionToContextGroups 3）。
 
-- [ ] **Step 5: 与既有口径交叉验证**
+- [x] **Step 5: 与既有口径交叉验证**
 
 Run: `npx vitest run src/tests/contextTrace.test.ts src/tests/tocTree.test.ts`
 Expected: PASS。`contextTrace.test.ts` 钉住物化器的分组不变量；两边同时绿说明本模块产出的组满足同一契约。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/utils/tocTree.ts src/tests/tocTree.test.ts
