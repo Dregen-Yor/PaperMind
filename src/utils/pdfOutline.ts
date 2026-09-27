@@ -228,6 +228,8 @@ function buildOutlineNodes(roots: PdfOutlineEntry[], pageCount: number): PdfOutl
   }
 
   // Pass 2: materialize fresh nodes (never the inputs) with ranges and ancestor paths.
+  // `cursor` walks the *same* preorder as `flat`, so `index === position.get(item)` at every step —
+  // `size[index]` and `flat[boundaryIndex]` therefore line up with the entry being built.
   let cursor = 0
   const build = (entries: PdfOutlineEntry[], path: string[], depth: number): PdfOutlineNode[] =>
     entries.map(item => {

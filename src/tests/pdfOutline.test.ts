@@ -245,10 +245,10 @@ function expectRejection(run: () => unknown, reason: PdfOutlineIndexError['reaso
 }
 
 describe('passage ranges', () => {
-  //        page: 0    1    2    3    4    5    6    7    8    9   10   11
-  //   Introduction  |  Motivation | Contributions | ...
-  //   Methods (5) ............................| Model |  Training | ...
-  //   Results (9) .............................................| ... | Conclusion
+  //   page:          0  1  2  3  4  5  6  7  8  9 10 11
+  //   Introduction (0) · Motivation (1) · Contributions (3)
+  //   Methods (5) · Model (5) · Training (7)
+  //   Results (9) · Conclusion (10)   <- last entry starts before the last page (11)
   const RICH: PdfOutlineEntry[] = [
     entry('0', 'Introduction', 0, [
       entry('0.0', 'Motivation', 1),
@@ -259,7 +259,7 @@ describe('passage ranges', () => {
       entry('1.1', 'Training', 7),
     ]),
     entry('2', 'Results', 9),
-    entry('3', 'Conclusion', 11),
+    entry('3', 'Conclusion', 10),
   ]
   const RICH_PAGES = 12
 
@@ -278,8 +278,8 @@ describe('passage ranges', () => {
       '1': [5, 9],
       '1.0': [5, 7],
       '1.1': [7, 9],
-      '2': [9, 11],
-      '3': [11, 11],
+      '2': [9, 10],
+      '3': [10, 11],
     })
   })
 
@@ -323,7 +323,16 @@ describe('passage ranges', () => {
 
   it('extends the final entry through the final page', () => {
     const ranges = rangesOf(RICH, RICH_PAGES)
-    expect(ranges['3']).toEqual([11, RICH_PAGES - 1])
+    // Conclusion starts at 10, strictly before the last page (11). Only the `pageCount - 1`
+    // fallback makes the range [10, 11]; a regression to `endPage = startPage` would yield [10, 10].
+    expect(ranges['3']).toEqual([10, RICH_PAGES - 1])
+
+    // The end of the range is real, not just an arithmetic coincidence: a passage on the final
+    // page associates with the last entry.
+    const lastPage = RICH_PAGES - 1
+    const passages = [passage(0, [lastPage])]
+    const map = pdfOutlinePassages(buildPdfOutlineIndex(RICH, passages, RICH_PAGES), passages)
+    expect(map.get(0)!.map(node => node.id)).toContain('3')
   })
 
   it('leaves passages before the first outline entry without any outline membership', () => {
