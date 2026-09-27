@@ -296,7 +296,7 @@ describe('runQaTask 段落路径 — 各臂预期模式与真降级的界线（�
     const result = await runQaTask(argsForMode(
       'hybrid-outline',
       stubHook(infoFor(denseIndex(embedder.id), {
-        outline: { nodes: [], available: false, fallbackReason: 'missing-outline', nodeVectors: new Map(), elapsedMs: 3 },
+        outline: { nodes: [], nodeCount: 0, available: false, fallbackReason: 'missing-outline', nodeVectors: new Map(), elapsedMs: 3 },
       })),
       embedder,
       capturingMaterialize().materialize,
@@ -329,20 +329,27 @@ describe('runQaTask 段落路径 — 各臂预期模式与真降级的界线（�
   })
 
   it('C 臂逐篇目录事实进入 perPaper：可用篇 / 失败篇 / B 式无目录篇三者可区分', async () => {
+    // 两层目录：Introduction（根，唯一顶层）→ Background（子）。展平后 2 个，顶层只有 1 个——
+    // 若诊断改回读 `nodes.length`，下面的节点数断言（2）就会退化成 1 而失败：
+    // 扁平的桩目录无法区分两者，正是这个缺陷当初被放过的原因。
     const nodes = [{
       id: '0', title: 'Introduction', path: [] as string[], depth: 0,
-      startPage: 0, endPage: 0, passageOrders: [0], children: [],
+      startPage: 0, endPage: 0, passageOrders: [0], children: [{
+        id: '0.0', title: 'Background', path: ['Introduction'], depth: 1,
+        startPage: 0, endPage: 0, passageOrders: [0], children: [],
+      }],
     }]
     const ok = await runQaTask(argsForMode(
       'hybrid-outline',
       stubHook(infoFor(denseIndex(), {
-        outline: { nodes, available: true, nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]), elapsedMs: 42 },
+        outline: { nodes, nodeCount: 2, available: true, nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]), elapsedMs: 42 },
       })),
       denseEmbedder(),
       capturingMaterialize().materialize,
     ))
     expect(ok.perPaper?.[0].coldStartOutlineAvailable).toBe(1)
-    expect(ok.perPaper?.[0].coldStartOutlineNodeCount).toBe(1)
+    // 展平计数（2），而非顶层数（nodes.length === 1）
+    expect(ok.perPaper?.[0].coldStartOutlineNodeCount).toBe(2)
     expect(ok.perPaper?.[0].coldStartOutlineMs).toBe(42)
     expect(ok.perPaper?.[0].coldStartOutlineFallback).toBeUndefined()
     expect(ok.metrics.outlineAvailabilityRate).toBe(1)
@@ -350,7 +357,7 @@ describe('runQaTask 段落路径 — 各臂预期模式与真降级的界线（�
     const failed = await runQaTask(argsForMode(
       'hybrid-outline',
       stubHook(infoFor(denseIndex(), {
-        outline: { nodes: [], available: false, fallbackReason: 'outline-embed-failed', nodeVectors: new Map(), elapsedMs: 5 },
+        outline: { nodes: [], nodeCount: 0, available: false, fallbackReason: 'outline-embed-failed', nodeVectors: new Map(), elapsedMs: 5 },
       })),
       denseEmbedder(),
       capturingMaterialize().materialize,

@@ -56,7 +56,7 @@ export function outlineRecordFields(outline: PassageOutlineInfo | undefined): Pa
   return {
     coldStartOutlineMs: outline.elapsedMs,
     coldStartOutlineAvailable: outline.available ? 1 : 0,
-    coldStartOutlineNodeCount: outline.nodes.length,
+    coldStartOutlineNodeCount: outline.nodeCount,
     ...(outline.fallbackReason !== undefined ? { coldStartOutlineFallback: outline.fallbackReason } : {}),
   }
 }

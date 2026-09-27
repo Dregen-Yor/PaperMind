@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { introspectPassageStageEvent, summarizeColdStart, type PassageStageEventLike } from '../metrics/passageDiagnostics'
+import {
+  introspectPassageStageEvent, outlineRecordFields, summarizeColdStart, type PassageStageEventLike,
+} from '../metrics/passageDiagnostics'
+import type { PassageOutlineInfo } from '../runner/passageIndexHook'
+import type { PdfOutlineNode } from '../../../src/utils/pdfOutline'
 
 describe('summarizeColdStart', () => {
   const records = [
@@ -77,5 +81,32 @@ describe('summarizeColdStart — 缓存命中与向量失败', () => {
     ])
     expect(metrics.avgColdStartEmbedPassagesMs).toBe(200)
     expect(metrics.passageEmbedFailureRate).toBe(0.5)
+  })
+})
+
+describe('outlineRecordFields — 目录节点数读展平总数', () => {
+  const node = (id: string, children: PdfOutlineNode[] = []): PdfOutlineNode => ({
+    id, title: id, path: [], depth: 0, startPage: 0, endPage: 0, passageOrders: [], children,
+  })
+
+  it('嵌套目录按展平总数上报，而不是顶层节点数', () => {
+    // 顶层 2 个（0、1），1 下挂一个子节点（1.0）：展平 3，顶层 2。
+    // 若本函数改回读 `outline.nodes.length`，这里会得到 2 而失败——hook 侧算好的
+    // `nodeCount` 才是权威口径（与 `resolvePdfOutline` 的 `entryCount` 同源）。
+    expect(outlineRecordFields({
+      nodes: [node('0'), node('1', [node('1.0')])],
+      nodeCount: 3,
+      available: true,
+      nodeVectors: new Map(),
+      elapsedMs: 12,
+    })).toEqual({
+      coldStartOutlineMs: 12,
+      coldStartOutlineAvailable: 1,
+      coldStartOutlineNodeCount: 3,
+    })
+  })
+
+  it('目录缺席（B 臂）返回空对象，不写任何字段冒充目录失败', () => {
+    expect(outlineRecordFields(undefined)).toEqual({})
   })
 })

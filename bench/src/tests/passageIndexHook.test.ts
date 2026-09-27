@@ -129,6 +129,8 @@ describe('createPassageIndexHook — A/B/C 模式', () => {
     // nodes 是顶层根节点（Retrieval 嵌在 Methods 下），展平后共 3 个
     expect(info.outline?.nodes).toHaveLength(2)
     expect(info.outline?.nodes[1].children).toHaveLength(1)
+    // 节点总数是展平后的 3（2 个根 + Methods 下的 1 个子），不是顶层数 2
+    expect(info.outline?.nodeCount).toBe(3)
     expect(info.outline?.nodeVectors.size).toBe(3)
 
     // 节点文本 = [...path, title].join(' > ')：根节点是纯标题，子节点带祖先链
@@ -153,6 +155,7 @@ describe('createPassageIndexHook — A/B/C 模式', () => {
     expect(info.outline?.available).toBe(false)
     expect(info.outline?.fallbackReason).toBeTruthy()
     expect(info.outline?.nodes).toEqual([])
+    expect(info.outline?.nodeCount).toBe(0)
     expect(info.outline?.nodeVectors.size).toBe(0)
     // 目录失败不是卡片失败：不得写 LLM 结构回落，也不得编造 token / 成本
     expect(info.coldStart.coldStartStructureFallback).toBeUndefined()
@@ -230,6 +233,8 @@ describe('createPassageIndexHook — A/B/C 模式', () => {
     const info = await (await hook(SAMPLE)).ready
     expect(info.outline?.available).toBe(false)
     expect(info.outline?.fallbackReason).toBe('outline-embed-failed')
+    // 节点在嵌入之前就已建好，嵌入失败也要如实上报展平总数（3），不能因为失败就记 0
+    expect(info.outline?.nodeCount).toBe(3)
     // 静默降级会把 C→B 的退化藏起来：必须留下一条可诊断的日志（与 cli.ts 的向量加载失败同风格）
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('目录节点向量计算失败'))
     warn.mockRestore()

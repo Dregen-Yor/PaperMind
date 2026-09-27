@@ -303,7 +303,10 @@ export interface PaperTimingRecord {
    * 因此它也是「C 臂这一篇到底有没有用上目录」的唯一证据。
    */
   coldStartOutlineAvailable?: number
-  /** 目录顶层节点数（`outline.nodes.length`）；目录不可用（节点为空）时为 0 */
+  /**
+   * 目录节点总数（前序展开，含嵌套子节点）——与 `resolvePdfOutline` 的 `entryCount` 同一口径。
+   * **不是**顶层节点数（`outline.nodes.length`）——顶层数会把每个嵌套目录都少报。目录不可用（节点为空）时为 0。
+   */
   coldStartOutlineNodeCount?: number
   /** 目录不可用的原因（missing-outline / null-page / outline-embed-failed …）；可用时不写。 */
   coldStartOutlineFallback?: string

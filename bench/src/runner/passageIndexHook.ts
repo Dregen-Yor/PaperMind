@@ -77,6 +77,11 @@ export interface PassageIndexHookOptions {
 /** C 臂的原生目录产物：节点、可用性、失败原因，以及**索引期**算好、查询期复用的节点向量。 */
 export interface PassageOutlineInfo {
   nodes: PdfOutlineNode[]
+  /**
+   * 目录节点**总数**（前序展开，含嵌套子节点），与 `resolvePdfOutline` 的 `entryCount` 同一口径。
+   * **不是** `nodes.length`——那只是顶层节点数，每个嵌套目录都会少报（如 22 个条目的 PDF 只有 8 个根）。
+   */
+  nodeCount: number
   /** 解析成功且节点向量齐全才为 true；Task 5 只应在 true 时使用它 */
   available: boolean
   /**
@@ -141,8 +146,10 @@ async function buildOutline(
 ): Promise<PassageOutlineInfo> {
   const now = opts.now ?? Date.now
   const startedAt = now()
-  const done = (info: Omit<PassageOutlineInfo, 'elapsedMs'>): PassageOutlineInfo =>
-    ({ ...info, elapsedMs: Math.max(0, now() - startedAt) })
+  // `nodeCount` 在唯一的收口处统一从 `nodes` 展平算出，与 `elapsedMs` 一样：所有返回路径
+  // （缺目录 / 非法 / 向量失败 / 成功）都经此，就不会出现某条分支漏填或填成顶层数。
+  const done = (info: Omit<PassageOutlineInfo, 'elapsedMs' | 'nodeCount'>): PassageOutlineInfo =>
+    ({ ...info, nodeCount: flattenOutline(info.nodes).length, elapsedMs: Math.max(0, now() - startedAt) })
 
   const roots = opts.outlineIndex?.(sample)
   if (!roots || roots.length === 0) {
