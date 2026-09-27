@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
-import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, PassageRuntimeParams, SemanticTreeParams, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
+import type { BenchConfig, ConfigFile, HybridRerankConfig, LongSectionRagConfig, PaperMindConfig, PassageMode, PassageRuntimeParams, SemanticTreeParams, TraditionalEmbeddingConfig, TraditionalRagConfig } from './types'
 import { benchPath } from './paths'
 // 受控上下文预算只有一处定义：契约模块（evaluationContract.ts）的 CONTEXT_BUDGET_TOKENS。
 // 这里刻意不再另立 4096 常量——两个数字各写一遍，就有一天会各自漂移而没人发现。
@@ -25,12 +25,26 @@ function deepFreeze<T>(value: T): T {
 /** 段落混合检索的七项旋钮（`matrix` 里的键名）；与 `validateHybridKnobs` 的清单同源。 */
 const PASSAGE_KNOB_KEYS = ['minTokens', 'maxTokens', 'maxInputChars', 'rrfK', 'sectionWeight', 'neighbourFactor', 'skipLimit'] as const
 
+/** 合法的段落构建模式；运行时清单，校验器据此拒绝未知 mode。 */
+const PASSAGE_MODES: readonly PassageMode[] = ['legacy-llm', 'lexical', 'hybrid-raw', 'hybrid-outline']
+
+/** 未知模式不是合法输入：静默当成 legacy-llm 会让一个拼错的实验臂照常产出数字。 */
+export function isPassageMode(value: unknown): value is PassageMode {
+  return typeof value === 'string' && (PASSAGE_MODES as readonly string[]).includes(value)
+}
+
+/** 配置 → 运行期模式：缺席即既有口径 `legacy-llm`（默认值刻意不写回配置对象，保持旧形态）。 */
+export function resolvePassageMode(config: Pick<PaperMindConfig, 'mode'>): PassageMode {
+  return config.mode ?? 'legacy-llm'
+}
+
 export function expandMatrix(file: ConfigFile): PaperMindConfig[] {
   const keys = Object.keys(file.matrix) as Array<keyof NonNullable<ConfigFile['matrix']>>
-  // semanticTree 与「非默认 kind」不属于矩阵维度，但展开时必须原样带到每个配置上。
-  // 默认 kind（papermind）刻意不写回，保持既有配置对象形态不变
+  // semanticTree、非默认 kind 与「非默认 mode」都不属于矩阵维度，但展开时必须原样带到每个配置上。
+  // 默认 kind（papermind）与默认 mode（legacy-llm）刻意不写回，保持既有配置对象形态不变
   const carried: Partial<PaperMindConfig> = {
     ...(file.kind && file.kind !== 'papermind' ? { kind: file.kind } : {}),
+    ...(file.mode && file.mode !== 'legacy-llm' ? { mode: file.mode } : {}),
     ...(file.semanticTree ? { semanticTree: file.semanticTree } : {}),
     // passage 的身份由 validatePaperMind 校验并归一化，这里不再重复校验。
     // 三个 sectionWeight 臂共享**同一个** passage 对象，所以这里克隆一次并深冻结：
@@ -217,9 +231,23 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
   // 顶层键白名单：拼错的开关（passag / semanticTre）和写错层级的旋钮都不能静默失效。
   // 少了这道闸，一个拼错的 passage 会让整份配置照常展开、照常带着 `papermind-hybrid`
   // 这个名字去跑平铺管道——量出来的数字标着混合检索，比直接崩掉更糟。
-  const allowedTop = new Set(['name', 'kind', 'semanticTree', 'passage', 'matrix'])
+  const allowedTop = new Set(['name', 'kind', 'mode', 'semanticTree', 'passage', 'matrix'])
   for (const key of Object.keys(raw)) if (!allowedTop.has(key)) fail(path, key, '不是支持的 PaperMind 配置项')
   if (typeof raw.name !== 'string' || !raw.name) fail(path, 'name', '缺失或不是非空字符串')
+  // 未知 mode 是硬错误：绝不静默当成 legacy-llm（一个拼错的实验臂会照常产出数字）
+  if (raw.mode !== undefined && !isPassageMode(raw.mode)) {
+    fail(path, 'mode', `未知取值 ${JSON.stringify(raw.mode)}（支持 ${PASSAGE_MODES.join(' / ')}）`)
+  }
+  const mode: PassageMode = isPassageMode(raw.mode) ? raw.mode : 'legacy-llm'
+  // 模式对 passage 块的要求（先于共现检查，好让报错直接点名模式）：
+  // - lexical（A 臂）**不加载嵌入器**，声明 passage.embedder 就是配置与口径不符；
+  // - hybrid-raw / hybrid-outline（B/C 臂）**要求**嵌入器身份，缺了就不是同一个对照。
+  if (mode === 'lexical' && raw.passage !== undefined) {
+    fail(path, 'mode', 'lexical 模式不加载嵌入器，不得声明 passage.embedder')
+  }
+  if ((mode === 'hybrid-raw' || mode === 'hybrid-outline') && raw.passage === undefined) {
+    fail(path, 'passage', `${mode} 模式要求 passage.embedder（model/revision/dtype/dim 齐全）`)
+  }
   if (!obj(raw.matrix)) fail(path, 'matrix', '缺失或不是对象')
   const matrix = raw.matrix as Record<string, unknown>
   const allowed = new Set([
@@ -239,9 +267,11 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
   // 原样展开成若干条平铺臂，名字却还叫 papermind-hybrid——量出来的数字标着混合检索，
   // 实际一条 passage 参数都没下发。只在「恰好一边有」时报错：两者都缺席是合法的纯平铺配置
   // （`bench/configs/default.json`），两者都在则交给下面的 `validateHybridKnobs` 逐项校验。
+  // lexical 是刻意的例外：A 臂有旋钮但不加载嵌入器，故有旋钮、无 passage 是它的合法形态。
   const hasKnob = PASSAGE_KNOB_KEYS.some(key => matrix[key] !== undefined)
   const hasPassage = raw.passage !== undefined
-  if (hasKnob !== hasPassage) {
+  const lexicalKnobsOnly = mode === 'lexical' && hasKnob && !hasPassage
+  if (hasKnob !== hasPassage && !lexicalKnobsOnly) {
     fail(path, 'passage', hasKnob
       ? `段落旋钮 ${PASSAGE_KNOB_KEYS.filter(key => matrix[key] !== undefined).join('/')} 缺少配套的 passage 块：嵌入器不可消融，两者必须同时出现（否则会以混合检索之名跑平铺管道）`
       : `缺少段落混合检索的七项旋钮 ${PASSAGE_KNOB_KEYS.join('/')}：passage 块必须与它们同时出现`)
@@ -250,10 +280,11 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
     ? {
         name: raw.name as string,
         kind: 'semantic-tree',
+        ...(mode !== 'legacy-llm' ? { mode } : {}),
         semanticTree: validateSemanticTreeParams(raw.semanticTree, path),
         matrix: matrix as ConfigFile['matrix'],
       }
-    : { name: raw.name as string, kind: 'papermind', matrix: matrix as ConfigFile['matrix'] }
+    : { name: raw.name as string, kind: 'papermind', ...(mode !== 'legacy-llm' ? { mode } : {}), matrix: matrix as ConfigFile['matrix'] }
   // 段落混合检索块：不可消融，校验后写回 ConfigFile，由 expandMatrix 原样带到每个展开点
   if (raw.passage !== undefined) file.passage = validatePassageParams(raw.passage, path)
   // 旋钮校验挂在本函数自己身上（而不是只挂在 loadConfigs 上）：配置即口径，

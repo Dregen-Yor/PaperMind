@@ -8,7 +8,7 @@ import { execSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync, accessSync, constants } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { parseArgs, fileStamp } from './args'
-import { loadConfigs, configLabel } from './config'
+import { loadConfigs, configLabel, resolvePassageMode } from './config'
 import { createLlmClient, resolveEnvConfig } from './llmClient'
 import { loadQasperDataset } from './datasets/qasper'
 import { loadSmokeDataset } from './datasets/smoke'
@@ -26,6 +26,7 @@ import { renderReport, renderComparison } from './report'
 import { benchPath } from './paths'
 import type { BenchResult, BenchConfig, EvalSample, SampleSource } from './types'
 import type { PaperMindConfig } from './types'
+import { isPdfStudySample } from './types'
 import type { LlmClient } from './llmClient'
 import type { StrongBaselineQaArgs, StrongGenerationSettings } from './runner/strongBaselineQa'
 import { materializeContext, type ContextGroup } from '../../src/utils/contextTrace'
@@ -63,6 +64,16 @@ const RESULTS_DIR = () => benchPath(import.meta.url, '../results/')
 // 与各 runner 内部的 modelCacheDir() 指向同一目录（bench/cache/models/）：
 // 受控物化器与检索侧加载的是同一份 BGE-M3 词表
 const MODEL_CACHE_DIR = () => benchPath(import.meta.url, '../cache/models/')
+
+/**
+ * 段落索引管线适用的配置：既包括声明了 `passage` 块的既有 hybrid 配置，也包括
+ * 缺省 mode 非 legacy 的实验臂——`lexical`（A 臂）刻意不带 `passage.embedder`，
+ * 只靠 `mode` 才能被路由进这条管线。
+ * 参数已是 `PaperMindConfig`（前面的 kind 分支已排除其它三种 union 成员）。
+ */
+function isPassagePipelineConfig(config: PaperMindConfig): boolean {
+  return config.passage !== undefined || (config.mode !== undefined && config.mode !== 'legacy-llm')
+}
 
 /**
  * 参考答案是英文而生产 prompt 是中文，不强制英文作答则 answerF1 恒≈0（Task 10 裁定 3）。
@@ -426,28 +437,32 @@ for (const config of configs) {
             onProgress: strongProgress(config),
             ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })
-        } else if (config.passage) {
-          // 冷启动全部发生在逐题计时之前（query-timeline-v2）：hook 内部 await 到阶段③。
-          // 向量模型按配置显式 pin 加载，失败不中断本轮——降级为 bm25* 并标为不可比，
-          // 因为「模型没下下来」和「检索不行」是两件事，混在一起读会得出错误结论
+        } else if (isPassagePipelineConfig(config)) {
+          // 冷启动全部发生在逐题计时之前（query-timeline-v2）：hook 的 `ready` 内部 await 到
+          // 请求的最后一阶段。向量模型按配置显式 pin 加载，失败不中断本轮——降级为 bm25* 并标为
+          // 不可比，因为「模型没下下来」和「检索不行」是两件事，混在一起读会得出错误结论
+          const mode = resolvePassageMode(config)
+          const embedderParams = config.passage?.embedder
           let passageEmbedder: Embedder | undefined
-          try {
-            // 与其它 runner 同一下载口径：transformers.js 不读 HF_ENDPOINT，需显式设 remoteHost
-            applyHfEndpoint(await import('@huggingface/transformers'))
-            passageEmbedder = await createTransformersEmbedder({
-              model: config.passage.embedder.model,
-              revision: config.passage.embedder.revision,
-              dtype: config.passage.embedder.dtype,
-              // 配置 pin 的维度就是断言依据：不传则缺省 384，m3 配置（1024）会死在
-              // 第一趟前向传播上，配置里那行 dim 成了没人读的说明
-              dim: config.passage.embedder.dim,
-              // 权重落 bench/cache/models/（与契约词表同一目录，各 runner 的 modelCacheDir 亦同）。
-              // Node 下没有 indexedDB，自定义缓存只会静默全部未命中：不指目录就永远重新下载，
-              // 离线时每轮都停在 embedderUnavailable（R43）
-              cacheDir: MODEL_CACHE_DIR(),
-            })
-          } catch (error) {
-            console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
+          if (embedderParams) {
+            try {
+              // 与其它 runner 同一下载口径：transformers.js 不读 HF_ENDPOINT，需显式设 remoteHost
+              applyHfEndpoint(await import('@huggingface/transformers'))
+              passageEmbedder = await createTransformersEmbedder({
+                model: embedderParams.model,
+                revision: embedderParams.revision,
+                dtype: embedderParams.dtype,
+                // 配置 pin 的维度就是断言依据：不传则缺省 384，m3 配置（1024）会死在
+                // 第一趟前向传播上，配置里那行 dim 成了没人读的说明
+                dim: embedderParams.dim,
+                // 权重落 bench/cache/models/（与契约词表同一目录，各 runner 的 modelCacheDir 亦同）。
+                // Node 下没有 indexedDB，自定义缓存只会静默全部未命中：不指目录就永远重新下载，
+                // 离线时每轮都停在 embedderUnavailable（R43）
+                cacheDir: MODEL_CACHE_DIR(),
+              })
+            } catch (error) {
+              console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
+            }
           }
           const knobs: HybridKnobs = {
             minTokens: config.minTokens as number,
@@ -470,6 +485,12 @@ for (const config of configs) {
                 embedder: passageEmbedder,
                 countTokens,
                 modelIdentity: env.model,
+                mode,
+                // C 臂的原生目录只在 outline-study 样本上存在；显式注入访问器，
+                // 让 hook 不必把 EvalSample 硬窄化成 PdfStudySample
+                ...(mode === 'hybrid-outline'
+                  ? { outlineIndex: (sample: EvalSample) => isPdfStudySample(sample) ? sample.pdfOutline : undefined }
+                  : {}),
               }),
               embedder: passageEmbedder,
               countTokens,
@@ -482,7 +503,8 @@ for (const config of configs) {
               sectionWeight: knobs.sectionWeight,
               neighbourFactor: knobs.neighbourFactor,
               skipLimit: knobs.skipLimit,
-              embedderUnavailable: passageEmbedder === undefined,
+              // lexical 臂本就不加载嵌入器：它的「缺席」是设计，不是降级
+              embedderUnavailable: mode !== 'lexical' && passageEmbedder === undefined,
             },
             ...(speedPolicy ? { speed: speedPolicy.runnerOptions } : {}),
           })

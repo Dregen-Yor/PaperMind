@@ -13,7 +13,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { parseArgs } from './args'
-import { loadConfigs } from './config'
+import { loadConfigs, resolvePassageMode } from './config'
 import { createLlmClient, resolveEnvConfig, type LlmClient } from './llmClient'
 import { loadQasperDataset } from './datasets/qasper'
 import { loadSmokeDataset } from './datasets/smoke'
@@ -109,13 +109,14 @@ async function renderCardSections(
     embedder,
     countTokens: (text: string) => contractTokenizer.tokenize(text).length,
     modelIdentity,
+    mode: resolvePassageMode(config),
   })
 
   process.stdout.write(`对 ${samples.length} 篇论文建卡片索引（${config.name}）...\n`)
   const lines: string[] = ['# 卡片划分人工核对', '']
   for (const sample of samples) {
     try {
-      const { index } = await hook(sample)
+      const { index } = await (await hook(sample)).ready
       const cards = index.cards
       // hook 契约保证阶段③ 一定有成型的卡片；真缺了就说实话，不渲染一张空表
       if (cards === undefined) throw new Error(`论文 ${sample.paperId} 未走到阶段③，卡片刻度缺失`)

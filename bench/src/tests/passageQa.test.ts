@@ -131,13 +131,17 @@ function argsWithSectionWeight(
     materialize,
     evaluationContract: buildEvaluationContract([sample]),
     passage: {
-      // hook 桩：把手工索引端到端送进**真实**检索（切段与建卡片不在本用例范围内）
-      hook: async () => ({
-        index,
-        coldStart: { coldStartPassageMs: 0, coldStartPassageCount: passages.length, coldStartTotalMs: 0 },
-        cacheHits: 0,
-        cacheMisses: 0,
-      }),
+      // hook 桩：把手工索引端到端送进**真实**检索（切段与建卡片不在本用例范围内）。
+      // 句柄形态：lexicalReady 与 ready 都给同一份索引（本用例不区分阶段）
+      hook: async () => {
+        const info = {
+          index,
+          coldStart: { coldStartPassageMs: 0, coldStartPassageCount: passages.length, coldStartTotalMs: 0 },
+          cacheHits: 0,
+          cacheMisses: 0,
+        }
+        return { lexicalReady: info, ready: Promise.resolve(info) }
+      },
       // 无向量模型：本用例的差异必须只来自 sectionWeight，不允许 dense 路掺进来
       embedder: undefined,
       countTokens,

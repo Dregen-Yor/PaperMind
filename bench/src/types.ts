@@ -60,6 +60,15 @@ export interface PdfStudySample extends EvalSample {
 }
 
 /**
+ * 运行期窄化：只有 `--dataset outline-study` 的样本带原生目录（`PdfStudySample`）。
+ * `EvalSample` 本身不含这些运行期字段，凡是要用它们的调用方（如 C 臂的 hook）
+ * 都必须在**这里**显式窄化，而不是各自 `as` 一把。
+ */
+export function isPdfStudySample(sample: EvalSample): sample is PdfStudySample {
+  return Array.isArray((sample as { pdfOutline?: unknown }).pdfOutline)
+}
+
+/**
  * 一组具体参数取值（矩阵展开后的单点）。
  * 刻意 Omit externalContext：它会让 runRagPipeline 跳过改写与检索，
  * 一个语法合法的配置就能静默关掉正在被评测的整条链路，而指标照常输出数字。
@@ -85,6 +94,16 @@ export interface PassageRuntimeParams {
   embedder: PassageEmbedderParams
 }
 
+/**
+ * 段落索引的构建模式（方案 §3.0 的 A/B/C 结构实验）。
+ *
+ * - `legacy-llm`：既有产品口径——阶段①②③ 全建，每篇恰好一次卡片 LLM 调用（缺席 `mode` 即此值）。
+ * - `lexical`：A 臂，只有 BM25 词法一路，**不加载 embedder、不产向量、不调 LLM**（停留阶段①）。
+ * - `hybrid-raw`：B 臂，BM25 + 段落向量（阶段②），仍零生成式 LLM 调用。
+ * - `hybrid-outline`：C 臂，B 之上再加原生 PDF 目录索引与节点向量，零生成式 LLM 调用。
+ */
+export type PassageMode = 'legacy-llm' | 'lexical' | 'hybrid-raw' | 'hybrid-outline'
+
 export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externalContext'> {
   name: string
   /**
@@ -92,6 +111,11 @@ export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externa
    * 唯一差别是每篇论文多一棵语义树索引（§11.2 的对照组设计）。
    */
   kind?: 'papermind' | 'semantic-tree'
+  /**
+   * 段落索引的构建模式（方案 §3.0）。顶层标量、与 `kind` 同级，**不**进 `passage` 块、
+   * **不**作 matrix 轴；缺席即 `legacy-llm`（既有产品口径逐字不变）。
+   */
+  mode?: PassageMode
   /** kind === 'semantic-tree' 时必填 */
   semanticTree?: SemanticTreeParams
   /**
@@ -168,12 +192,14 @@ export interface ConfigFile {
   name: string
   /** 语义树配置与 PaperMind 共用矩阵形态，只多一个建树参数块 */
   kind?: 'papermind' | 'semantic-tree'
+  /** 段落构建模式；非默认（非 legacy-llm）时由 expandMatrix 原样带到每个展开点 */
+  mode?: PassageMode
   /** kind === 'semantic-tree' 时必填 */
   semanticTree?: SemanticTreeParams
   /** 段落混合检索块（不可消融），由 expandMatrix 原样带到每个展开点 */
   passage?: PassageRuntimeParams
   /** 键收敛到 BenchConfig 的可调字段，防止拼错的键静默失效 */
-  matrix: Partial<Record<Exclude<keyof PaperMindConfig, 'name' | 'kind' | 'semanticTree' | 'passage'>, Array<number | boolean>>>
+  matrix: Partial<Record<Exclude<keyof PaperMindConfig, 'name' | 'kind' | 'mode' | 'semanticTree' | 'passage'>, Array<number | boolean>>>
 }
 
 export interface SampleError {

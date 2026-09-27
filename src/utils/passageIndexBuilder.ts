@@ -49,6 +49,14 @@ export interface PassagePipelineDeps {
   passageConfigHash: string
   structureHash: string
   maxInputChars?: number
+  /**
+   * 是否构建阶段③（卡片 + 卡片向量）。默认 `true`（既有产品与 bench 口径逐字不变）。
+   *
+   * `false` 时**只**砍阶段③：不生成卡片、不调 LLM、不产卡片向量；阶段① 的标题树照常构建
+   * （既有索引消费者读 `index.tree`），阶段② 的段落向量照常按 `embedder` 是否存在决定。
+   * 方案 §3.0 的 A/B/C 三个实验臂据此做到「零生成式索引调用」。
+   */
+  buildStructure?: boolean
   now?: () => number
   /** 阶段耗时观测（bench 冷启动成本）；产品不传 */
   onStage?: (event: PassageStageEvent) => void
@@ -183,6 +191,9 @@ async function runRemainingStages(
 ): Promise<PassageIndex> {
   const { plan, stage1, now } = ctx
   const embedder = deps.embedder
+  // 阶段③ 是否构建：默认 true。false 时卡片生成与卡片向量一起关掉（零 LLM 调用），
+  // 阶段① 的标题树与阶段② 的段落向量不受影响
+  const buildStructure = deps.buildStructure !== false
   // 无 embedder（模型没就绪）时存量向量在这里带回；`embedderId` 与它同源，三元组一起写才自洽
   // （见 `carryStoredPassageVectors`）。carried 非空 ⇒ embedder 为空 ⇒ 阶段② 第一行就返回，
   // 下面这两个初值不可能被它覆盖。
@@ -226,6 +237,8 @@ async function runRemainingStages(
 
   // 阶段③：卡片（唯一一次 LLM 调用）
   const stage3 = (async (): Promise<void> => {
+    // buildStructure:false → 阶段③ 整个跳过：不调用 LLM、不产卡片、也不继承存量卡片
+    if (!buildStructure) return
     if (!plan.structure && ctx.existing?.cards) {
       cards = ctx.existing.cards
       paper = ctx.existing.paper
@@ -264,7 +277,7 @@ async function runRemainingStages(
   // 一个来自阶段③（卡片文本）。条件**刻意不看 `plan.vectors`**：`plan.vectors` 只描述
   // 「段落向量要不要重算」，而卡片一旦变化（哪怕只有 structureHash 变了、段落向量照旧），
   // 卡片向量就必须按新卡片重算，否则会挂上一份与卡片文本无对应关系的旧向量。
-  if (embedder && passageVectors && cards && cards.length > 0 && (vectorDim ?? 0) > 0) {
+  if (buildStructure && embedder && passageVectors && cards && cards.length > 0 && (vectorDim ?? 0) > 0) {
     const startedAt = now()
     try {
       const vectors = await embedder.embedPassages(cards.map(card => cardEmbedText(card)))

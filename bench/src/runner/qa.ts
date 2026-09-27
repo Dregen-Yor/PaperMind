@@ -181,8 +181,10 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     try {
       if (args.passage) {
         // 段落配置下索引由 hook 全权产出：不计 buildPageIndex 的 N+1 次调用，
-        // 也不存在「hook 失败后回落平面索引」——失败即本篇记 index 阶段错误（方案 §7）
-        passageInfo = await args.passage.hook(sample)
+        // 也不存在「hook 失败后回落平面索引」——失败即本篇记 index 阶段错误（方案 §7）。
+        // hook 返回 `{ lexicalReady, ready }`：普通热路径（含 --speed）await `ready`，
+        // 让冷启动仍全部发生在逐题计时之前（query-timeline-v2 口径逐字不变）。
+        passageInfo = await (await args.passage.hook(sample)).ready
         tree = passageInfo.index.tree
       } else {
         tree = await buildIndex(sample.pages, client.complete, indexOptions(config))
@@ -478,11 +480,16 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   // 段落配置：只要有一题实际走了 bm25*（单篇向量失败、查询向量失败、来源不符），
   // 本轮检索信号就与正式对照不同源——整轮标为不可比，而不只是在 CLI 模型整体加载失败时（方案 §7/§8）
   const passageModes = args.passage ? perSample.filter(record => record.retrievalMode !== undefined) : []
-  const degradedQuestions = passageModes.filter(record => record.retrievalMode!.startsWith('bm25')).length
+  // lexical（A 臂）本就只有词法一路：bm25 是它**预期**的模式而非降级，也本就不加载嵌入器。
+  // 把这两件事按模式区分开，A 臂才不会被误标为「向量降级」或「embedder-unavailable」而排除出对照。
+  const expectsEmbedder = (config.mode ?? 'legacy-llm') !== 'lexical'
+  const degradedQuestions = expectsEmbedder
+    ? passageModes.filter(record => record.retrievalMode!.startsWith('bm25')).length
+    : 0
   const passageDegradedQuestionRate = passageModes.length > 0 ? degradedQuestions / passageModes.length : 0
-  const passageIneligibleReason = args.passage?.embedderUnavailable
+  const passageIneligibleReason = expectsEmbedder && args.passage?.embedderUnavailable
     ? 'embedder-unavailable'
-    : degradedQuestions > 0 || perPaper.some(record => record.coldStartEmbedFailed === 1)
+    : expectsEmbedder && (degradedQuestions > 0 || perPaper.some(record => record.coldStartEmbedFailed === 1))
       ? 'passage-retrieval-degraded'
       : undefined
   return finalizeQaResult({

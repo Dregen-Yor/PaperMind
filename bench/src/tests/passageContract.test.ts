@@ -111,8 +111,9 @@ describe('createPassageIndexHook：指纹与真正下发的切段同源（findin
       embedder: undefined,
       countTokens,
       modelIdentity: 'bench-model',
+      mode: 'legacy-llm',
     })
-    const { index } = await hook(SAMPLE)
+    const { index } = await (await hook(SAMPLE)).ready
 
     // 真的走到阶段③：卡片来自模型，不是标题回落（回落卡片只有标题，keyTerms 为空）
     expect(index.stage).toBe(3)

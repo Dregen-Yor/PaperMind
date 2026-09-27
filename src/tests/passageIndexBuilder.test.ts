@@ -296,4 +296,47 @@ describe('startPassagePipeline', () => {
     const failing = { ...ctx.deps, persist: async () => { throw new Error('disk full') } }
     await expect(startPassagePipeline(PAGES, failing, {})).rejects.toThrow('disk full')
   })
+
+  // —— 零生成式建库（方案 §3.0 的 A/B/C 臂）：buildStructure:false 只砍阶段③ ——
+
+  it('buildStructure:false 且有 embedder → 只到阶段②；不调用 LLM、无卡片/卡片向量', async () => {
+    const embedder = fakeEmbedder()
+    const llm = vi.fn(async () => CARDS_JSON)
+    const ctx = deps(llm, embedder)
+    const started = await startPassagePipeline(PAGES, { ...ctx.deps, buildStructure: false }, {})
+    // 阶段① 立即可用（落盘即返回）
+    expect(started.index.stage).toBe(1)
+    expect(started.index.cards).toBeUndefined()
+
+    const final = await started.rest
+    expect(llm).not.toHaveBeenCalled()
+    expect(final.stage).toBe(2)
+    expect(final.cards).toBeUndefined()
+    expect(final.cardVectors).toBeUndefined()
+    expect(final.passageVectors).toHaveLength(final.passages.length)
+    // rest 只等真正请求的向量：事件里没有 structure / card-vectors
+    expect(ctx.stages).toEqual(['passages', 'passage-vectors'])
+    // 阶段② 自己落一次盘，最终 merge 再落一次（stage 都是 2），没有阶段③
+    expect(ctx.persisted.map(item => item.stage)).toEqual([1, 2, 2])
+  })
+
+  it('buildStructure:false 且无 embedder → 停留阶段①（零向量、零 LLM）', async () => {
+    const llm = vi.fn(async () => CARDS_JSON)
+    const ctx = deps(llm)
+    const final = await (await startPassagePipeline(PAGES, { ...ctx.deps, buildStructure: false }, {})).rest
+    expect(llm).not.toHaveBeenCalled()
+    expect(final.stage).toBe(1)
+    expect(final.cards).toBeUndefined()
+    expect(final.cardVectors).toBeUndefined()
+    expect(final.passageVectors).toBeUndefined()
+    expect(ctx.stages).toEqual(['passages'])
+  })
+
+  it('buildStructure 缺省 → 与既有口径一致（构建卡片，LLM 恰好一次）', async () => {
+    const llm = vi.fn(async () => CARDS_JSON)
+    const final = await (await startPassagePipeline(PAGES, deps(llm, fakeEmbedder()).deps, {})).rest
+    expect(llm).toHaveBeenCalledTimes(1)
+    expect(final.stage).toBe(3)
+    expect(final.cards).toHaveLength(3)
+  })
 })
