@@ -90,7 +90,9 @@ export function aggregateColdFirstQueryMetrics(
     metrics.outlineReadyP95Ms = percentile(outlineReady, 95)
   }
 
-  // 目录实际使用率只对 C 臂有意义：A/B 没有目录先验，输出一个 0 使用率是误导
+  // 目录实际使用率只对 C 臂有意义：A/B 没有目录先验，输出一个 0 使用率是误导。
+  // `outlineUsed` 缺席（pdf-load/index/retrieve 失败或整篇跳过，从未走到检索）按「未使用」计入
+  // 分母——与改造前默认 false 的口径一致；本模块**不**消费 `retrievalMode`，故其缺席无需特判。
   if (scenario.mode === 'hybrid-outline' && records.length > 0) {
     metrics.outlineUsedRate = records.filter(record => record.outlineUsed).length / records.length
   }

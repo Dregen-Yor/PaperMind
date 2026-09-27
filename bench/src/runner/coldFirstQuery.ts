@@ -7,8 +7,10 @@
  * - `ask-at-lexical-ready`：阶段① 词法快照一落盘就回答，向量/目录在后台继续，回答后再 settle。
  *
  * 每个时长都从**同一篇论文自己的 t0**（重新打开 PDF 字节之前）起算；回答路径复用生产
- * `retrieveRagContext`（受控物化器）与 `generateSpeedAnswer`（流式，query timeline 的 t0 即冷 t0，
- * 因此 TTFT / Full Answer 天然是 t0 相对值）。不写 SQLite，不写结果文件，返回纯内存结果。
+ * `retrieveRagContext`（受控物化器）与 `generateSpeedAnswer`（流式）。冷 t0 先被 stamp，随后取
+ * token 快照、再 `startQueryTimeline` 记录它自己的 `startedAt`（比 t0 略晚的一瞬）——三者都发生在
+ * 任何冷工作（读 PDF / 初始化本地模型 / 建索引）之前，因此 TTFT / Full Answer 实际以 t0 为基准。
+ * 不写 SQLite，不写结果文件，返回纯内存结果。
  */
 import { retrieveRagContext, type RagRetrievalStage } from '../../../src/utils/ragPipeline'
 import { DEFAULT_HYBRID_OPTIONS } from '../../../src/utils/passageRetrieval'
@@ -89,14 +91,13 @@ async function measureColdPaper(
     localModelInitMs: 0,
     lexicalReadyMs: 0,
     actualPassageStage: 0,
-    retrievalMode: 'bm25',
-    outlineUsed: false,
     completionStatus: 'skipped',
   }
   if (!question) return base
 
   const t0 = now()
-  // query timeline 的 t0 即冷 t0：TTFT / Full Answer 因此是 t0 相对值。token 快照同样在 t0 取。
+  // t0 先 stamp，随后取 token 快照、再 startQueryTimeline 记录它自己的 startedAt（比 t0 略晚）。
+  // 三者都在任何冷工作（读 PDF / 初始化本地模型 / 建索引）之前完成，故 TTFT / Full Answer 以 t0 为基准。
   const before = args.client.tokenSnapshot()
   const timeline = startQueryTimeline(now, before)
   const retrieveContext = args.deps?.retrieveContext ?? retrieveRagContext
@@ -193,10 +194,18 @@ async function measureColdPaper(
     return base
   }
 
+  // 检索期事实只在 retrieveContext 真的成功后才写入：未走到这里的记录（pdf-load / index /
+  // retrieve 失败或被跳过）两个字段整体缺席，绝不冒充「用了 bm25」或「没用目录」。
   const first = retrieval.retrievals[0]
-  base.retrievalMode = first?.hybrid?.retrievalMode ?? base.retrievalMode
-  base.outlineUsed = first?.hybrid?.outlineUsed ?? false
-  const outlineFallback = first?.hybrid?.outlineFallbackReason ?? passageInfo.outline?.fallbackReason
+  base.retrievalMode = first?.hybrid?.retrievalMode
+  base.outlineUsed = first?.hybrid?.outlineUsed
+  // `available:true` 却给不出齐全的节点向量（畸形产物）时 `toOutlineScoringNodes` 返回 undefined：
+  // 本篇整份目录作废、按 B 回落，与 qa.ts 同口径显式记 `outline-embed-failed`，绝不静默变成 '—'。
+  const outlineVectorsIncomplete =
+    passageInfo.outline?.available === true && outlineScoringNodes === undefined
+  const outlineFallback = outlineVectorsIncomplete
+    ? 'outline-embed-failed'
+    : passageInfo.outline?.fallbackReason ?? first?.hybrid?.outlineFallbackReason
   if (outlineFallback !== undefined) base.outlineFallbackReason = outlineFallback
 
   const speedRecord = newSampleRecord(sample, question)

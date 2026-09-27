@@ -114,7 +114,11 @@ export type ColdStrategy = 'ready-before-query' | 'ask-at-lexical-ready'
 /**
  * 冷首问逐篇观测（`--cold-first-query`）。所有时长都是**从 t0（重新打开 PDF 字节之前）**起算的
  * 毫秒数；`timeToFirstTokenMs` / `fullAnswerLatencyMs` 只在回答完成时写入，`denseReadyMs` /
- * `outlineReadyMs` 只在对应的就绪阶段真的完成时写入（A 臂与失败路径**缺席而非记 0**）。
+ * `outlineReadyMs` 只在对应该阶段真的完成时写入——A 臂（无向量/目录阶段）与「该阶段未完成即失败」
+ * 的篇缺席而非记 0；就绪阶段已完成、只是随后回答失败（含就绪成功但回答失败的篇）则照常有值。
+ *
+ * `retrievalMode` / `outlineUsed` 是**检索期事实**，只在 `retrieveContext` 真的成功后才写入：
+ * pdf-load / index / retrieve 失败或整篇被跳过的记录既不声称用了 `bm25`，也不声称没用目录，一律缺席。
  */
 export interface ColdFirstQueryRecord {
   id: string
@@ -127,8 +131,8 @@ export interface ColdFirstQueryRecord {
   denseReadyMs?: number
   outlineReadyMs?: number
   actualPassageStage: number
-  retrievalMode: string
-  outlineUsed: boolean
+  retrievalMode?: string
+  outlineUsed?: boolean
   outlineFallbackReason?: string
   timeToFirstTokenMs?: number
   fullAnswerLatencyMs?: number

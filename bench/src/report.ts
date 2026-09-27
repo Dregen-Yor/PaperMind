@@ -962,10 +962,11 @@ export function renderColdFirstQueryReport(results: ColdFirstQueryResult[]): str
   lines.push('| --- | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- |')
   for (const result of results) {
     const m = result.metrics
-    const num = (name: string) => (m[name] === undefined ? '—' : fmt(m[name]))
+    // 计数是整数：`fmt` 会把 <10 的值渲染成三位小数（5 → `5.000`），故计数单独用整数形态
+    const count = (name: string) => (m[name] === undefined ? '—' : String(m[name]))
     lines.push(
       `| ${result.mode} | ${COLD_STRATEGY_LABELS[result.strategy]} | `
-      + `${num('coldFirstQuerySampleCount')} | ${num('coldFirstQueryCompletedCount')} | ${num('coldFirstQueryFailedCount')} | `
+      + `${count('coldFirstQuerySampleCount')} | ${count('coldFirstQueryCompletedCount')} | ${count('coldFirstQueryFailedCount')} | `
       + `${cell(m, 'timeToFirstToken')} | ${cell(m, 'fullAnswerLatency')} | `
       + `${cell(m, 'pdfLoad')} | ${cell(m, 'localModelInit')} | ${cell(m, 'lexicalReady')} | `
       + `${cell(m, 'denseReady')} | ${cell(m, 'outlineReady')} | `
@@ -974,14 +975,14 @@ export function renderColdFirstQueryReport(results: ColdFirstQueryResult[]): str
   }
   lines.push('')
 
-  lines.push('| 论文 | 阶段 | 检索模式 | 目录使用 | 目录回落原因 | PDF 载入 | 本地模型 | 词法就绪 | 向量就绪 | 目录就绪 | TTFT | Full Answer | 状态 | 失败阶段 |')
-  lines.push('| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |')
+  lines.push('| 模式 | 策略 | 论文 | 阶段 | 检索模式 | 目录使用 | 目录回落原因 | PDF 载入 | 本地模型 | 词法就绪 | 向量就绪 | 目录就绪 | TTFT | Full Answer | 状态 | 失败阶段 |')
+  lines.push('| --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |')
   const duration = (value: number | undefined) => (value === undefined ? '—' : fmtDuration(value))
   for (const result of results) {
     for (const record of result.records) {
       lines.push(
-        `| ${record.paperId} | ${record.actualPassageStage} | ${record.retrievalMode} | `
-        + `${record.outlineUsed ? 'yes' : 'no'} | ${record.outlineFallbackReason ?? '—'} | `
+        `| ${result.mode} | ${result.strategy} | ${record.paperId} | ${record.actualPassageStage} | ${record.retrievalMode ?? '—'} | `
+        + `${record.outlineUsed === undefined ? '—' : record.outlineUsed ? 'yes' : 'no'} | ${record.outlineFallbackReason ?? '—'} | `
         + `${duration(record.pdfLoadMs)} | ${duration(record.localModelInitMs)} | ${duration(record.lexicalReadyMs)} | `
         + `${duration(record.denseReadyMs)} | ${duration(record.outlineReadyMs)} | `
         + `${duration(record.timeToFirstTokenMs)} | ${duration(record.fullAnswerLatencyMs)} | `
