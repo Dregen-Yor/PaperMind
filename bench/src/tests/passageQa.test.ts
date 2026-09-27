@@ -342,7 +342,9 @@ describe('runQaTask 段落路径 — 各臂预期模式与真降级的界线（�
     const ok = await runQaTask(argsForMode(
       'hybrid-outline',
       stubHook(infoFor(denseIndex(), {
-        outline: { nodes, nodeCount: 2, available: true, nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]), elapsedMs: 42 },
+        // available:true ⇒ 每个展平节点都要有向量（生产由 buildOutline 的三重校验保证）；
+        // 只给 '0' 会让这篇在 Task 5 里静默缩水——那正是本 fixture 当初掩盖的状态。
+        outline: { nodes, nodeCount: 2, available: true, nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)], ['0.0', new Float32Array(DENSE_DIM).fill(1)]]), elapsedMs: 42 },
       })),
       denseEmbedder(),
       capturingMaterialize().materialize,
@@ -403,6 +405,32 @@ describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5�
     nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]),
     elapsedMs: 9,
   }
+  // 畸形产物：available:true 却只给根节点向量、子节点 '0.0' 缺向量。
+  // `toOutlineScoringNodes` 必须把整份视为不可用，而不是丢掉子节点后缩水成单节点目录。
+  const outlineInfoPartialVectors: PassageOutlineInfo = {
+    nodes: [{
+      id: '0', title: 'Introduction', path: [], depth: 0, startPage: 0, endPage: 3, passageOrders: [0, 1, 2, 3],
+      children: [{
+        id: '0.0', title: 'Background', path: ['Introduction'], depth: 1, startPage: 0, endPage: 3,
+        passageOrders: [0, 1, 2, 3], children: [],
+      }],
+    }],
+    nodeCount: 2,
+    available: true,
+    nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]),
+    elapsedMs: 11,
+  }
+  // 只覆盖 P02（order 1）的目录：配合下方「权重来自配置的 sectionWeight」用例——
+  // 权重 0 时目录不计权、P01 胜出；权重足够大时目录把 P02 抬到第一。
+  const p02OnlyOutline: PassageOutlineInfo = {
+    nodes: [{
+      id: '0', title: 'Evaluation', path: [], depth: 0, startPage: 1, endPage: 1, passageOrders: [1], children: [],
+    }],
+    nodeCount: 1,
+    available: true,
+    nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]),
+    elapsedMs: 4,
+  }
 
   it('目录可用 + dense 可用 → bm25+dense+outline，逐题记 outlineUsed 且不判降级', async () => {
     const embedder = denseEmbedder()
@@ -446,5 +474,40 @@ describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5�
     expect(result.metrics.passageDegradedQuestionRate).toBe(1)
     expect(result.meta.comparisonEligible).toBe(false)
     expect(result.meta.comparisonIneligibleReason).toBe('passage-retrieval-degraded')
+  })
+
+  it('available:true 但节点向量不齐 → 整份目录作废，按 B 回落并记 outline-embed-failed', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-outline',
+      stubHook(infoFor(denseIndex(embedder.id), { outline: outlineInfoPartialVectors })),
+      embedder, capturingMaterialize().materialize,
+    ))
+    // 不静默缩水：mode 退回 B 的 bm25+dense（C 臂的合法回落，不判降级），并留下可诊断原因
+    expect(result.perSample[0].retrievalMode).toBe('bm25+dense')
+    expect(result.perSample[0].outlineUsed).toBe(false)
+    expect(result.perSample[0].outlineFallbackReason).toBe('outline-embed-failed')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(0)
+    expect(result.meta.comparisonEligible).not.toBe(false)
+  })
+
+  it('C 臂目录权重来自配置的 sectionWeight：权重 0 与 1 改变选段（防止字段静默变死）', async () => {
+    const run = async (sectionWeight: number) => {
+      const capture = capturingMaterialize()
+      const base = argsForMode(
+        'hybrid-outline', stubHook(infoFor(denseIndex(DENSE_ID), { outline: p02OnlyOutline })),
+        denseEmbedder(), capture.materialize,
+      )
+      const result = await runQaTask({ ...base, passage: { ...base.passage!, sectionWeight } })
+      return { result, seen: capture.seen }
+    }
+    const zero = await run(0)
+    const one = await run(1)
+    expect(zero.result.perSample[0].retrievalMode).toBe('bm25+dense+outline')
+    expect(one.result.perSample[0].retrievalMode).toBe('bm25+dense+outline')
+    // 权重 0 = 目录不计权 ⇒ 融合退化成 B，BM25 第 1 名的 P02 反而落到 P01 之后 ⇒ 选 P01；
+    // 权重 1 ⇒ 目录把 P02 抬到第一 ⇒ 选 P02。若 qa 层没把 sectionWeight 传进 outline.weight，两次会相同。
+    expect(zero.seen[0].join('')).toContain('Overview')
+    expect(one.seen[0].join('')).toContain('evaluate on the alpha dataset')
   })
 })

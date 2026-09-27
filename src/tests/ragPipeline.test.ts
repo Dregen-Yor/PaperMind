@@ -736,7 +736,7 @@ describe('retrieveRagContext 的目录先验（按篇转发，C 臂）', () => {
     separatorTokens: 2,
   }
   // 目录只覆盖 P02（order 1）：P02 吃第 1 名，其余段落并列末位
-  const outline = { nodes: [{ id: '0', passageOrders: [1], vector: new Float32Array([1, 0]) }] }
+  const outline = { nodes: [{ id: '0', passageOrders: [1], vector: new Float32Array([1, 0]) }], weight: 0.5 }
   const llm = vi.fn(async () => 'should not be called')
   const passageDeps = { passage: { embedder, maxTokens: 45, sectionWeight: 0.5 } }
   const paperPages = passages.map(passage => passage.text)
@@ -756,6 +756,21 @@ describe('retrieveRagContext 的目录先验（按篇转发，C 臂）', () => {
     expect(withOutline.retrievals[0].hybrid?.outlineUsed).toBe(true)
     expect(withOutline.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P02'])
     expect(llm).not.toHaveBeenCalled()
+  })
+
+  it('论文上挂的目录 weight 被逐字转发：改 weight（sectionWeight 固定）即改选段', async () => {
+    // deps 的 sectionWeight 固定 0.5，只改论文自己携带的 outline.weight。
+    // 若 ragPipeline 忽略 paper.outline.weight、改从 deps.sectionWeight 重算，两次结果会逐字相同。
+    const weightFor = (weight: number) => retrieveRagContext(
+      [{ tree: multiLeafTree, pages: paperPages, passageIndex: denseIndex, outline: { ...outline, weight } }],
+      'alpha', [], llm, {}, passageDeps,
+    )
+    const zero = await weightFor(0)   // weight=0 ⇒ 目录路不计权，选段退回 B
+    const one = await weightFor(1)
+    expect(zero.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01'])
+    expect(one.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P02'])
+    expect(zero.retrievals[0].hybrid?.outlineUsed).toBe(true)
+    expect(one.retrievals[0].hybrid?.outlineUsed).toBe(true)
   })
 
   it('只有目录没有段落索引时不走段落路径（目录不会被误用）', async () => {

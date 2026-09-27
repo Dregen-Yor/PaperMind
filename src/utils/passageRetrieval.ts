@@ -41,8 +41,12 @@ export interface FusePassageCandidatesArgs {
   dense?: ((query: string) => RankedItem[]) | undefined
   /** 卡片先验路（向量或词法）；卡片不可用时为 undefined */
   card?: ((query: string) => RankedItem[]) | undefined
-  /** 原生目录先验路（查询期零嵌入调用）；与 card 互斥，同时给出时只用本路 */
-  outline?: (() => RankedItem[]) | undefined
+  /**
+   * 原生目录先验路（查询期零嵌入调用）；与 card 互斥，同时给出时只用本路。
+   * `weight` 是这条路的 RRF 权重，**必填且必须被读**——调用方（`retrievePassageContext`）
+   * 从 `PassageRetrievalOptions.outline.weight` 逐字带入，绝不在这里回退成别的数。
+   */
+  outline?: { list: () => RankedItem[]; weight: number } | undefined
   rrfK: number
   sectionWeight: number
   /** 占位参数：调用方已决定各路的可用性，这里只做融合 */
@@ -103,8 +107,8 @@ export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageC
   // 卡片先验与目录先验**互斥**（方案禁止同一实验同时启用两者）：同时传入时目录胜出、
   // 卡片整路不进入融合。刻意用显式分支而非依赖压路顺序——顺序被日后调整时行为不会悄悄反转。
   if (args.outline) {
-    lists.push(args.outline())
-    weights.push(args.sectionWeight)
+    lists.push(args.outline.list())
+    weights.push(args.outline.weight)
   } else if (args.card) {
     lists.push(args.card(args.query))
     weights.push(args.sectionWeight)
@@ -177,7 +181,11 @@ export interface OutlinePassageDiagnostics {
   outlineAvailable: boolean
   /** 目录先验是否真的进入了融合（要求 dense 可用且节点向量维度与查询向量自洽） */
   outlineUsed: boolean
-  /** `outlineAvailable && !outlineUsed` 时的原因：`dense-unavailable` / `outline-vector-dim-mismatch` */
+  /**
+   * `outlineAvailable && !outlineUsed` 时的原因。查询期本函数会产出
+   * `dense-unavailable` / `outline-vector-dim-mismatch`；bench qa 层还会写入索引期的原因
+   * （如 `missing-outline` / `outline-embed-failed`），故这里是开放字符串而非封闭联合。
+   */
   outlineFallbackReason?: string
 }
 
@@ -211,9 +219,10 @@ export interface PassageRetrievalOptions {
    * 原生 PDF 目录先验（方案 C 臂）。仅在 dense 可用时生效（打分复用同一次查询向量，查询期
    * 零额外嵌入调用），且与卡片先验互斥。
    *
-   * `weight` 只为接口对齐而存在：**实际权重一律取自 `sectionWeight`**——目录先验与卡片先验
-   * 在本实验中互斥，二者共用同一个旋钮（方案禁止同一实验同时启用），因此该字段永远不该成为
-   * 第二个配置来源，检索侧刻意不读它。
+   * `weight` 是目录路的 RRF 融合权重，**会被真正读取**（不再是被忽略的占位字段）。它仍应来自
+   * **唯一**的配置源：调用方（`ragPipeline` / bench qa）在其挂载点把本次运行配置的
+   * `sectionWeight` 填进来——目录先验与卡片先验在本实验中互斥、二者共用同一个旋钮，所以这里
+   * 转发的是那一个已配置的值，而不是制造第二个旋钮。缺省（未挂目录）时该选项整体缺席。
    */
   outline?: { nodes: OutlineScoringNode[]; weight: number }
 }
@@ -407,7 +416,7 @@ export async function retrievePassageContext(
 
   let dense: ((query: string) => RankedItem[]) | undefined
   let card: ((query: string) => RankedItem[]) | undefined
-  let outline: (() => RankedItem[]) | undefined
+  let outline: { list: () => RankedItem[]; weight: number } | undefined
   let mode: RetrievalMode
 
   if (denseAvailable) {
@@ -421,7 +430,12 @@ export async function retrievePassageContext(
     // 同一种既有向量策略）。不能让它在融合内部才由 cosineSimilarity 抛错——那已过嵌入器的
     // try/catch，异常会直接冒给调用方，而不是契约承诺的降级。
     if (outlineAvailable && outlineNodes.every(node => node.vector.length === vector.length)) {
-      outline = () => rankOutlinePassages(vector, outlineNodes, passages.length)
+      outline = {
+        list: () => rankOutlinePassages(vector, outlineNodes, passages.length),
+        // 权重是**必填**字段，直接读取、**不**回退到 sectionWeight：一个被显式设成 0 的权重
+        // 也不得悄悄变成另一个数。调用方保证它来自本次运行唯一的配置源（`sectionWeight`）。
+        weight: opts.outline!.weight,
+      }
       mode = 'bm25+dense+outline'
     } else {
       let cardScores: number[] | undefined

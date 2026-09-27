@@ -565,7 +565,7 @@ describe('fusePassageCandidates 目录与卡片互斥（方案禁止同实验同
       query: 'x',
       bm25,
       card: () => ranked(1, 3, 2),
-      outline: () => ranked(2, 1, 3),
+      outline: { list: () => ranked(2, 1, 3), weight: 0.5 },
       rrfK: 60,
       sectionWeight: 0.5,
       passagesCannotUseVectors: true,
@@ -574,7 +574,7 @@ describe('fusePassageCandidates 目录与卡片互斥（方案禁止同实验同
       passages,
       query: 'x',
       bm25,
-      outline: () => ranked(2, 1, 3),
+      outline: { list: () => ranked(2, 1, 3), weight: 0.5 },
       rrfK: 60,
       sectionWeight: 0.5,
       passagesCannotUseVectors: true,
@@ -659,20 +659,23 @@ describe('retrievePassageContext 目录先验（本地 PDF 目录）', () => {
     expect(withCards.hybrid.selectedPassageIds).toEqual(noCards.hybrid.selectedPassageIds)
   })
 
-  it('目录权重唯一来源是 sectionWeight：outline.weight 被忽略', async () => {
+  it('目录路的融合权重取自 outline.weight（不再是死字段）：改权重即改融合分', async () => {
     const { index, embedder } = denseNoCards()
     const nodes = [outlineNode('0', [index.passages.length - 1], [1, 1, 0, 0])]
-    // 两次的 outline.weight 都设成 5；若检索读了它，两次融合分会被拉到一起。差异只能来自 sectionWeight。
-    const off = await retrievePassageContext(index, 'corpus', {
-      embedder, sectionWeight: 0, outline: { nodes, weight: 5 },
+    // sectionWeight 两次都固定 0.5、只有 outline.weight 在变 ⇒ 分数差异只可能来自 weight 被真正读取。
+    // 旧实现把 weight 当占位字段丢弃，这两次会逐字相同，本用例随即变红。
+    const weightZero = await retrievePassageContext(index, 'corpus', {
+      embedder, sectionWeight: 0.5, outline: { nodes, weight: 0 },
     })
-    const on = await retrievePassageContext(index, 'corpus', {
-      embedder, sectionWeight: 1, outline: { nodes, weight: 5 },
+    const weightFive = await retrievePassageContext(index, 'corpus', {
+      embedder, sectionWeight: 0.5, outline: { nodes, weight: 5 },
     })
-    expect(off.scores).not.toEqual(on.scores)
-    // sectionWeight=0 把目录路权重也归零 ⇒ 融合分与「根本不挂目录」逐字相同
+    expect(weightFive.scores).not.toEqual(weightZero.scores)
+    // weight=0 把目录路贡献归零 ⇒ 融合分与「根本不挂目录」逐字相同（0 是合法权重，不能被默认值吞掉）
     const noOutline = await retrievePassageContext(index, 'corpus', { embedder })
-    expect(off.scores).toEqual(noOutline.scores)
-    expect(off.hybrid.retrievalMode).toBe('bm25+dense+outline')
+    expect(weightZero.scores).toEqual(noOutline.scores)
+    expect(weightZero.hybrid.retrievalMode).toBe('bm25+dense+outline')
+    expect(weightZero.hybrid.outlineUsed).toBe(true)
+    expect(weightFive.hybrid.retrievalMode).toBe('bm25+dense+outline')
   })
 })

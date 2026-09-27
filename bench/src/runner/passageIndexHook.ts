@@ -135,14 +135,22 @@ function flattenOutline(nodes: PdfOutlineNode[]): PdfOutlineNode[] {
 
 /**
  * 目录产物 → 查询期打分视图（Task 5）：前序展开，只取打分需要的 `id` / `passageOrders` /
- * 索引期算好的 `vector`。缺向量的节点直接跳过——`available:true` 已承诺向量齐全，这里只是防御，
- * 不让一份畸形产物在查询期变成 `undefined.vector` 的崩溃。
+ * 索引期算好的 `vector`。
+ *
+ * **节点向量不齐即整份不可用**（返回 `undefined`）：`available:true` 已承诺每个节点的向量齐全
+ * （见 `buildOutline` 的数量/维度/有限性三重校验），若仍有节点缺向量，说明拿到的是一份畸形产物——
+ * 此时**静默丢掉**缺向量节点会把它变成「看起来合法的更弱目录」，掩埋真正的失败。宁可让整份目录
+ * 作废、本篇按 B 回落（调用方据此记 `outline-embed-failed`），也不接受一份缩水的目录。
  */
-export function toOutlineScoringNodes(info: PassageOutlineInfo): OutlineScoringNode[] {
-  return flattenOutline(info.nodes).flatMap(node => {
+export function toOutlineScoringNodes(info: PassageOutlineInfo): OutlineScoringNode[] | undefined {
+  const flat = flattenOutline(info.nodes)
+  const nodes: OutlineScoringNode[] = []
+  for (const node of flat) {
     const vector = info.nodeVectors.get(node.id)
-    return vector ? [{ id: node.id, passageOrders: node.passageOrders, vector }] : []
-  })
+    if (!vector) return undefined
+    nodes.push({ id: node.id, passageOrders: node.passageOrders, vector })
+  }
+  return nodes
 }
 
 /**

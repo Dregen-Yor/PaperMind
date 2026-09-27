@@ -8,7 +8,7 @@
  *    LLM 结构回落、绝不编造 LLM token 或成本，也不让整轮失败。
  */
 import { describe, expect, it, vi } from 'vitest'
-import { createPassageIndexHook, outlineNodeEmbedText, type HybridKnobs } from '../runner/passageIndexHook'
+import { createPassageIndexHook, outlineNodeEmbedText, toOutlineScoringNodes, type HybridKnobs, type PassageOutlineInfo } from '../runner/passageIndexHook'
 import type { LlmClient } from '../llmClient'
 import type { EvalSample } from '../types'
 import type { Embedder } from '../../../src/utils/embedder'
@@ -292,5 +292,31 @@ describe('createPassageIndexHook — A/B/C 模式', () => {
     // 快照稳定：后续阶段写的是自己那份 coldStart，没有回头改写 lexicalReady
     expect(handle.lexicalReady.coldStart.coldStartEmbedPassagesMs).toBeUndefined()
     expect(info.coldStart.coldStartEmbedPassagesMs).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('toOutlineScoringNodes — 节点向量不齐即整份不可用', () => {
+  const withBothVectors = (): PassageOutlineInfo => ({
+    nodes: [{
+      id: '0', title: 'A', path: [], depth: 0, startPage: 0, endPage: 0, passageOrders: [0],
+      children: [{
+        id: '0.0', title: 'B', path: ['A'], depth: 1, startPage: 0, endPage: 0, passageOrders: [0], children: [],
+      }],
+    }],
+    nodeCount: 2,
+    available: true,
+    nodeVectors: new Map([['0', new Float32Array([1, 0])], ['0.0', new Float32Array([1, 0])]]),
+    elapsedMs: 0,
+  })
+
+  it('向量齐全：前序展开出每个节点', () => {
+    const nodes = toOutlineScoringNodes(withBothVectors())
+    expect(nodes?.map(node => node.id)).toEqual(['0', '0.0'])
+  })
+
+  it('缺任一节点向量：返回 undefined（整份不可用），绝不缩水成子集', () => {
+    const info = withBothVectors()
+    info.nodeVectors.delete('0.0')
+    expect(toOutlineScoringNodes(info)).toBeUndefined()
   })
 })

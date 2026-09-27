@@ -17,6 +17,7 @@ import {
 import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
 import type { Embedder } from '../../../src/utils/embedder'
 import type { TokenCounter } from '../../../src/utils/passages'
+import { DEFAULT_HYBRID_OPTIONS } from '../../../src/utils/passageRetrieval'
 import type { SemanticTreeHook } from '../metrics/treeDiagnostics'
 import { summarizeTreeDiagnostics, treeRecordFields } from '../metrics/treeDiagnostics'
 import { outlineRecordFields, summarizeColdStart } from '../metrics/passageDiagnostics'
@@ -253,6 +254,13 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     const outlineScoringNodes = passageInfo?.outline?.available
       ? toOutlineScoringNodes(passageInfo.outline)
       : undefined
+    // `available:true` 却给不出齐全的节点向量（畸形产物）时 `toOutlineScoringNodes` 返回 undefined：
+    // 本篇整份目录作废、按 B 回落，并在逐题诊断里记一个原因——绝不让它静默缩水成「更弱的目录」。
+    const outlineVectorsIncomplete =
+      passageInfo?.outline?.available === true && outlineScoringNodes === undefined
+    // 目录路的融合权重来自本次运行**唯一**的配置源 `sectionWeight`：目录先验与卡片先验互斥、
+    // 共用同一个旋钮，所以这里转发的是那一个已配置的值，而不是制造第二个旋钮。
+    const outlineWeight = args.passage?.sectionWeight ?? DEFAULT_HYBRID_OPTIONS.sectionWeight
     // 语义树在平面索引之后单独建：树的输入是原文证据块，与平面索引互不依赖。
     // 建树失败只是没有树，本篇所有问题照常走平面路径（§8.2）。
     // 段落配置下不再建语义树：检索已被段落索引接管，多建一棵树只会白花一次 LLM 调用
@@ -311,7 +319,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
             ...(passageInfo?.index ? { passageIndex: passageInfo.index } : {}),
             // 目录先验按篇携带：只在该篇同时有段落索引与可用目录时才挂上（否则整体缺席）
             ...(outlineScoringNodes && outlineScoringNodes.length > 0
-              ? { outline: { nodes: outlineScoringNodes } }
+              ? { outline: { nodes: outlineScoringNodes, weight: outlineWeight } }
               : {}),
           }],
           question.question,
@@ -364,11 +372,15 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       // C 臂逐题目录诊断：只在**本篇真有目录产物**（passageInfo.outline 存在）时写入，
       // A/B 与 B 式无目录篇整体缺席——不写 false 冒充「目录失败」。可用性是索引期事实，
       // outlineUsed 是查询期事实（dense 不可用时目录无从打分）；原因优先取索引期的回落原因，
-      // 其次是查询期（如 dense-unavailable）。三者与 perPaper 的 coldStartOutline* 分属不同层。
+      // 其次是查询期（如 dense-unavailable）。节点向量不齐（畸形产物）时索引期无原因可读，
+      // 但的确退回了 B，故显式记索引期已有的 `outline-embed-failed`（缺的正是向量）。
+      // 三者与 perPaper 的 coldStartOutline* 分属不同层。
       if (args.passage && passageInfo?.outline) {
         record.outlineAvailable = passageInfo.outline.available
         record.outlineUsed = first?.hybrid?.outlineUsed
-        record.outlineFallbackReason = passageInfo.outline.fallbackReason ?? first?.hybrid?.outlineFallbackReason
+        record.outlineFallbackReason = outlineVectorsIncomplete
+          ? 'outline-embed-failed'
+          : passageInfo.outline.fallbackReason ?? first?.hybrid?.outlineFallbackReason
       }
       record.contextTruncated = retrieval.contextTruncated
       // selectedPages 是诊断字段（候选页区间包络），真实页集合一律看 contextPageOrder
