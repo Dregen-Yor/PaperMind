@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { extractPdfDocument, extractPages, reconstructTextLines } from '../utils/pdfDocument'
+import { extractPdfDocument, reconstructTextLines } from '../utils/pdfDocument'
+import { extractPages } from '../utils/pageIndex'
 
 // pdfDocument.ts pulls in pdfjs-dist at module scope (worker init + getDocument +
 // isValidExplicitDest). Node/jsdom lacks DOMMatrix for the real getDocument, so mock it.
@@ -65,12 +66,13 @@ describe('extractPdfDocument', () => {
       getPageIndex: vi.fn(async (ref: { num: number }) => ref.num),
     })
 
-    const { outline } = await extractPdfDocument(btoa('ignored'), load(doc))
+    const { outline, outlineResult } = await extractPdfDocument(btoa('ignored'), load(doc))
 
     expect(outline).toEqual([
       { id: '0', title: 'Intro', page: 0, children: [] },
       { id: '1', title: 'Methods', page: 2, children: [] },
     ])
+    expect(outlineResult).toEqual({ ok: true, entryCount: 2, roots: outline })
     // Named (string) destinations resolve through getDestination first.
     expect(doc.getDestination).toHaveBeenCalledWith('intro')
     expect(doc.getPageIndex).toHaveBeenCalledWith({ num: 0, gen: 0 })
@@ -109,10 +111,36 @@ describe('extractPdfDocument', () => {
   it('returns an empty outline but keeps pages and destroys when there is no outline', async () => {
     const doc = makeDoc({ numPages: 1, getOutline: vi.fn(async () => null) })
 
-    const { pages, outline } = await extractPdfDocument(btoa('ignored'), load(doc))
+    const { pages, outline, outlineResult } = await extractPdfDocument(btoa('ignored'), load(doc))
 
     expect(pages).toEqual(['p'])
     expect(outline).toEqual([])
+    expect(outlineResult).toEqual({ ok: false, reason: 'missing-outline', entryCount: 0 })
+    expect(doc.destroy).toHaveBeenCalledTimes(1)
+  })
+
+  it('distinguishes a malformed outline from a missing one via the rejection reason', async () => {
+    const doc = makeDoc({
+      numPages: 4,
+      getOutline: vi.fn(async () => [{ title: '   ', dest: 'x', items: [], url: null }]),
+    })
+
+    const { outline, outlineResult } = await extractPdfDocument(btoa('ignored'), load(doc))
+
+    expect(outline).toEqual([])
+    expect(outlineResult).toEqual({ ok: false, reason: 'invalid-title', entryCount: 1 })
+  })
+
+  it('skips outline reading entirely when readOutline is false', async () => {
+    const getOutline = vi.fn(async () => { throw new Error('outline must not be read') })
+    const doc = makeDoc({ numPages: 1, getOutline })
+
+    const result = await extractPdfDocument(btoa('ignored'), { ...load(doc), readOutline: false })
+
+    expect(result.pages).toEqual(['p'])
+    expect(result.outline).toEqual([])
+    expect(result.outlineResult).toBeUndefined()
+    expect(getOutline).not.toHaveBeenCalled()
     expect(doc.destroy).toHaveBeenCalledTimes(1)
   })
 
@@ -135,9 +163,10 @@ describe('extractPdfDocument', () => {
       getOutline: vi.fn(async () => { throw new Error('outline boom') }),
     })
 
-    const { outline } = await extractPdfDocument(btoa('ignored'), load(doc))
+    const { outline, outlineResult } = await extractPdfDocument(btoa('ignored'), load(doc))
 
     expect(outline).toEqual([])
+    expect(outlineResult).toEqual({ ok: false, reason: 'missing-outline', entryCount: 0 })
     expect(doc.destroy).toHaveBeenCalledTimes(1)
   })
 
@@ -156,8 +185,9 @@ describe('extractPdfDocument', () => {
 })
 
 describe('extractPages delegation', () => {
-  it('returns only the page array from the shared document helper', async () => {
+  it('returns only the page array and never pays for outline reading', async () => {
     const loadingTaskDestroy = vi.fn(async () => {})
+    const getOutline = vi.fn(async () => { throw new Error('getOutline must not be called') })
     const doc = makeDoc({
       numPages: 2,
       getPage: vi.fn(async (page: number) => ({
@@ -165,6 +195,7 @@ describe('extractPages delegation', () => {
           items: [{ str: `page ${page}`, transform: [1, 0, 0, 1, 0, 0], hasEOL: true }],
         }),
       })),
+      getOutline,
       // The default adapter tears down via loadingTask.destroy(), not doc.destroy().
       loadingTask: { destroy: loadingTaskDestroy },
     })
@@ -174,7 +205,7 @@ describe('extractPages delegation', () => {
     const pages = await extractPages(btoa('fixture'))
 
     expect(pages).toEqual(['page 1', 'page 2'])
-    expect(doc.getOutline).toHaveBeenCalledTimes(1)
+    expect(getOutline).not.toHaveBeenCalled()
     expect(loadingTaskDestroy).toHaveBeenCalledTimes(1)
   })
 })

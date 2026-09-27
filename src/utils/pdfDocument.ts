@@ -1,5 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
-import { resolvePdfOutline, type PdfDestResolver, type PdfJsOutlineEntry, type PdfOutlineEntry } from './pdfOutline'
+import { resolvePdfOutline, type PdfDestResolver, type PdfJsOutlineEntry, type PdfOutlineEntry, type PdfOutlineResult } from './pdfOutline'
+
+export type { PdfOutlineResult } from './pdfOutline'
 
 // Worker setup stays here so this module can load a document on its own.
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
@@ -53,30 +55,31 @@ export interface PdfDocumentLike {
 export interface PdfDocumentDeps {
   /** Default: `pdfjsLib.getDocument({ data: bytes }).promise`, adapted to `PdfDocumentLike`. */
   loadDocument?: (bytes: Uint8Array) => Promise<PdfDocumentLike>
+  /**
+   * When false, the outline is not read at all — `getOutline` is never called.
+   * Default: true (the document helper's job is to read the outline).
+   */
+  readOutline?: boolean
 }
 
 export interface ExtractedPdfDocument {
   pages: string[]
-  /** Empty when the PDF has no usable outline. */
+  /** Empty when the PDF has no usable outline (or when `readOutline: false`). */
   outline: PdfOutlineEntry[]
+  /** Present only when outline reading ran; carries the rejection reason and entry count. */
+  outlineResult?: PdfOutlineResult
 }
 
 async function defaultLoadDocument(bytes: Uint8Array): Promise<PdfDocumentLike> {
   const doc = await pdfjsLib.getDocument({ data: bytes.buffer as ArrayBuffer }).promise
-  const bare = doc as unknown as {
-    getOutline?: () => Promise<unknown>
-    loadingTask?: { destroy?: () => Promise<void> }
-  }
   return {
     numPages: doc.numPages,
     getPage: page => doc.getPage(page),
-    // Only documents that actually carry an outline need to expose one.
-    getOutline: () => (typeof bare.getOutline === 'function' ? bare.getOutline() : Promise.resolve(null)),
+    getOutline: () => doc.getOutline(),
     getDestination: id => doc.getDestination(id),
     getPageIndex: ref => doc.getPageIndex(ref as Parameters<typeof doc.getPageIndex>[0]),
-    destroy: async () => {
-      if (bare.loadingTask && typeof bare.loadingTask.destroy === 'function') await bare.loadingTask.destroy()
-    },
+    // pdfjs 6 has no `PDFDocumentProxy.destroy()`; teardown lives on the loading task.
+    destroy: () => doc.loadingTask.destroy(),
   }
 }
 
@@ -96,28 +99,34 @@ function buildResolvePage(doc: PdfDocumentLike): PdfDestResolver {
 
 /**
  * Read the outline as a retrieval prior. Any failure (missing, malformed, unresolvable)
- * yields no outline rather than throwing — page text extraction must stay reliable.
+ * yields no outline rather than throwing — page text extraction must stay reliable — but the
+ * rejection reason and entry count are still reported so callers can tell the cases apart.
  */
-async function readOutline(doc: PdfDocumentLike): Promise<PdfOutlineEntry[]> {
+async function readDocumentOutline(doc: PdfDocumentLike): Promise<{ outline: PdfOutlineEntry[]; outlineResult: PdfOutlineResult }> {
+  let raw: unknown
   try {
-    const raw = await doc.getOutline()
-    const result = await resolvePdfOutline(
-      Array.isArray(raw) ? (raw as PdfJsOutlineEntry[]) : null,
-      buildResolvePage(doc),
-      doc.numPages,
-    )
-    return result.ok ? result.roots : []
+    raw = await doc.getOutline()
   } catch {
-    return []
+    // `getOutline` throwing is an abnormal path with no dedicated reason in the pinned
+    // union — `'missing-outline'` is the closest available; no entry count was seen.
+    return { outline: [], outlineResult: { ok: false, reason: 'missing-outline', entryCount: 0 } }
   }
+  const outlineResult = await resolvePdfOutline(
+    Array.isArray(raw) ? (raw as PdfJsOutlineEntry[]) : null,
+    buildResolvePage(doc),
+    doc.numPages,
+  )
+  return { outline: outlineResult.ok ? outlineResult.roots : [], outlineResult }
 }
 
 /**
- * Load one PDF.js document, extract every page's reconstructed text and its resolved
- * native outline, then tear the document down. Teardown runs on success and on failure.
+ * Load one PDF.js document, extract every page's reconstructed text — and, unless
+ * `readOutline: false`, its resolved native outline — then tear the document down.
+ * Teardown runs on success and on failure.
  */
 export async function extractPdfDocument(base64: string, deps: PdfDocumentDeps = {}): Promise<ExtractedPdfDocument> {
   const loadDocument = deps.loadDocument ?? defaultLoadDocument
+  const shouldReadOutline = deps.readOutline ?? true
   const binary = atob(base64)
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
@@ -130,16 +139,13 @@ export async function extractPdfDocument(base64: string, deps: PdfDocumentDeps =
       const content = await page.getTextContent()
       pages.push(reconstructTextLines(content.items as PdfTextItem[]))
     }
-    return { pages, outline: await readOutline(doc) }
+    if (!shouldReadOutline) return { pages, outline: [] }
+    const { outline, outlineResult } = await readDocumentOutline(doc)
+    return { pages, outline, outlineResult }
   } finally {
     // Best-effort teardown: never mask the original success/failure.
     try {
       await doc.destroy()
     } catch { /* ignore teardown errors */ }
   }
-}
-
-/** Page text only, via the shared document helper. Signature preserved for existing callers. */
-export async function extractPages(base64: string): Promise<string[]> {
-  return (await extractPdfDocument(base64)).pages
 }

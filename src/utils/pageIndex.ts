@@ -6,7 +6,9 @@ import type { LLMFn } from './llm'
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
 
 // Page-text extraction now lives in pdfDocument.ts (shared with native outline extraction).
-// Re-exported here to keep the public import path stable.
+// `reconstructTextLines` was previously exported from this module, so it is re-exported to keep
+// that public import path stable. `PdfTextItem` was module-private before this change — exporting
+// it is new surface (it types the shared helper's input), not stabilization.
 export { reconstructTextLines, type PdfTextItem } from './pdfDocument'
 
 // ── 语义分块：节标题识别模式（英文 + 中文）───────────────────────────────────
@@ -83,7 +85,9 @@ export interface IndexNode {
 const CHUNK = 5 // pages per leaf
 
 export async function extractPages(base64: string): Promise<string[]> {
-  return (await extractPdfDocument(base64)).pages
+  // Page text only: outline reading is skipped so non-outline callers (cold index build,
+  // /abstract, bench datasets) never pay the extra getOutline round-trips.
+  return (await extractPdfDocument(base64, { readOutline: false })).pages
 }
 
 async function summarizeRange(
