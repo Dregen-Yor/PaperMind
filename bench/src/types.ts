@@ -43,7 +43,7 @@ export interface EvalSample {
 /**
  * 冻结的 PDF 大纲研究集样本（`--dataset outline-study`）。
  *
- * 下面三个字段是**在 `EvalSample` 之上追加的运行期元数据**。正因为它们只增不减，
+ * 下面这些字段是**在 `EvalSample` 之上追加的运行期元数据**。正因为它们只增不减，
  * 才保证不会泄漏进结果 JSON：所有 runner 与聚合都只接收 `EvalSample[]` / `QaQuestion[]`，
  * 且 `PerSampleRecord` 是封闭字段集，路径与目录树没有任何路径能到达一条被序列化的行。
  * 冷首问需要重新打开原始字节，故 `pdfPath` 只在内存里的样本对象上存活。
@@ -51,7 +51,7 @@ export interface EvalSample {
 export interface PdfStudySample extends EvalSample {
   /** 运行期元数据：冷首问需要重新打开原始字节。绝不写进结果 JSON。 */
   readonly pdfPath: string
-  /** PDF 字节 + 页文本 + 标注 + 目录 JSON 的 SHA-256 */
+  /** 文件名 + 标题 + PDF 字节 + 页文本 + 标注 + 目录 JSON 的 SHA-256 */
   readonly manifestFingerprint: string
   /** 解析后的原生目录；缺失或非法时为空数组 */
   readonly pdfOutline: PdfOutlineEntry[]

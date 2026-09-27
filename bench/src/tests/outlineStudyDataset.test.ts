@@ -98,6 +98,17 @@ describe('loadOutlineStudyDataset 的 manifestFingerprint', () => {
     const second = await loadOutlineStudyDataset(dir, { extract: extractPages20 })
     expect(first[0].manifestFingerprint).not.toBe(second[0].manifestFingerprint)
   })
+
+  it('仅改标注标题时指纹改变（标题属于标注内容）', async () => {
+    const annotation = (title: string) => JSON.stringify([
+      { file: 'a.pdf', title, questions: [{ q: 'x', answers: ['y'], evidencePages: [1] }] },
+    ])
+    writeFileSync(join(dir, 'annotations.json'), annotation('Title One'))
+    const first = await loadOutlineStudyDataset(dir, { extract: extractPages20 })
+    writeFileSync(join(dir, 'annotations.json'), annotation('Title Two'))
+    const second = await loadOutlineStudyDataset(dir, { extract: extractPages20 })
+    expect(first[0].manifestFingerprint).not.toBe(second[0].manifestFingerprint)
+  })
 })
 
 describe('loadOutlineStudyDataset 的失败路径', () => {
@@ -119,6 +130,30 @@ describe('loadOutlineStudyDataset 的失败路径', () => {
     ]))
     const promise = loadOutlineStudyDataset(dir, { extract: extractPages20 })
     await expect(promise).rejects.toThrow(/a\.pdf/)
+    await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/第 1 问/)
+  })
+
+  it('缺失 evidencePages 时抛错（不是裸 TypeError），并点名文件与题号', async () => {
+    writeFileSync(join(dir, 'annotations.json'), JSON.stringify([
+      { file: 'a.pdf', questions: [{ q: 'x', answers: ['y'] }] },
+    ]))
+    await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/a\.pdf/)
+    await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/第 1 问/)
+  })
+
+  it('evidencePages 非数组时抛错并点名文件与题号', async () => {
+    writeFileSync(join(dir, 'annotations.json'), JSON.stringify([
+      { file: 'a.pdf', questions: [{ q: 'x', answers: ['y'], evidencePages: 7 }] },
+    ]))
+    await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/a\.pdf/)
+    await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/第 1 问/)
+  })
+
+  it('evidencePages 含非整数页码时抛错，不让小数页号漏进 evidencePages', async () => {
+    writeFileSync(join(dir, 'annotations.json'), JSON.stringify([
+      { file: 'a.pdf', questions: [{ q: 'x', answers: ['y'], evidencePages: [1.5] }] },
+    ]))
+    await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/a\.pdf/)
     await expect(loadOutlineStudyDataset(dir, { extract: extractPages20 })).rejects.toThrow(/第 1 问/)
   })
 

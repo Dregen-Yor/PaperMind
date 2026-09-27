@@ -22,14 +22,19 @@ export interface OutlineStudyDeps {
   extract?: (base64: string) => Promise<ExtractedPdfDocument>
 }
 
-/** 指纹方案版本：改动覆盖内容或顺序时必须递增，让旧指纹整体失效。 */
-const MANIFEST_FINGERPRINT_VERSION = 'outline-study-manifest-v1'
+/**
+ * 指纹方案版本：改动覆盖内容或顺序时必须递增，让旧指纹整体失效。
+ * v2 相对 v1 在文件名与原始 PDF 字节之间插入了标注 `title`——同一 PDF 加同一标注
+ * 在 v1 与 v2 下产出不同摘要，标签若停滞在 v1 会误导后续读者以为 v1 口径稳定
+ * （Task 8 起 manifest 哈希会写进结果元数据，静默改口径将无声地破坏跨轮比较）。
+ */
+const MANIFEST_FINGERPRINT_VERSION = 'outline-study-manifest-v2'
 
 /**
  * 每篇论文一个 SHA-256，按**固定顺序**覆盖：
- * ① 版本前缀；② 文件名；③ 原始 PDF 字节；④ 逐页文本数组；⑤ 该篇标注
- * （问题文本 + 参考答案 + evidence 页）；⑥ 目录 JSON 树。
- * 覆盖 PDF 字节是关键：同名换文件必须改变指纹。序列化全部走 `JSON.stringify`
+ * ① 版本前缀；② 文件名；③ 标题；④ 原始 PDF 字节；⑤ 逐页文本数组；⑥ 该篇标注
+ * （问题文本 + 参考答案 + evidence 页）；⑦ 目录 JSON 树。标题与 PDF 字节都必须覆盖：
+ * 只改标题、或同名换文件，都必须改变指纹。序列化全部走 `JSON.stringify`
  * （输入对象已是纯数组/对象），版本前缀让方案本身可演进。
  */
 function fingerprintManifest(
@@ -43,6 +48,9 @@ function fingerprintManifest(
   hash.update(MANIFEST_FINGERPRINT_VERSION)
   hash.update('\0')
   hash.update(file)
+  hash.update('\0')
+  // 标题缺省时用空串占位，保证「无标题」也是确定值
+  hash.update(annotation.title ?? '')
   hash.update('\0')
   hash.update(pdfBytes)
   hash.update('\0')
@@ -101,6 +109,12 @@ export async function loadOutlineStudyDataset(
       if (!Array.isArray(q.answers) || q.answers.length === 0
         || q.answers.some(answer => typeof answer !== 'string' || answer.trim().length === 0)) {
         throw new Error(`${ann.file} 第 ${i + 1} 问的 answers 必须为非空字符串数组`)
+      }
+      // 先校验形态再 map：缺失/非数组会在 .map 上抛裸 TypeError（无文件名无题号），
+      // 非整数（如 1.5）会漏过越界检查并把小数页号写进 evidencePages
+      if (!Array.isArray(q.evidencePages) || q.evidencePages.length === 0
+        || q.evidencePages.some(p => !Number.isInteger(p) || p <= 0)) {
+        throw new Error(`${ann.file} 第 ${i + 1} 问的 evidencePages 必须为非空正整数数组`)
       }
       const evidencePages = q.evidencePages.map(p => p - 1)  // 1-based → 0-based
       for (const p of evidencePages) {
