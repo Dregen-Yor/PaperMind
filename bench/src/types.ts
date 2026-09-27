@@ -104,6 +104,50 @@ export interface PassageRuntimeParams {
  */
 export type PassageMode = 'legacy-llm' | 'lexical' | 'hybrid-raw' | 'hybrid-outline'
 
+/**
+ * 冷首问策略（Task 7）：
+ * - `ready-before-query`：等请求的索引阶段全部就绪后再回答（与热 `--speed` 的「等待完整索引」一致）；
+ * - `ask-at-lexical-ready`：阶段① 词法快照一落盘就回答，不等向量/目录。
+ */
+export type ColdStrategy = 'ready-before-query' | 'ask-at-lexical-ready'
+
+/**
+ * 冷首问逐篇观测（`--cold-first-query`）。所有时长都是**从 t0（重新打开 PDF 字节之前）**起算的
+ * 毫秒数；`timeToFirstTokenMs` / `fullAnswerLatencyMs` 只在回答完成时写入，`denseReadyMs` /
+ * `outlineReadyMs` 只在对应的就绪阶段真的完成时写入（A 臂与失败路径**缺席而非记 0**）。
+ */
+export interface ColdFirstQueryRecord {
+  id: string
+  paperId: string
+  strategy: ColdStrategy
+  inputKind: 'pdf-bytes'
+  pdfLoadMs: number
+  localModelInitMs: number
+  lexicalReadyMs: number
+  denseReadyMs?: number
+  outlineReadyMs?: number
+  actualPassageStage: number
+  retrievalMode: string
+  outlineUsed: boolean
+  outlineFallbackReason?: string
+  timeToFirstTokenMs?: number
+  fullAnswerLatencyMs?: number
+  completionStatus: 'completed' | 'failed' | 'skipped'
+  failureStage?: string
+}
+
+/**
+ * 一次冷首问运行的结果（`cold-first-query-v1`）。与 `BenchResult` 分属不同文件：
+ * 它的指标**绝不**喂给 `aggregateSpeedMetrics` 或 Q，也不参与检索排名。
+ */
+export interface ColdFirstQueryResult {
+  definition: 'cold-first-query-v1'
+  mode: PassageMode
+  strategy: ColdStrategy
+  records: ColdFirstQueryRecord[]
+  metrics: Record<string, number>
+}
+
 export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externalContext'> {
   name: string
   /**

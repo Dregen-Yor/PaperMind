@@ -6,6 +6,7 @@
  */
 import { execSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync, accessSync, constants } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { parseArgs, fileStamp } from './args'
 import { loadConfigs, configLabel, resolvePassageMode } from './config'
@@ -20,16 +21,18 @@ import { runHybridRerankQaTask } from './runner/hybridRerankQa'
 import { runLongSectionQaTask } from './runner/longSectionQa'
 import { runSemanticTreeQaTask } from './runner/semanticTreeQa'
 import { createPassageIndexHook, type HybridKnobs } from './runner/passageIndexHook'
+import { runColdFirstQuery } from './runner/coldFirstQuery'
 import { errorMessage } from './runner/support'
 import { runSummaryTask } from './runner/summary'
-import { renderReport, renderComparison } from './report'
+import { renderReport, renderComparison, renderColdFirstQueryReport } from './report'
 import { benchPath } from './paths'
-import type { BenchResult, BenchConfig, EvalSample, SampleSource } from './types'
+import type { BenchResult, BenchConfig, ColdFirstQueryResult, EvalSample, PdfStudySample, SampleSource } from './types'
 import type { PaperMindConfig } from './types'
 import { isPdfStudySample } from './types'
 import type { LlmClient } from './llmClient'
 import type { StrongBaselineQaArgs, StrongGenerationSettings } from './runner/strongBaselineQa'
 import { materializeContext, type ContextGroup } from '../../src/utils/contextTrace'
+import { extractPdfDocument } from '../../src/utils/pdfDocument'
 import type { Embedder } from '../../src/utils/embedder'
 import { createTransformersEmbedder } from '../../src/utils/transformersEmbedder'
 import { applyHfEndpoint } from './hub'
@@ -135,6 +138,113 @@ function executedQuestionIds(samples: EvalSample[], limit?: number): string[] {
   return ids
 }
 
+/**
+ * 单个配置的冷首问运行（`--cold-first-query`）。与 QA 分支共享同一套 client / tokenizer /
+ * 物化器口径，区别只在：本地模型加载被**推迟到 t0 之后**（`initLocalModel` 由 runner 逐篇调用，
+ * 首篇付真实加载成本，后续篇命中已加载的实例），PDF 也在 t0 之后重新打开字节抽取一次。
+ */
+async function runColdForConfig(
+  config: PaperMindConfig,
+  samples: PdfStudySample[],
+): Promise<ColdFirstQueryResult> {
+  const mode = resolvePassageMode(config)
+  const env = resolveEnvConfig(process.env)
+  const answerOptions = QA_ANSWER_OPTIONS!
+  // 冷首问必须流式（TTFT 只在流上可测）：答案缓存关闭，与 --speed 同一口径
+  const client = createLlmClient({ ...env, useCache: false, ...answerOptions, onRetry: retryLog })
+  assertSpeedAnswerClient(client)
+
+  const contractTokenizer = await createBgeM3Tokenizer({
+    model: CONTEXT_TOKENIZER_MODEL,
+    revision: CONTEXT_TOKENIZER_REVISION,
+    cacheDir: MODEL_CACHE_DIR(),
+  })
+  const materialize = (groups: ContextGroup[]) =>
+    materializeContext(groups, contractTokenizer, CONTEXT_BUDGET_TOKENS)
+  const countTokens = (text: string) => contractTokenizer.tokenize(text).length
+
+  const embedderParams = config.passage?.embedder
+  let embedder: Embedder | undefined
+  let embedderLoaded = false
+  const initLocalModel = async (): Promise<Embedder | undefined> => {
+    if (embedderLoaded) return embedder
+    embedderLoaded = true
+    if (embedderParams) {
+      try {
+        applyHfEndpoint(await import('@huggingface/transformers'))
+        embedder = await createTransformersEmbedder({
+          model: embedderParams.model,
+          revision: embedderParams.revision,
+          dtype: embedderParams.dtype,
+          dim: embedderParams.dim,
+          cacheDir: MODEL_CACHE_DIR(),
+        })
+      } catch (error) {
+        console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
+      }
+    }
+    return embedder
+  }
+
+  const knobs: HybridKnobs = {
+    minTokens: config.minTokens as number,
+    maxTokens: config.maxTokens as number,
+    maxInputChars: config.maxInputChars as number,
+    rrfK: config.rrfK as number,
+    sectionWeight: config.sectionWeight as number,
+    neighbourFactor: config.neighbourFactor as number,
+    skipLimit: config.skipLimit as number,
+  }
+  const createHook = (embedder: Embedder | undefined) => createPassageIndexHook({
+    knobs,
+    client,
+    embedder,
+    countTokens,
+    modelIdentity: env.model,
+    mode,
+    ...(mode === 'hybrid-outline'
+      ? { outlineIndex: (sample: EvalSample) => isPdfStudySample(sample) ? sample.pdfOutline : undefined }
+      : {}),
+  })
+  const readPdf = async (sample: PdfStudySample): Promise<string[]> => {
+    const bytes = await readFile(sample.pdfPath)
+    return (await extractPdfDocument(bytes.toString('base64'), { readOutline: false })).pages
+  }
+
+  const answerSystemPrompt = composeBaseSystemPrompt(DEFAULT_SYSTEM_PROMPT, ENGLISH_ANSWER_INSTRUCTION)
+
+  return runColdFirstQuery({
+    samples,
+    mode,
+    strategy: args.coldStrategy!,
+    client,
+    systemPrompt: answerSystemPrompt,
+    materialize,
+    readPdf,
+    initLocalModel,
+    createHook,
+    countTokens,
+    contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
+    rrfK: knobs.rrfK,
+    sectionWeight: knobs.sectionWeight,
+    neighbourFactor: knobs.neighbourFactor,
+    skipLimit: knobs.skipLimit,
+  })
+}
+
+/** 冷首问结果文件名：mode + strategy 标识一次运行，`--out` 时追加后缀。 */
+function writeColdResult(result: ColdFirstQueryResult): void {
+  const stamp = fileStamp(new Date().toISOString())
+  let path: string
+  if (args.out) {
+    path = args.out.replace(/\.json$/i, '') + `-${result.mode}-${result.strategy}.json`
+  } else {
+    path = join(RESULTS_DIR(), `cold-first-query-${result.mode}-${result.strategy}-${stamp}.json`)
+  }
+  writeFileSync(path, JSON.stringify(result, null, 2))
+  writeBenchmarkPathLine(process.stdout.write.bind(process.stdout), '  结果已写入 ', path, { speed: false })
+}
+
 const args = parseArgs(process.argv.slice(2))
 
 // --compare 是独立路径：只读两份结果输出差异表，不跑评测
@@ -223,6 +333,34 @@ try {
   )
 }
 writeBenchmarkPathLine(process.stdout.write.bind(process.stdout), '缓存目录：', cacheDir, { speed: args.speed })
+
+// --cold-first-query 是独立路径：只测冷首问、不跑 QA/摘要，写独立结果文件后退出
+if (args.coldFirstQuery) {
+  if (args.dataset !== 'outline-study') {
+    throw new Error('--cold-first-query 仅支持 --dataset outline-study（冷首问需要重新打开原始 PDF 字节）')
+  }
+  if (args.mode === 'full-context') {
+    throw new Error('--cold-first-query 不支持 --mode full-context（全文直投没有段落索引）')
+  }
+  const pdfSamples = samples.filter(isPdfStudySample)
+  if (pdfSamples.length === 0) {
+    throw new Error('--cold-first-query 需要带 pdfPath 的 PdfStudySample（仅 outline-study 提供）')
+  }
+  const coldPapers = args.limit === undefined ? pdfSamples : pdfSamples.slice(0, args.limit)
+  const coldResults: ColdFirstQueryResult[] = []
+  for (const config of configs) {
+    if (config.kind === 'traditional-rag' || config.kind === 'hybrid-rerank' || config.kind === 'long-section-rag') {
+      throw new Error('--cold-first-query 仅支持段落配置（lexical / hybrid-raw / hybrid-outline）')
+    }
+    if (!isPassagePipelineConfig(config)) {
+      throw new Error('--cold-first-query 仅支持段落配置（lexical / hybrid-raw / hybrid-outline）')
+    }
+    coldResults.push(await runColdForConfig(config, coldPapers))
+  }
+  for (const result of coldResults) writeColdResult(result)
+  process.stdout.write(renderColdFirstQueryReport(coldResults) + '\n')
+  process.exit(0)
+}
 
 process.stdout.write(
   `配置 ${configs.length} 组，样本 ${samples.length} 篇论文，代码版本 ${sha}\n`,

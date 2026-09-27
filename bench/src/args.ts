@@ -1,3 +1,5 @@
+import type { ColdStrategy } from './types'
+
 export interface BenchArgs {
   task: 'qa' | 'summary' | 'all'
   dataset: 'qasper' | 'smoke' | 'outline-study' | 'all'
@@ -6,6 +8,8 @@ export interface BenchArgs {
   judge: boolean
   useCache: boolean
   speed: boolean
+  coldFirstQuery: boolean
+  coldStrategy?: ColdStrategy
   out?: string
   compare?: [string, string]
   qConfig?: string
@@ -14,6 +18,7 @@ export interface BenchArgs {
 
 const TASKS = ['qa', 'summary', 'all'] as const
 const DATASETS = ['qasper', 'smoke', 'outline-study', 'all'] as const
+const COLD_STRATEGIES = ['ready-before-query', 'ask-at-lexical-ready'] as const
 
 /**
  * 结果文件名时间戳部分：ISO 时间转文件名安全格式。
@@ -38,6 +43,7 @@ export function parseArgs(argv: string[]): BenchArgs {
     judge: false,
     useCache: true,
     speed: false,
+    coldFirstQuery: false,
     mode: 'rag',
   }
 
@@ -91,6 +97,17 @@ export function parseArgs(argv: string[]): BenchArgs {
       case '--speed':
         args.speed = true
         break
+      case '--cold-first-query':
+        args.coldFirstQuery = true
+        break
+      case '--cold-strategy': {
+        const v = argv[++i]
+        if (!COLD_STRATEGIES.includes(v as never)) {
+          throw new Error(`--cold-strategy 取值非法：${v}（合法值：ready-before-query / ask-at-lexical-ready）`)
+        }
+        args.coldStrategy = v as ColdStrategy
+        break
+      }
       case '--mode': {
         const v = argv[++i]
         if (v !== 'rag' && v !== 'full-context') throw new Error('--mode 取值非法：rag / full-context')
@@ -116,6 +133,18 @@ export function parseArgs(argv: string[]): BenchArgs {
   }
   if (args.speed && args.task !== 'qa') {
     throw new Error('--speed 仅支持显式选择 --task qa')
+  }
+  if (args.speed && args.coldFirstQuery) {
+    throw new Error('--cold-first-query 与 --speed 互斥：冷首问与热速度协议不能同时运行')
+  }
+  if (args.coldStrategy !== undefined && !args.coldFirstQuery) {
+    throw new Error('--cold-strategy 需要 --cold-first-query')
+  }
+  if (args.coldFirstQuery && args.task !== 'qa') {
+    throw new Error('--cold-first-query 仅支持显式选择 --task qa')
+  }
+  if (args.coldFirstQuery && args.coldStrategy === undefined) {
+    args.coldStrategy = 'ready-before-query'
   }
   if (args.qConfig && !args.compare) throw new Error('--q-config 需要 --compare')
   return args

@@ -38,6 +38,41 @@ describe('parseArgs', () => {
     expect(a.useCache).toBe(false)
   })
 
+  it.each([
+    ['ready-before-query', 'ready-before-query'],
+    ['ask-at-lexical-ready', 'ask-at-lexical-ready'],
+  ])('解析 --cold-strategy %s', (value, expected) => {
+    expect(parseArgs(['--task', 'qa', '--cold-first-query', '--cold-strategy', value]).coldStrategy).toBe(expected)
+  })
+
+  it('--cold-first-query 不带 --cold-strategy 时默认 ready-before-query', () => {
+    expect(parseArgs(['--task', 'qa', '--cold-first-query']).coldStrategy).toBe('ready-before-query')
+  })
+
+  it('--cold-strategy 需要 --cold-first-query', () => {
+    expect(() => parseArgs(['--cold-strategy', 'ready-before-query'])).toThrow(/--cold-first-query/)
+  })
+
+  it('--cold-strategy 取值非法时抛出列出合法值的错误', () => {
+    expect(() => parseArgs(['--task', 'qa', '--cold-first-query', '--cold-strategy', 'nope']))
+      .toThrow(/ready-before-query.*ask-at-lexical-ready/)
+  })
+
+  it.each([
+    ['--speed 在前', ['--task', 'qa', '--speed', '--cold-first-query']],
+    ['--cold-first-query 在前', ['--task', 'qa', '--cold-first-query', '--speed']],
+  ])('--cold-first-query 与 --speed 互斥（$0）', (_label, argv) => {
+    expect(() => parseArgs(argv)).toThrow(/互斥/)
+  })
+
+  it.each([
+    ['没有显式 task', ['--cold-first-query']],
+    ['summary task', ['--task', 'summary', '--cold-first-query']],
+    ['all task', ['--task', 'all', '--cold-first-query']],
+  ])('--cold-first-query 拒绝 $0', (_label, argv) => {
+    expect(() => parseArgs(argv)).toThrow(/--cold-first-query.*--task qa/)
+  })
+
   it('仅在显式选择 QA task 时解析 --speed', () => {
     expect(parseArgs(['--task', 'qa', '--speed']).speed).toBe(true)
   })

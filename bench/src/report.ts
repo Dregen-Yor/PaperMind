@@ -1,4 +1,4 @@
-import type { BenchResult, SampleSource } from './types'
+import type { BenchResult, ColdFirstQueryResult, ColdStrategy, SampleSource } from './types'
 import { REFUSAL_PATTERN_VERSION } from './metrics/answerF1'
 import { aggregate } from './metrics/aggregate'
 import { MRR_DEFINITION } from './evaluationContract'
@@ -935,6 +935,59 @@ export function renderComparison(a: BenchResult, b: BenchResult): string {
   if (hasCountRow) {
     lines.push('>')
     lines.push('> `contextPageMrr*Count` 是分母计数行，恒不输出差值：样本数差异不是质量信号，两个数值已分别列在 A / B 列。')
+  }
+  lines.push('')
+  return lines.join('\n')
+}
+
+const COLD_STRATEGY_LABELS: Record<ColdStrategy, string> = {
+  'ready-before-query': 'ready-before-query（等待完整索引）',
+  'ask-at-lexical-ready': 'ask-at-lexical-ready（词法就绪即答）',
+}
+
+/**
+ * 冷首问报表（Task 7 Step 6）：`cold-first-query-v1` 独立于 query-timeline-v2 与 Q。
+ * 汇总表按 mode/strategy 各一行，逐篇表回答「这篇到底在哪一阶段、以哪种模式回答」。
+ */
+export function renderColdFirstQueryReport(results: ColdFirstQueryResult[]): string {
+  if (results.length === 0) return '## 冷首问报表\n\n无结果。\n'
+
+  const lines: string[] = []
+  lines.push('### 冷首问（cold-first-query-v1）')
+  lines.push('')
+  lines.push('> 冷首问测量「打开 PDF → 首个流式回答 token」的 t0 相对时延（t0 在重新打开 PDF 字节之前）。')
+  lines.push('> 该指标独立于 query-timeline-v2 与 Q，不进入速度 delta、也不参与检索排名。')
+  lines.push('')
+  lines.push('| 模式 | 策略 | 样本 | 完成 | 失败 | TTFT P50 / P95 | Full Answer P50 / P95 | PDF 载入 | 本地模型 | 词法就绪 | 向量就绪 | 目录就绪 | 目录使用率 |')
+  lines.push('| --- | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- |')
+  for (const result of results) {
+    const m = result.metrics
+    const num = (name: string) => (m[name] === undefined ? '—' : fmt(m[name]))
+    lines.push(
+      `| ${result.mode} | ${COLD_STRATEGY_LABELS[result.strategy]} | `
+      + `${num('coldFirstQuerySampleCount')} | ${num('coldFirstQueryCompletedCount')} | ${num('coldFirstQueryFailedCount')} | `
+      + `${cell(m, 'timeToFirstToken')} | ${cell(m, 'fullAnswerLatency')} | `
+      + `${cell(m, 'pdfLoad')} | ${cell(m, 'localModelInit')} | ${cell(m, 'lexicalReady')} | `
+      + `${cell(m, 'denseReady')} | ${cell(m, 'outlineReady')} | `
+      + `${m.outlineUsedRate === undefined ? '—' : fmtPct(m.outlineUsedRate)} |`,
+    )
+  }
+  lines.push('')
+
+  lines.push('| 论文 | 阶段 | 检索模式 | 目录使用 | 目录回落原因 | PDF 载入 | 本地模型 | 词法就绪 | 向量就绪 | 目录就绪 | TTFT | Full Answer | 状态 | 失败阶段 |')
+  lines.push('| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |')
+  const duration = (value: number | undefined) => (value === undefined ? '—' : fmtDuration(value))
+  for (const result of results) {
+    for (const record of result.records) {
+      lines.push(
+        `| ${record.paperId} | ${record.actualPassageStage} | ${record.retrievalMode} | `
+        + `${record.outlineUsed ? 'yes' : 'no'} | ${record.outlineFallbackReason ?? '—'} | `
+        + `${duration(record.pdfLoadMs)} | ${duration(record.localModelInitMs)} | ${duration(record.lexicalReadyMs)} | `
+        + `${duration(record.denseReadyMs)} | ${duration(record.outlineReadyMs)} | `
+        + `${duration(record.timeToFirstTokenMs)} | ${duration(record.fullAnswerLatencyMs)} | `
+        + `${record.completionStatus} | ${record.failureStage ?? '—'} |`,
+      )
+    }
   }
   lines.push('')
   return lines.join('\n')
