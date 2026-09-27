@@ -370,13 +370,15 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       // 非段落路径没有 hybrid 诊断，该字段缺席
       record.retrievalMode = retrieval.retrievals[0]?.hybrid?.retrievalMode
       // C 臂逐题目录诊断：只在**本篇真有目录产物**（passageInfo.outline 存在）时写入，
-      // A/B 与 B 式无目录篇整体缺席——不写 false 冒充「目录失败」。可用性是索引期事实，
+      // A/B 与 B 式无目录篇整体缺席——不写 false 冒充「目录失败」。`outlineIndexAvailable` 是
+      // **索引期**事实（本篇目录索引建成功没有），与检索期 `hybrid.outlineAvailable`（本次是否收到
+      // 非空节点）会故意不一致——节点向量不齐时前者 true、后者 false，故刻意用不同名。
       // outlineUsed 是查询期事实（dense 不可用时目录无从打分）；原因优先取索引期的回落原因，
       // 其次是查询期（如 dense-unavailable）。节点向量不齐（畸形产物）时索引期无原因可读，
       // 但的确退回了 B，故显式记索引期已有的 `outline-embed-failed`（缺的正是向量）。
       // 三者与 perPaper 的 coldStartOutline* 分属不同层。
       if (args.passage && passageInfo?.outline) {
-        record.outlineAvailable = passageInfo.outline.available
+        record.outlineIndexAvailable = passageInfo.outline.available
         record.outlineUsed = first?.hybrid?.outlineUsed
         record.outlineFallbackReason = outlineVectorsIncomplete
           ? 'outline-embed-failed'

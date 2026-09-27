@@ -326,16 +326,35 @@ export interface PerSampleRecord {
   retrievalQuery?: string
   /** 段落混合检索实际使用的模式（bm25 / bm25+dense / bm25+dense+outline / full / full-title-fallback / bm25+card-lexical） */
   retrievalMode?: string
-  /**
+  /*
    * C 臂逐题目录诊断（仅 hybrid-outline 且有目录产物的论文写入）。
-   * 与 perPaper 的 `coldStartOutline*` 分属两层：那三个是**每篇**的索引期事实，
-   * 这三个随**逐题**记录，供算「目录可用率 / 目录实际使用率」。
+   *
+   * **这里只是原始逐题观测，目前没有任何聚合消费者**：别以为它们被算进了某个「目录可用率 /
+   * 目录实际使用率」。现存唯一的目录率 `outlineAvailabilityRate` 取自**每篇**的
+   * `coldStartOutlineAvailable`（见 `metrics/passageDiagnostics.ts`），与本组字段无关；
+   * `outlineUsed` 想留下「目录实际使用率」这个信号，但聚合与渲染是**后续任务**的交付物，
+   * 在那之前本组字段只被写入（`runner/qa.ts`）而无人汇总。谁先接聚合谁负责补上口径与用例。
+   *
+   * 与 perPaper 的 `coldStartOutline*` 分属两层：那三个是**每篇**的索引期事实，这三个随**逐题**记录。
    */
-  /** 本篇目录是否可用（索引期事实，同一篇的所有问题相同） */
-  outlineAvailable?: boolean
-  /** 本问题的目录先验是否真的进入了融合（查询期事实；dense 不可用或目录缺失时为 false） */
+  /**
+   * 本篇的**目录索引**是否构建成功（索引期事实，同一篇的所有问题相同）。
+   *
+   * 注意与 `HybridPassageDiagnostics.outlineAvailable` **不是**一回事：那个是**查询期**事实，
+   * 指「本次检索是否收到了非空目录节点」。二者会**故意**不一致——目录索引成功但节点向量不齐
+   * （畸形产物，见 `toOutlineScoringNodes`）时，本篇索引期 `true`、但检索期收不到节点、模式
+   * 退回 `bm25+dense`。故改名 `outlineIndexAvailable` 以消歧，别把两个 `available` 混读。
+   */
+  outlineIndexAvailable?: boolean
+  /**
+   * 本问题的目录先验是否真的进入了融合（查询期事实；dense 不可用或目录缺失时为 false）。
+   * 与 `HybridPassageDiagnostics.outlineUsed` **同义**（这里就是它逐字复制来的），故沿用同名。
+   */
   outlineUsed?: boolean
-  /** 目录未启用时的原因：索引期回落（missing-outline …）或查询期（dense-unavailable） */
+  /**
+   * 目录未被使用的原因。与检索期同名字段同一问题，但这里是**合并后的优先级视图**：
+   * 先取索引期回落（missing-outline / outline-embed-failed …），再取查询期（dense-unavailable …）。
+   */
   outlineFallbackReason?: string
   /**
    * 诊断专用：被选中候选的页区间包络（去重升序）。

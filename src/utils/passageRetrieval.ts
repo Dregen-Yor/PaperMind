@@ -1,6 +1,7 @@
 /**
- * 段落级混合检索（方案 §4）：三路加权 RRF 融合 → 4096 预算填充 + 同小节邻段扩展
- * → 原文顺序组装。查询阶段零 LLM 调用（`llmCalled: false`）。
+ * 段落级混合检索（方案 §4）：BM25 打底，向量 / 卡片先验 / 原生目录先验（后两者**互斥**）
+ * 按可用性叠加，做多路加权 RRF 融合 → 4096 预算填充 + 同小节邻段扩展 → 原文顺序组装。
+ * 查询阶段零 LLM 调用（`llmCalled: false`）。
  *
  * 关键口径：预算判定与 `materializeContext` 的计法一致——「已用 + 新组分隔符 +
  * 段落 token ≤ 预算」。**这个等式只在计数同源时成立**，成立时最终物化永不截断
@@ -411,7 +412,9 @@ export async function retrievePassageContext(
   const bm25 = buildBm25Scorer(passages.map(passage => passage.searchText))
 
   // 目录先验（方案 C 臂）：只排名次、不裁剪，且打分复用上面这一次查询向量——查询期零额外嵌入。
-  const outlineNodes = opts.outline?.nodes ?? []
+  // 绑一次本地变量：`outlineNodes` / `outlineAvailable` 都由它派生，下面读 `weight` 时也不用断言。
+  const outlineOpt = opts.outline
+  const outlineNodes = outlineOpt?.nodes ?? []
   const outlineAvailable = outlineNodes.length > 0
 
   let dense: ((query: string) => RankedItem[]) | undefined
@@ -429,12 +432,15 @@ export async function retrievePassageContext(
     // 节点向量维度与查询向量不符 ⇒ 目录先验整路停用（与「段落向量数不齐」「embedderId 不符」
     // 同一种既有向量策略）。不能让它在融合内部才由 cosineSimilarity 抛错——那已过嵌入器的
     // try/catch，异常会直接冒给调用方，而不是契约承诺的降级。
-    if (outlineAvailable && outlineNodes.every(node => node.vector.length === vector.length)) {
+    // `outlineOpt &&`：`outlineAvailable`（`outlineNodes` 非空）本已蕴含「有 outline 选项」，
+    // 这里显式写出是为了让 TS 收窄 `outlineOpt`，从而无断言地读 `outlineOpt.weight`——
+    // 「outlineAvailable ⇒ opts.outline 有值」这条不变量只在本地陈述一次。
+    if (outlineOpt && outlineAvailable && outlineNodes.every(node => node.vector.length === vector.length)) {
       outline = {
         list: () => rankOutlinePassages(vector, outlineNodes, passages.length),
         // 权重是**必填**字段，直接读取、**不**回退到 sectionWeight：一个被显式设成 0 的权重
         // 也不得悄悄变成另一个数。调用方保证它来自本次运行唯一的配置源（`sectionWeight`）。
-        weight: opts.outline!.weight,
+        weight: outlineOpt.weight,
       }
       mode = 'bm25+dense+outline'
     } else {

@@ -439,7 +439,7 @@ describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5�
       embedder, capturingMaterialize().materialize,
     ))
     expect(result.perSample[0].retrievalMode).toBe('bm25+dense+outline')
-    expect(result.perSample[0].outlineAvailable).toBe(true)
+    expect(result.perSample[0].outlineIndexAvailable).toBe(true)
     expect(result.perSample[0].outlineUsed).toBe(true)
     expect(result.perSample[0].outlineFallbackReason).toBeUndefined()
     expect(result.metrics.passageDegradedQuestionRate).toBe(0)
@@ -453,7 +453,7 @@ describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5�
       embedder, capturingMaterialize().materialize,
     ))
     expect(result.perSample[0].retrievalMode).toBe('bm25+dense')
-    expect(result.perSample[0].outlineAvailable).toBe(false)
+    expect(result.perSample[0].outlineIndexAvailable).toBe(false)
     expect(result.perSample[0].outlineUsed).toBe(false)
     expect(result.perSample[0].outlineFallbackReason).toBe('missing-outline')
     expect(result.metrics.passageDegradedQuestionRate).toBe(0)
@@ -468,7 +468,7 @@ describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5�
       embedder, capturingMaterialize().materialize,
     ))
     expect(result.perSample[0].retrievalMode).toBe('bm25')
-    expect(result.perSample[0].outlineAvailable).toBe(true)
+    expect(result.perSample[0].outlineIndexAvailable).toBe(true)
     expect(result.perSample[0].outlineUsed).toBe(false)
     expect(result.perSample[0].outlineFallbackReason).toBe('dense-unavailable')
     expect(result.metrics.passageDegradedQuestionRate).toBe(1)
@@ -485,6 +485,9 @@ describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5�
     ))
     // 不静默缩水：mode 退回 B 的 bm25+dense（C 臂的合法回落，不判降级），并留下可诊断原因
     expect(result.perSample[0].retrievalMode).toBe('bm25+dense')
+    // 索引期目录是建成了的（`outlineIndexAvailable` = true），只是向量不齐让检索期收不到节点
+    // （`hybrid.outlineAvailable` = false）——两层字段在此特意分道扬镳，断言把这一分叉钉死。
+    expect(result.perSample[0].outlineIndexAvailable).toBe(true)
     expect(result.perSample[0].outlineUsed).toBe(false)
     expect(result.perSample[0].outlineFallbackReason).toBe('outline-embed-failed')
     expect(result.metrics.passageDegradedQuestionRate).toBe(0)
