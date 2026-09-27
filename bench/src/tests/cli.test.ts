@@ -12,10 +12,13 @@
  * 吐固定 token；BGE-M3 tokenizer 用空白切词的确定性替身。
  */
 import { describe, expect, it, vi } from 'vitest'
-import type { PdfStudySample } from '../types'
+import type { BenchResult, PdfStudySample } from '../types'
 import type { PdfOutlineEntry } from '../../../src/utils/pdfOutline'
 import type { Embedder } from '../../../src/utils/embedder'
 import type { StreamingLlmClient } from '../llmClient'
+import type { ProductSweepArgs } from '../runner/productSweep'
+import type { QConfig } from '../scoring/qScore'
+import { qFixture, qConfig } from './qFixture'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -23,7 +26,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   getDocument: vi.fn(),
 }))
 
-const { runProductSweep } = await import('../runner/productSweep')
+const { runProductSweep, hasHarnessFailure, finalizeProductSweep } = await import('../runner/productSweep')
 const { buildEvaluationContract, composeBaseSystemPrompt } = await import('../evaluationContract')
 const { buildSpeedRunContract } = await import('../speed/contract')
 const { executedQuestions } = await import('../evaluationContract')
@@ -195,5 +198,118 @@ describe('outline-study product sweep（Task 8）', () => {
       expect(cold.records).toHaveLength(3)
       expect(cold.records.every(record => record.completionStatus === 'completed')).toBe(true)
     }
+  })
+})
+
+/** 上一条用例之外的 sweep 参数：同一条契约、假 embedder/假客户端、确定性时钟。 */
+function sweepArgs(overrides: Partial<ProductSweepArgs> = {}): ProductSweepArgs {
+  const evaluationContract = buildEvaluationContract(samples)
+  const speedContract = buildSpeedRunContract({
+    datasetFingerprint: evaluationContract.datasetFingerprint,
+    executedQuestionIds: executedQuestions(samples).map(({ question }) => question.id),
+    provider: 'openai',
+    model: 'fake-model',
+    baseUrl: 'https://fake.example/v1',
+    retryAttempts: 0,
+    answerSystemPrompt: composeBaseSystemPrompt('system', ENGLISH_ANSWER_INSTRUCTION),
+    generationSettings: { temperature: 0, maxTokens: 4096 },
+    environment: { platform: 'darwin', arch: 'arm64', nodeVersion: 'v22' },
+  })
+  let clock = 0
+  return {
+    samples,
+    gitSha: 'abc1234',
+    model: 'fake-model',
+    systemPrompt: 'system',
+    answerLanguageInstruction: ENGLISH_ANSWER_INSTRUCTION,
+    tokenizer,
+    contextBudgetTokens: 4096,
+    client: streamingClient(),
+    embedder: fakeEmbedder(),
+    speedContract,
+    readPdf: async sample => sample.pages,
+    now: () => (clock += 1),
+    ...overrides,
+  }
+}
+
+describe('sweep 逐臂回调与退出码口径（Issue 1/2 修复）', () => {
+  it('每完成一臂即回调 onHot / onCold，顺序与臂序一致（落盘发生在臂内，不是整批）', async () => {
+    const onHot = vi.fn()
+    const onCold = vi.fn()
+    await runProductSweep({ ...sweepArgs(), onHot, onCold })
+
+    expect(onHot.mock.calls.map(([result]) => result.config.name)).toEqual([
+      'structure-lexical', 'structure-hybrid-raw', 'structure-hybrid-outline', 'full-context',
+    ])
+    expect(onCold).toHaveBeenCalledTimes(6)
+    expect(onCold.mock.calls.map(([cold]) => cold.mode)).toEqual([
+      'lexical', 'lexical', 'hybrid-raw', 'hybrid-raw', 'hybrid-outline', 'hybrid-outline',
+    ])
+  })
+
+  it('某臂抛错时，已完成的臂仍经回调交付（不再整批丢弃）', async () => {
+    const delivered: string[] = []
+    const onHot = (result: BenchResult) => {
+      delivered.push(result.config.name)
+      if (delivered.length === 2) throw new Error('arm boom')
+    }
+    await expect(runProductSweep({ ...sweepArgs(), onHot })).rejects.toThrow('arm boom')
+    // 第一臂已在第二臂抛错前交付——正是「逐臂落盘」要保住的东西
+    expect(delivered).toEqual(['structure-lexical', 'structure-hybrid-raw'])
+  })
+})
+
+describe('hasHarnessFailure（sweep 与主路径共用的退出码判定）', () => {
+  const counts = (completed: number, total: number): BenchResult => ({
+    task: 'qa', config: { name: 'x' }, metrics: {}, perSample: [], errors: [],
+    meta: { model: 'm', timestamp: 't', gitSha: 's', completed, total },
+  })
+
+  it('整轮零完成 → true（exit 1）；有任何完成 → false（exit 0）', () => {
+    // API key 配错的整轮零完成：判为 harness 故障
+    expect(hasHarnessFailure([counts(0, 12), counts(0, 12)])).toBe(true)
+    // 与主路径同一口径（some）：任一结果 completed=0 即整轮失败
+    expect(hasHarnessFailure([counts(0, 12), counts(12, 12)])).toBe(true)
+    expect(hasHarnessFailure([counts(12, 12), counts(12, 12)])).toBe(false)
+    expect(hasHarnessFailure([])).toBe(false)
+  })
+})
+
+/** 产品三表 fixture：与 report.test.ts 的 pdfStudyFixture 同形（补 Q 需要的身份字段）。 */
+function productFixture(name: string, mode: 'rag' | 'full-context' = 'rag'): BenchResult {
+  const fixture = qFixture(name, mode)
+  fixture.meta.qaQualityDefinition = 'pdf-qa-all-questions-v1'
+  fixture.meta.qaQualitySource = 'pdf-study'
+  fixture.meta.qaQualityManifestFingerprint = 'manifest-pdf'
+  fixture.meta.pdfStudyPdfFingerprint = 'pdf-fp'
+  fixture.meta.pdfStudyOutlineFingerprint = 'outline-fp'
+  for (const row of fixture.perSample) row.source = 'pdf-study'
+  return fixture
+}
+
+/** 速度优先 Q 权重（`configs/scoring/q-speed-first.json` 的口径）。 */
+const qSpeedConfig: QConfig = {
+  schemaVersion: 1, formula: 'weighted-geometric-relative-v1', baselineMode: 'full-context',
+  weights: { answerF1: 0.2, ttftP50: 0.4, ttftP95: 0.4 },
+}
+
+describe('finalizeProductSweep（Issue 2：meta 定格 + 三表装配）', () => {
+  it('定格 cacheMode/mode，并按有无参考把 Q 列渲染成数字或 —', () => {
+    const reference = productFixture('full-context', 'full-context')
+    const arm = productFixture('structure-lexical')
+    const { hot, report } = finalizeProductSweep([arm, reference], [], { qDefault: qConfig, qSpeed: qSpeedConfig })
+
+    // 非 full-context 臂一律标 rag；R 保持 full-context；两条都跳过读缓存
+    expect(hot[0].meta.mode).toBe('rag')
+    expect(hot[0].meta.cacheMode).toBe('bypass')
+    expect(hot[1].meta.mode).toBe('full-context')
+    expect(hot[1].meta.cacheMode).toBe('bypass')
+    // 候选与参考逐字相同 → 两套权重下 Q 都是 100.00（Q 单元格渲染出数字）
+    expect(report).toContain('| 100.00 | 100.00 |')
+
+    // 无 full-context 参考 → 不硬造 Q，两列渲染 —
+    const noRef = finalizeProductSweep([productFixture('structure-lexical')], [], { qDefault: qConfig, qSpeed: qSpeedConfig })
+    expect(noRef.report).toContain('| — | — |')
   })
 })

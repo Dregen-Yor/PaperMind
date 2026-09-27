@@ -1304,6 +1304,8 @@ describe('renderOutlineCostTable（Task 8 目录成本表）', () => {
         outlineAvailableCount: 2,
         outlineFallbackCount: 1,
         outlineUsedRate: 8 / 12,
+        outlineUsedCount: 8,
+        outlineUseDenominatorCount: 12,
         outlineBuildP50Ms: 420,
         outlineBuildP95Ms: 900,
       },
@@ -1324,6 +1326,8 @@ describe('renderOutlineCostTable（Task 8 目录成本表）', () => {
     // 全 PDF 分母（3 篇 / 12 题）与有有效目录的配对子集（2 篇 / 8 题）显式分开
     expect(md).toContain('全 PDF 分母 3 篇 / 12 题')
     expect(md).toContain('配对子集 2 篇 / 8 题')
+    // 使用率的分母（写了目录诊断的题）显式写成 8/12，避免与「配对子集 8 题」混读
+    expect(md).toContain('使用率 8 / 12 题')
     // 回落原因按篇聚合
     expect(md).toContain('missing-outline × 1')
     // 索引阶段零生成式 LLM 调用

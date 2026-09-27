@@ -20,12 +20,14 @@ import { runTraditionalRagQaTask } from './runner/traditionalRagQa'
 import { runHybridRerankQaTask } from './runner/hybridRerankQa'
 import { runLongSectionQaTask } from './runner/longSectionQa'
 import { runSemanticTreeQaTask } from './runner/semanticTreeQa'
-import { createPassageIndexHook, type HybridKnobs } from './runner/passageIndexHook'
 import { runColdFirstQuery } from './runner/coldFirstQuery'
-import { runProductSweep } from './runner/productSweep'
+import {
+  runProductSweep, finalizeProductSweep, hasHarnessFailure,
+  hybridKnobsOf, createProductPassageHook, applySweepResultMeta,
+} from './runner/productSweep'
 import { errorMessage } from './runner/support'
 import { runSummaryTask } from './runner/summary'
-import { renderReport, renderComparison, renderColdFirstQueryReport, renderProductReport } from './report'
+import { renderReport, renderComparison, renderColdFirstQueryReport } from './report'
 import { benchPath } from './paths'
 import type { BenchResult, BenchConfig, ColdFirstQueryResult, EvalSample, PdfStudySample, SampleSource } from './types'
 import type { PaperMindConfig } from './types'
@@ -187,25 +189,14 @@ async function runColdForConfig(
     return embedder
   }
 
-  const knobs: HybridKnobs = {
-    minTokens: config.minTokens as number,
-    maxTokens: config.maxTokens as number,
-    maxInputChars: config.maxInputChars as number,
-    rrfK: config.rrfK as number,
-    sectionWeight: config.sectionWeight as number,
-    neighbourFactor: config.neighbourFactor as number,
-    skipLimit: config.skipLimit as number,
-  }
-  const createHook = (embedder: Embedder | undefined) => createPassageIndexHook({
-    knobs,
-    client,
+  const knobs = hybridKnobsOf(config)
+  const createHook = (embedder: Embedder | undefined) => createProductPassageHook({
+    config,
+    mode,
     embedder,
+    client,
     countTokens,
     modelIdentity: env.model,
-    mode,
-    ...(mode === 'hybrid-outline'
-      ? { outlineIndex: (sample: EvalSample) => isPdfStudySample(sample) ? sample.pdfOutline : undefined }
-      : {}),
   })
   const readPdf = async (sample: PdfStudySample): Promise<string[]> => {
     const bytes = await readFile(sample.pdfPath)
@@ -492,8 +483,12 @@ if (args.sweep) {
     cacheDir: MODEL_CACHE_DIR(),
   })
 
-  // B/C 共用同一个 embedder pin（从 hybrid-raw 配置读出，与 runQaTask 的加载口径一致）
+  // B/C 共用同一个 embedder pin（从 hybrid-raw 配置读出，与 runQaTask 的加载口径一致）。
+  // 必须显式校验展开为单臂：否则 `embedderConfigs[0]` 为空时抛一个语焉不详的 TypeError。
   const embedderConfigs = await loadConfigs('structure-hybrid-raw')
+  if (embedderConfigs.length !== 1) {
+    throw new Error(`--sweep 期望 structure-hybrid-raw 展开为单臂，实际 ${embedderConfigs.length} 臂`)
+  }
   const embedderParams = (embedderConfigs[0] as PaperMindConfig).passage?.embedder
   let sweepEmbedder: Embedder | undefined
   if (embedderParams) {
@@ -516,33 +511,53 @@ if (args.sweep) {
     return (await extractPdfDocument(bytes.toString('base64'), { readOutline: false })).pages
   }
 
-  const sweepResult = await runProductSweep({
-    samples: pdfSamples,
-    limit: args.limit,
-    gitSha: sha,
-    model: env.model,
-    systemPrompt: DEFAULT_SYSTEM_PROMPT,
-    answerLanguageInstruction: ENGLISH_ANSWER_INSTRUCTION,
-    tokenizer: contractTokenizer,
-    contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
-    client,
-    embedder: sweepEmbedder,
-    speedContract: speedPolicy.contract,
-    readPdf,
-  })
-
-  for (const result of sweepResult.hot) {
-    result.meta.cacheMode = 'bypass'
-    if (result.meta.mode !== 'full-context') result.meta.mode = 'rag'
+  // 逐臂落盘（Issue 1）：runProductSweep 每完成一臂即回调，某臂抛错（TimingInvariantViolation /
+  // assertContextPageDenominator / 「论文没有切出任何段落」）时已完成的臂照常写盘，不再整批丢弃。
+  const sweepHot: BenchResult[] = []
+  const sweepCold: ColdFirstQueryResult[] = []
+  const onHot = (result: BenchResult) => {
+    applySweepResultMeta(result)
     qaResults.push(result)
     writeResult(result, 'outline-study')
+    sweepHot.push(result)
+    process.stdout.write(`  完成 ${result.meta.completed}/${result.meta.total}，失败 ${result.errors.length}\n`)
   }
-  for (const coldResult of sweepResult.cold) writeColdResult(coldResult)
+  const onCold = (coldResult: ColdFirstQueryResult) => {
+    writeColdResult(coldResult)
+    sweepCold.push(coldResult)
+  }
 
-  const qDefault = readQSource(benchPath(import.meta.url, '../configs/scoring/q-score.json')).data as QConfig
-  const qSpeed = readQSource(benchPath(import.meta.url, '../configs/scoring/q-speed-first.json')).data as QConfig
-  process.stdout.write(renderProductReport(sweepResult.hot, sweepResult.cold, qDefault, qSpeed))
-  process.exit(0)
+  let sweepFailure: unknown
+  try {
+    await runProductSweep({
+      samples: pdfSamples,
+      limit: args.limit,
+      gitSha: sha,
+      model: env.model,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      answerLanguageInstruction: ENGLISH_ANSWER_INSTRUCTION,
+      tokenizer: contractTokenizer,
+      contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
+      client,
+      embedder: sweepEmbedder,
+      speedContract: speedPolicy.contract,
+      readPdf,
+      onHot,
+      onCold,
+    })
+  } catch (error) {
+    sweepFailure = error
+    process.stdout.write(
+      `\n[sweep] 中断：${errorMessage(error)}（已完成 ${sweepHot.length}/4 热臂、${sweepCold.length}/6 冷臂，结果已逐臂落盘）\n`,
+    )
+  }
+
+  // 收尾只做 meta 定格（onHot 已定格，幂等）与三张产品表的装配，不写盘
+  process.stdout.write(finalizeProductSweep(sweepHot, sweepCold).report)
+
+  // 与主路径同一 harness 故障口径：整轮零完成（典型为 API key 配错）→ exit 1；
+  // 某臂抛错同样视为 harness 故障，退出 1。单样本失败是正常数据点，不算。
+  process.exit(sweepFailure !== undefined || hasHarnessFailure(sweepHot) ? 1 : 0)
 }
 
 for (const config of configs) {
@@ -702,33 +717,20 @@ for (const config of configs) {
               console.warn(`向量模型加载失败，本轮降级为 bm25*：${errorMessage(error)}`)
             }
           }
-          const knobs: HybridKnobs = {
-            minTokens: config.minTokens as number,
-            maxTokens: config.maxTokens as number,
-            maxInputChars: config.maxInputChars as number,
-            rrfK: config.rrfK as number,
-            sectionWeight: config.sectionWeight as number,
-            neighbourFactor: config.neighbourFactor as number,
-            skipLimit: config.skipLimit as number,
-          }
+          const knobs = hybridKnobsOf(config)
           // 契约分词器只有 tokenize：计数口径必须与 materializeContext 完全一致，
           // 否则预算填充放得下的段落会在物化时被截断
           const countTokens = (text: string) => contractTokenizer.tokenize(text).length
           result = await runQaTask({
             ...common, ...controlled, config,
             passage: {
-              hook: createPassageIndexHook({
-                knobs,
-                client,
+              hook: createProductPassageHook({
+                config,
+                mode,
                 embedder: passageEmbedder,
+                client,
                 countTokens,
                 modelIdentity: env.model,
-                mode,
-                // C 臂的原生目录只在 outline-study 样本上存在；显式注入访问器，
-                // 让 hook 不必把 EvalSample 硬窄化成 PdfStudySample
-                ...(mode === 'hybrid-outline'
-                  ? { outlineIndex: (sample: EvalSample) => isPdfStudySample(sample) ? sample.pdfOutline : undefined }
-                  : {}),
               }),
               embedder: passageEmbedder,
               countTokens,
@@ -813,7 +815,7 @@ if (summaryResults.length > 0) process.stdout.write(renderReport(summaryResults)
 // 整轮零完成（completed === 0 且 total > 0，典型为 API key 配错）是 harness 故障，
 // 报表照常输出后以 exit 1 告知 CI/脚本「跑完了但整轮无效」。
 // 多配置时任一配置 completed=0 即视为整轮失败；--compare 路径始终 exit 0。
-const allResults = [...qaResults, ...summaryResults]
-if (allResults.some((r) => r.meta.total > 0 && r.meta.completed === 0)) {
+// 判定收敛到 hasHarnessFailure，与 --sweep 路径共用同一份口径。
+if (hasHarnessFailure([...qaResults, ...summaryResults])) {
   process.exit(1)
 }

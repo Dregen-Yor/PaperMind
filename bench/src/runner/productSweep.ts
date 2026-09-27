@@ -12,13 +12,17 @@
  */
 import { loadConfigs, resolvePassageMode } from '../config'
 import { buildEvaluationContract, composeBaseSystemPrompt } from '../evaluationContract'
-import { createPassageIndexHook, type HybridKnobs } from './passageIndexHook'
+import { benchPath } from '../paths'
+import { createPassageIndexHook, type HybridKnobs, type PassageIndexHook } from './passageIndexHook'
 import { runQaTask } from './qa'
 import { runFullContextQaTask } from './fullContextQa'
 import { runColdFirstQuery } from './coldFirstQuery'
 import { materializeContext, type ContextGroup } from '../../../src/utils/contextTrace'
 import type { Embedder } from '../../../src/utils/embedder'
-import type { StreamingLlmClient } from '../llmClient'
+import type { LlmClient, StreamingLlmClient } from '../llmClient'
+import { readQSource } from '../scoring/qArtifacts'
+import type { QConfig } from '../scoring/qScore'
+import { renderProductReport } from '../report'
 import type { SpeedRunContract } from '../speed/contract'
 import type { SpeedRunnerOptions } from '../speed/generate'
 import type {
@@ -56,6 +60,13 @@ export interface ProductSweepArgs {
   speedContract: SpeedRunContract
   /** 冷首问在 t0 之后重新打开原始 PDF 字节并抽取页文本。 */
   readPdf: (sample: PdfStudySample) => Promise<string[]>
+  /**
+   * 每完成一臂即回调（Issue 1）：CLI 借此**逐臂落盘**，某臂抛错（TimingInvariantViolation /
+   * assertContextPageDenominator / 「论文没有切出任何段落」）时已完成的臂照常保留，不再整批丢弃。
+   * runner 自身**不写文件**——落盘是 CLI 的职责。
+   */
+  onHot?: (result: BenchResult) => void
+  onCold?: (result: ColdFirstQueryResult) => void
   now?: () => number
 }
 
@@ -64,6 +75,88 @@ export interface ProductSweepResult {
   hot: BenchResult[]
   /** A/B/C × 2 条冷策略，共 6 条 */
   cold: ColdFirstQueryResult[]
+}
+
+/**
+ * 段落索引的配置旋钮提取（Issue 6）：主循环、冷首问、产品 sweep 三处此前各抄一份——
+ * 任一旋钮漏写，多次运行就会产出「自称不同口径、实则同一份数字」的结果。
+ */
+export function hybridKnobsOf(config: PaperMindConfig): HybridKnobs {
+  return {
+    minTokens: config.minTokens as number,
+    maxTokens: config.maxTokens as number,
+    maxInputChars: config.maxInputChars as number,
+    rrfK: config.rrfK as number,
+    sectionWeight: config.sectionWeight as number,
+    neighbourFactor: config.neighbourFactor as number,
+    skipLimit: config.skipLimit as number,
+  }
+}
+
+export interface ProductPassageHookArgs {
+  config: PaperMindConfig
+  mode: PassageMode
+  /** 加载失败时为 undefined：本篇/本轮降级为 bm25*，由调用方标为不参与正式对照。 */
+  embedder: Embedder | undefined
+  client: LlmClient
+  countTokens: (text: string) => number
+  /** 卡片指纹里的模型身份；`LlmClient` 无 identity 方法，故显式传入 `env.model`。 */
+  modelIdentity: string
+}
+
+/**
+ * 段落索引 hook 的唯一装配点（Issue 6）：三处调用点共用同一份 knobs 与 outlineIndex 访问器，
+ * `outlineIndex`（C 臂的原生目录来源）只在此处拼装一次，不会被某处漏写而静默退化。
+ */
+export function createProductPassageHook(args: ProductPassageHookArgs): PassageIndexHook {
+  const { config, mode } = args
+  return createPassageIndexHook({
+    knobs: hybridKnobsOf(config),
+    client: args.client,
+    embedder: args.embedder,
+    countTokens: args.countTokens,
+    modelIdentity: args.modelIdentity,
+    mode,
+    // C 臂的原生目录只在 outline-study 样本上存在；显式注入访问器，让 hook 不必窄化样本
+    ...(mode === 'hybrid-outline'
+      ? { outlineIndex: (sample: EvalSample) => isPdfStudySample(sample) ? sample.pdfOutline : undefined }
+      : {}),
+  })
+}
+
+/**
+ * harness 故障判定（与 CLI 主路径同一口径）：有任何一份结果 `total>0` 却 `completed===0`
+ * （典型为 API key 配错）即整轮无效。单样本失败是正常数据点，不算 harness 故障。
+ */
+export function hasHarnessFailure(results: BenchResult[]): boolean {
+  return results.some(result => result.meta.total > 0 && result.meta.completed === 0)
+}
+
+/** sweep 结果的 meta 定格（Issue 2）：跳过读缓存；非 full-context 一律标 rag。 */
+export function applySweepResultMeta(result: BenchResult): void {
+  result.meta.cacheMode = 'bypass'
+  if (result.meta.mode !== 'full-context') result.meta.mode = 'rag'
+}
+
+/**
+ * sweep 收尾（Issue 2）：把逐臂结果口径定格，读两份 Q 配置，再装配三张产品表。
+ * **不写文件**——落盘仍由 CLI 负责；这里只做可变与装配，故可单测（注入 `qConfigs` 避开磁盘）。
+ */
+export function finalizeProductSweep(
+  hot: BenchResult[],
+  cold: ColdFirstQueryResult[],
+  qConfigs: { qDefault: QConfig; qSpeed: QConfig } = readProductQConfigs(),
+): { hot: BenchResult[]; report: string } {
+  for (const result of hot) applySweepResultMeta(result)
+  return { hot, report: renderProductReport(hot, cold, qConfigs.qDefault, qConfigs.qSpeed) }
+}
+
+/** 读两份冻结 Q 配置（全文参考 / 速度优先）；路径相对本模块，与 CLI 落盘位置无关。 */
+function readProductQConfigs(): { qDefault: QConfig; qSpeed: QConfig } {
+  return {
+    qDefault: readQSource(benchPath(import.meta.url, '../../configs/scoring/q-score.json')).data as QConfig,
+    qSpeed: readQSource(benchPath(import.meta.url, '../../configs/scoring/q-speed-first.json')).data as QConfig,
+  }
 }
 
 export async function runProductSweep(args: ProductSweepArgs): Promise<ProductSweepResult> {
@@ -86,36 +179,36 @@ export async function runProductSweep(args: ProductSweepArgs): Promise<ProductSw
     }),
   )
 
-  const knobsOf = (config: PaperMindConfig): HybridKnobs => ({
-    minTokens: config.minTokens as number,
-    maxTokens: config.maxTokens as number,
-    maxInputChars: config.maxInputChars as number,
-    rrfK: config.rrfK as number,
-    sectionWeight: config.sectionWeight as number,
-    neighbourFactor: config.neighbourFactor as number,
-    skipLimit: config.skipLimit as number,
-  })
+  // CLI 从 structure-hybrid-raw pin 出 B/C 共用的 embedder；sweep 假定 C 臂 pin 的是同一份。
+  // 两者一旦不同，pin 的 embedder 就不属于 C 臂配置身份，整份对照失效——此处显式拦住。
+  const embedderOf = (name: string) =>
+    armConfigs.find(a => a.paperConfig.name === name)?.paperConfig.passage?.embedder
+  const rawEmbedder = embedderOf('structure-hybrid-raw')
+  const outlineEmbedder = embedderOf('structure-hybrid-outline')
+  const sameEmbedder = (a: typeof rawEmbedder, b: typeof rawEmbedder): boolean =>
+    a === undefined || b === undefined
+      ? a === b
+      : a.model === b.model && a.revision === b.revision && a.dtype === b.dtype && a.dim === b.dim
+  if (!sameEmbedder(rawEmbedder, outlineEmbedder)) {
+    throw new Error('sweep 假定 structure-hybrid-outline 与 structure-hybrid-raw pin 同一 embedder，实际不同')
+  }
 
   const createHook = (config: PaperMindConfig, mode: PassageMode, embedder: Embedder | undefined) =>
-    createPassageIndexHook({
-      knobs: knobsOf(config),
-      client: args.client,
+    createProductPassageHook({
+      config,
+      mode,
       embedder,
+      client: args.client,
       countTokens,
       modelIdentity: args.model,
-      mode,
-      // C 臂的原生目录只在 outline-study 样本上存在；显式注入访问器，让 hook 不必窄化样本
-      ...(mode === 'hybrid-outline'
-        ? { outlineIndex: (sample: EvalSample) => isPdfStudySample(sample) ? sample.pdfOutline : undefined }
-        : {}),
     })
 
   const hot: BenchResult[] = []
   for (const { paperConfig, mode } of armConfigs) {
-    const knobs = knobsOf(paperConfig)
+    const knobs = hybridKnobsOf(paperConfig)
     // lexical 臂本就不加载嵌入器：注入 undefined 让 hook 兜底，也让检索侧不携带 dense 路
     const passageEmbedder = mode === 'lexical' ? undefined : args.embedder
-    hot.push(await runQaTask({
+    const result = await runQaTask({
       samples,
       config: paperConfig,
       client: args.client,
@@ -139,11 +232,13 @@ export async function runProductSweep(args: ProductSweepArgs): Promise<ProductSw
         embedderUnavailable: mode !== 'lexical' && passageEmbedder === undefined,
       },
       speed,
-    }))
+    })
+    hot.push(result)
+    args.onHot?.(result)
   }
 
   // R：full-context 全文直投，用同一份 sample/question manifest，是 Q 的参考而不是检索选手
-  hot.push(await runFullContextQaTask({
+  const reference = await runFullContextQaTask({
     samples,
     config: { name: 'full-context', kind: 'papermind' },
     client: args.client,
@@ -154,13 +249,15 @@ export async function runProductSweep(args: ProductSweepArgs): Promise<ProductSw
     model: args.model,
     now,
     speed,
-  }))
+  })
+  hot.push(reference)
+  args.onHot?.(reference)
 
   const cold: ColdFirstQueryResult[] = []
   for (const { paperConfig, mode } of armConfigs) {
-    const knobs = knobsOf(paperConfig)
+    const knobs = hybridKnobsOf(paperConfig)
     for (const strategy of COLD_STRATEGIES) {
-      cold.push(await runColdFirstQuery({
+      const coldResult = await runColdFirstQuery({
         samples,
         mode,
         strategy,
@@ -177,7 +274,9 @@ export async function runProductSweep(args: ProductSweepArgs): Promise<ProductSw
         neighbourFactor: knobs.neighbourFactor,
         skipLimit: knobs.skipLimit,
         now,
-      }))
+      })
+      cold.push(coldResult)
+      args.onCold?.(coldResult)
     }
   }
 

@@ -1067,12 +1067,18 @@ export function renderOutlineCostTable(hot: BenchResult[]): string[] {
   }
   lines.push('')
   for (const result of arms) {
+    const m = result.metrics
     const papers = result.perPaper ?? []
     const attempted = papers.filter(paper => paper.coldStartOutlineAvailable !== undefined)
     const valid = attempted.filter(paper => paper.coldStartOutlineAvailable === 1)
     const allQuestions = result.meta.total
     const validQuestions = valid.reduce((sum, paper) => sum + (paper.questionCount ?? 0), 0)
-    lines.push(`> ${result.config.name}：全 PDF 分母 ${papers.length} 篇 / ${allQuestions} 题；有有效目录的配对子集 ${valid.length} 篇 / ${validQuestions} 题——回落篇仍留在全 PDF 分母里，可用率与使用率各按自己的分母报告。`)
+    // 使用率的分母（写了目录诊断的题）与相邻的「配对子集 N 题」不是同一个数，光看百分比会误读成
+    // 后者（8/12 vs 8/8）。这里把分数显式写进脚注，单元格仍只放百分比（不破坏既有表格断言）。
+    const useFraction = m.outlineUsedCount === undefined || m.outlineUseDenominatorCount === undefined
+      ? ''
+      : `（使用率 ${m.outlineUsedCount} / ${m.outlineUseDenominatorCount} 题，分母为写了目录诊断的题数）`
+    lines.push(`> ${result.config.name}：全 PDF 分母 ${papers.length} 篇 / ${allQuestions} 题；有有效目录的配对子集 ${valid.length} 篇 / ${validQuestions} 题——回落篇仍留在全 PDF 分母里，可用率与使用率各按自己的分母报告${useFraction}。`)
     const fallbackReasons = outlineFallbackSummary(result)
     if (fallbackReasons.length > 0) lines.push(`> 目录回落原因（按篇）：${fallbackReasons.join('；')}。`)
   }
