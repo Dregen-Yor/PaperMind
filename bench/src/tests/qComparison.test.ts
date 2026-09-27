@@ -5,6 +5,16 @@ import { aggregateSpeedMetrics } from '../speed/metrics'
 import { questionIdsHash } from '../speed/contract'
 import { qConfig, qFixture } from './qFixture'
 
+/** pdf-study 侧的 Q fixture：与 qFixture 逐字同构，只换定义、来源与 manifest 指纹。 */
+function pdfFixture(name: string, mode: 'rag' | 'full-context' = 'rag'): BenchResult {
+  const fixture = qFixture(name, mode)
+  fixture.meta.qaQualityDefinition = 'pdf-qa-all-questions-v1'
+  fixture.meta.qaQualitySource = 'pdf-study'
+  fixture.meta.qaQualityManifestFingerprint = 'manifest-pdf'
+  for (const row of fixture.perSample) row.source = 'pdf-study'
+  return fixture
+}
+
 describe('buildQComparison', () => {
   it('scores a baseline against itself as 100 without mutating inputs', () => {
     const reference = qFixture('reference', 'full-context')
@@ -103,5 +113,60 @@ describe('buildQComparison', () => {
     expect(buildQComparison(qFixture('ref', 'full-context'), zero, qConfig).score).toBe(0)
     zero.meta.mode = 'full-context'
     expect(buildQComparison(zero, qFixture('candidate'), qConfig).score).toBeNull()
+  })
+})
+
+describe('buildQComparison — pdf-study protocol', () => {
+  it('scores a matched pdf-study pair with identical ids, manifest, model, and speed contract', () => {
+    const reference = pdfFixture('reference', 'full-context')
+    const candidate = pdfFixture('candidate')
+    const comparison = buildQComparison(reference, candidate, qConfig)
+    expect(comparison.score).toBe(100)
+    expect(comparison.reasons).toEqual([])
+    expect(comparison.reference).toEqual({ answerF1: 0.5, ttftP50: 100, ttftP95: 200 })
+  })
+
+  it('refuses a PDF-vs-QASPER pair and, symmetrically, QASPER-vs-PDF, with a diagnostic', () => {
+    const pdfToQasper = buildQComparison(pdfFixture('reference', 'full-context'), qFixture('candidate'), qConfig)
+    expect(pdfToQasper.score).toBeNull()
+    expect(pdfToQasper.reasons.join(' ')).toMatch(/definition/i)
+
+    const qasperToPdf = buildQComparison(qFixture('reference', 'full-context'), pdfFixture('candidate'), qConfig)
+    expect(qasperToPdf.score).toBeNull()
+    expect(qasperToPdf.reasons.join(' ')).toMatch(/definition/i)
+  })
+
+  it('refuses different pdf-study manifests with a diagnostic', () => {
+    const candidate = pdfFixture('candidate')
+    candidate.meta.qaQualityManifestFingerprint = 'manifest-other'
+    const comparison = buildQComparison(pdfFixture('reference', 'full-context'), candidate, qConfig)
+    expect(comparison.score).toBeNull()
+    expect(comparison.reasons.join(' ')).toMatch(/manifest/i)
+  })
+
+  it('refuses a pdf-study result missing its manifest fingerprint', () => {
+    const candidate = pdfFixture('candidate')
+    delete candidate.meta.qaQualityManifestFingerprint
+    const comparison = buildQComparison(pdfFixture('reference', 'full-context'), candidate, qConfig)
+    expect(comparison.score).toBeNull()
+    expect(comparison.reasons.join(' ')).toMatch(/manifest/i)
+  })
+
+  it('recomputes and rechecks a tampered pdf-study F1 field', () => {
+    const candidate = pdfFixture('candidate')
+    candidate.perSample[0].metrics.answerF1AllQuestions = 0
+    expect(buildQComparison(pdfFixture('reference', 'full-context'), candidate, qConfig).score).toBeNull()
+  })
+
+  it('refuses a mismatched executed-ID set for pdf-study', () => {
+    const candidate = pdfFixture('candidate')
+    candidate.meta.executedQuestionIdsHash = 'different'
+    expect(buildQComparison(pdfFixture('reference', 'full-context'), candidate, qConfig).score).toBeNull()
+  })
+
+  it('refuses an incomplete completed cohort for pdf-study', () => {
+    const candidate = pdfFixture('candidate')
+    delete candidate.perSample[0].speed
+    expect(buildQComparison(pdfFixture('reference', 'full-context'), candidate, qConfig).score).toBeNull()
   })
 })

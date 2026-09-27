@@ -7,6 +7,7 @@
  * 检索与生成是两个独立阶段：检索产物先落盘（页序指标与诊断），生成即便失败也不丢检索指标（§6.2 / §6.3）。
  */
 import { buildPageIndex, collectLeafNodes, type IndexNode, type IndexOptions } from '../../../src/utils/pageIndex'
+import { createHash } from 'node:crypto'
 import {
   generateRagAnswer,
   retrieveRagContext,
@@ -36,6 +37,7 @@ import type {
   QueryTimeline,
   SampleError,
 } from '../types'
+import { isPdfStudySample } from '../types'
 import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { applyRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
 import { executedQuestions, isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
@@ -174,9 +176,15 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const retrieveContext = args.deps?.retrieveContext ?? retrieveRagContext
   const generateAnswer = args.deps?.generateAnswer ?? generateRagAnswer
   const contract = args.evaluationContract
-  const qualityQuestions = executedQuestions(samples, limit)
-    .filter(({ sample }) => sample.source === 'qasper')
-    .map(({ question }) => question)
+  // 质量收尾的题目按**题目自身携带的显式质量定义**选择，而不是按字面来源 `qasper`：
+  // 这样 pdf-study 的 `pdf-qa-all-questions-v1` 也能进 finalizeQaQuality，而 smoke
+  // （无定义）仍被排除。整批定义一致性由 finalizeQaQuality 继续强制，混批照旧抛错。
+  const qualityExecuted = executedQuestions(samples, limit)
+    .filter(({ question }) => question.qualityDefinition !== undefined)
+  const qualityQuestions = qualityExecuted.map(({ question }) => question)
+  const qualityManifestFingerprint = pdfStudyQualityManifestFingerprint(
+    qualityExecuted.map(({ sample }) => sample),
+  )
   // 语言覆盖指令追加在调用方 systemPrompt 之后；未传时 prompt 原样透传
   const systemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`
@@ -578,7 +586,9 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     mappedEvidenceQuestions,
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
-    ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
+    ...(qualityQuestions.length > 0
+      ? { qualityQuestions, ...(qualityManifestFingerprint !== undefined ? { qualityManifestFingerprint } : {}) }
+      : {}),
     // 段落配置下 extraMetrics 换成冷启动成本（树诊断在段落路径上恒为空：hook 接管后不再建树）
     extraMetrics: args.passage
       ? { ...summarizeColdStart(perPaper), passageDegradedQuestionRate }
@@ -620,6 +630,29 @@ function assertRetrievalTiming(stage: RagRetrievalStage): void {
 function assertGenerationTiming(stage: RagGenerationStage): void {
   if (!Number.isFinite(stage.answerGenerationLatencyMs) || stage.answerGenerationLatencyMs < 0
     || !Number.isFinite(stage.queryEndToEndLatencyMs) || stage.queryEndToEndLatencyMs < 0) throw new TimingInvariantViolation()
+}
+
+/**
+ * 质量批次里 pdf-study 论文集合的 manifest 指纹：对参与质量收尾的 pdf-study 样本，
+ * 按 paperId 升序取 `[paperId, manifestFingerprint]` 对做 SHA-256。只有 pdf-study 才有
+ * 该指纹（QASPER 用 datasetFingerprint 表达数据集身份），没有 pdf-study 样本时返回 undefined。
+ * 每篇论文的 manifestFingerprint 已覆盖文件名/标题/原始 PDF 字节/页文本/标注/目录树，
+ * 因此两份「提取文本相同但底层 PDF 或标注不同」的运行会在比较门禁被拒。
+ */
+function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): string | undefined {
+  const papers = new Map<string, string>()
+  for (const sample of samples) {
+    if (isPdfStudySample(sample)) papers.set(sample.paperId, sample.manifestFingerprint)
+  }
+  if (papers.size === 0) return undefined
+  const canonical = [...papers.entries()]
+    .map(([paperId, manifestFingerprint]) => ({ paperId, manifestFingerprint }))
+    .sort((a, b) => a.paperId.localeCompare(b.paperId))
+  return createHash('sha256')
+    .update('pdf-study-quality-manifest-v1')
+    .update('\0')
+    .update(JSON.stringify(canonical))
+    .digest('hex')
 }
 
 /**

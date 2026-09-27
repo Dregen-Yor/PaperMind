@@ -245,6 +245,29 @@ describe('renderReport', () => {
     const none = renderReport([result('default', { evidenceRecall: 0.7 })])
     expect(none).not.toContain('拒答模式表版本')
   })
+
+  it('自述 QA 质量口径：pdf-study 打印定义与来源，QASPER 只打印定义', () => {
+    const pdf = renderReport([
+      result('pdf', { answerF1AllQuestions: 0.6 }, {
+        meta: {
+          model: 'gpt-4o', timestamp: '2026-09-02T12:00:00.000Z', gitSha: 'abc1234', completed: 10, total: 10,
+          qaQualityDefinition: 'pdf-qa-all-questions-v1', qaQualitySource: 'pdf-study',
+        },
+      }),
+    ])
+    expect(pdf).toContain('- QA 质量口径：`pdf-qa-all-questions-v1`（来源：pdf-study）')
+
+    const qasper = renderReport([
+      result('qasper', { answerF1AllQuestions: 0.5 }, {
+        meta: {
+          model: 'gpt-4o', timestamp: '2026-09-02T12:00:00.000Z', gitSha: 'abc1234', completed: 10, total: 10,
+          qaQualityDefinition: 'qasper-all-questions-v1',
+        },
+      }),
+    ])
+    expect(qasper).toContain('- QA 质量口径：`qasper-all-questions-v1`')
+    expect(qasper).not.toContain('来源：')
+  })
 })
 
 describe('renderComparison', () => {

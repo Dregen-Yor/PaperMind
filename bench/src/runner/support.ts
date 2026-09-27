@@ -142,6 +142,8 @@ export interface FinalizeQaArgs {
   speed?: { contract: SpeedRunContract }
   /** Exact versioned QASPER questions selected by the original samples/limit execution slice. */
   qualityQuestions?: QaQuestion[]
+  /** pdf-study 质量批次的 manifest 指纹；仅 pdf-study runner 提供，随质量收尾落进结果元数据。 */
+  qualityManifestFingerprint?: string
 }
 
 /**
@@ -152,10 +154,10 @@ export interface FinalizeQaArgs {
  */
 export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
   const quality = args.qualityQuestions && args.qualityQuestions.length > 0
-    ? finalizeQaQuality(args.records, args.qualityQuestions)
+    ? finalizeQaQuality(args.records, args.qualityQuestions, args.qualityManifestFingerprint)
     : undefined
   if (!quality) {
-    for (const key of ['qaQualityDefinition', 'qaExpectedQuestionIds'] as const) {
+    for (const key of ['qaQualityDefinition', 'qaExpectedQuestionIds', 'qaQualitySource', 'qaQualityManifestFingerprint'] as const) {
       if (args.extraMeta !== undefined && Object.prototype.hasOwnProperty.call(args.extraMeta, key)) {
         throw new Error(`extraMeta ${key} is reserved for computed QA quality metadata`)
       }

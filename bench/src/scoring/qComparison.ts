@@ -1,5 +1,5 @@
 import type { BenchResult, PerSampleRecord } from '../types'
-import { aggregateQaQuality, QA_QUALITY_DEFINITION } from '../metrics/qaQuality'
+import { aggregateQaQuality, PDF_QA_QUALITY_DEFINITION, QA_QUALITY_DEFINITION, sourceForQaQualityDefinition, type QaQualityDefinition } from '../metrics/qaQuality'
 import { qasperAnswerF1 } from '../metrics/qasperQuality'
 import { aggregateSpeedMetrics } from '../speed/metrics'
 import { questionIdsHash, speedComparisonIssues, SPEED_DEFINITION, SPEED_METRIC_SCHEMA_VERSION } from '../speed/contract'
@@ -43,7 +43,18 @@ function inspectResult(raw: unknown, label: string, reasons: string[]): QCompone
   const { meta, metrics, perSample } = result
   if (result.task !== 'qa') issue('task must be qa')
   if (typeof result.config.name !== 'string' || !result.config.name.trim()) issue('config.name must be nonempty')
-  if (meta.qaQualityDefinition !== QA_QUALITY_DEFINITION) issue(`qaQualityDefinition must be ${QA_QUALITY_DEFINITION}`)
+  // 两个定义各自成协议：QASPER 与 pdf-study 都合法，但来源与 manifest 指纹必须随定义走。
+  const definition = meta.qaQualityDefinition as QaQualityDefinition | undefined
+  if (definition !== QA_QUALITY_DEFINITION && definition !== PDF_QA_QUALITY_DEFINITION) {
+    issue(`qaQualityDefinition must be ${QA_QUALITY_DEFINITION} or ${PDF_QA_QUALITY_DEFINITION}`)
+  }
+  const expectedSource = definition === undefined ? undefined : sourceForQaQualityDefinition(definition)
+  if (definition === PDF_QA_QUALITY_DEFINITION) {
+    if (meta.qaQualitySource !== 'pdf-study') issue('qaQualitySource must be pdf-study for pdf-qa-all-questions-v1')
+    if (typeof meta.qaQualityManifestFingerprint !== 'string' || !meta.qaQualityManifestFingerprint.trim()) {
+      issue('qaQualityManifestFingerprint must be a nonempty string for pdf-qa-all-questions-v1')
+    }
+  }
   if (meta.speedMetricSchemaVersion !== SPEED_METRIC_SCHEMA_VERSION || meta.speedDefinition !== SPEED_DEFINITION) {
     issue('speedMetricSchemaVersion 2 and speedDefinition query-timeline-v2 are required')
   }
@@ -84,7 +95,9 @@ function inspectResult(raw: unknown, label: string, reasons: string[]): QCompone
   const speedRows: PerSampleRecord[] = []
   for (const id of ids) {
     const row = byId.get(id)!
-    if (row.source !== 'qasper') issue(`${id} source must be qasper`)
+    if (expectedSource !== undefined && row.source !== expectedSource) {
+      issue(`${id} source must be ${expectedSource} (definition ${definition})`)
+    }
     if (!Array.isArray(row.referenceAnswers) || row.referenceAnswers.length === 0
       || row.referenceAnswers.some(answer => typeof answer !== 'string' || !answer.trim())) {
       issue(`${id} referenceAnswers must be nonempty valid strings`)
@@ -95,7 +108,7 @@ function inspectResult(raw: unknown, label: string, reasons: string[]): QCompone
       else if (Array.isArray(row.referenceAnswers) && row.referenceAnswers.length > 0
         && row.referenceAnswers.every(answer => typeof answer === 'string' && answer.trim())) {
         if (!sameNumber(row.metrics.answerF1AllQuestions, qasperAnswerF1(row.answer, row.referenceAnswers))) {
-          issue(`${id} answerF1AllQuestions differs from recomputed QASPER F1`)
+          issue(`${id} answerF1AllQuestions differs from recomputed token F1`)
         }
       }
       if (!object(row.speed)) issue(`${id} completed speed timeline is missing`)
@@ -152,6 +165,16 @@ export function buildQComparison(reference: BenchResult, candidate: BenchResult,
   const candidateComponents = inspectResult(candidate, 'candidate', reasons)
   if (reference?.meta?.mode !== 'full-context') reasons.push('reference: mode must be full-context')
   if (referenceComponents && candidateComponents) {
+    // 两侧必须同一质量协议：定义不同（QASPER vs pdf-study）即跨来源比较，直接拒绝。
+    if (reference.meta.qaQualityDefinition !== candidate.meta.qaQualityDefinition) {
+      reasons.push('reference and candidate QA quality definitions differ')
+    }
+    // 同一 pdf-study 定义下，manifest 指纹也必须一致：不同论文集/底层 PDF 不得互相比较。
+    if (reference.meta.qaQualityDefinition === PDF_QA_QUALITY_DEFINITION
+      && candidate.meta.qaQualityDefinition === PDF_QA_QUALITY_DEFINITION
+      && reference.meta.qaQualityManifestFingerprint !== candidate.meta.qaQualityManifestFingerprint) {
+      reasons.push('qaQualityManifestFingerprint differs between reference and candidate')
+    }
     const referenceRows = new Map(reference.perSample.map(row => [row.id, row]))
     for (const row of candidate.perSample) {
       if (JSON.stringify(referenceRows.get(row.id)?.referenceAnswers) !== JSON.stringify(row.referenceAnswers)) {

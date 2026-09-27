@@ -219,4 +219,49 @@ describe('all-question PDF study quality', () => {
       [pdfQuestion('p#0', ['cat'])],
     )).toThrow(/source/i)
   })
+
+  it('stores the pdf-study source and manifest fingerprint alongside its definition', () => {
+    const records = [{ ...pdfRecord('p#0', 'completed'), answer: 'The cat.' }]
+    const result = finalizeQaQuality(records, [pdfQuestion('p#0', ['cat'])], 'manifest-abc123')
+    expect(result.meta).toEqual({
+      qaQualityDefinition: PDF_QA_QUALITY_DEFINITION,
+      qaExpectedQuestionIds: ['p#0'],
+      qaQualitySource: 'pdf-study',
+      qaQualityManifestFingerprint: 'manifest-abc123',
+    })
+    // 同一份 token-multiset F1：pdf-study 与 QASPER 用同一个实现，只是定义不同
+    expect(result.metrics.answerF1AllQuestions).toBe(1)
+  })
+
+  it('rejects a blank manifest fingerprint for pdf-study', () => {
+    expect(() => finalizeQaQuality(
+      [pdfRecord('p#0', 'failed')],
+      [pdfQuestion('p#0', ['cat'])],
+      '   ',
+    )).toThrow(/manifest fingerprint/i)
+  })
+})
+
+describe('all-question QASPER legacy shape', () => {
+  it('keeps QASPER metadata exactly as before, without source or manifest keys', () => {
+    const records = [
+      { ...record('p#0', 'completed'), answer: 'The cat.' },
+      record('p#1', 'failed'),
+    ]
+    const result = finalizeQaQuality(records, [
+      question('p#0', ['cat']),
+      question('p#1', ['dog']),
+    ])
+    // 整键名序列逐字断言：任何新键都会破坏旧 QASPER 结果 JSON 的逐字一致性
+    expect(Object.keys(result.meta)).toEqual(['qaQualityDefinition', 'qaExpectedQuestionIds'])
+    expect(result.meta).toEqual({
+      qaQualityDefinition: QA_QUALITY_DEFINITION,
+      qaExpectedQuestionIds: ['p#0', 'p#1'],
+    })
+    expect(result.metrics).toEqual({
+      answerF1AllQuestions: 0.5,
+      answerF1AllQuestionsSampleCount: 2,
+      qaCompletionRate: 0.5,
+    })
+  })
 })

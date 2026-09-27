@@ -458,6 +458,13 @@ export interface BenchResult {
     /** Versioned all-question quality provenance. */
     qaQualityDefinition?: 'qasper-all-questions-v1' | 'pdf-qa-all-questions-v1'
     qaExpectedQuestionIds?: string[]
+    /**
+     * pdf-study 质量批次的来源（仅 pdf-study 写此键；QASPER 不加，保持旧结果逐字不变）。
+     * QASPER 的来源由 `qaQualityDefinition` 与逐样本 `source` 唯一确定，无需重复落盘。
+     */
+    qaQualitySource?: SampleSource
+    /** pdf-study 质量批次的 manifest 指纹（仅 pdf-study 写此键；同一论文集合的摘要必须一致）。 */
+    qaQualityManifestFingerprint?: string
   }
   metrics: Record<string, number>
   perSample: PerSampleRecord[]

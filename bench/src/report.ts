@@ -213,6 +213,12 @@ export function renderReport(
   if (first.meta.baselineFamily) lines.push(`- 基线家族：\`${first.meta.baselineFamily}\``)
   if (first.meta.candidateGranularity) lines.push(`- 候选/上下文粒度：\`${first.meta.candidateGranularity}\``)
   lines.push(`- 时间：${first.meta.timestamp}`)
+  // QA 质量口径自证：pdf-study 的 `answerF1AllQuestions*` 与 QASPER 同名不同源，
+  // 不打印定义/来源会把两个语料的数字混读成同一次比较。
+  if (first.meta.qaQualityDefinition) {
+    const sourceSuffix = first.meta.qaQualitySource ? `（来源：${first.meta.qaQualitySource}）` : ''
+    lines.push(`- QA 质量口径：\`${first.meta.qaQualityDefinition}\`${sourceSuffix}`)
+  }
   // 主指标说明按表分流：检索主表按 Context Page MRR 加粗，历史表仍按各自主指标加粗
   if (retrievalRows.length > 0) {
     lines.push(`- 检索主表主指标：\`contextPageMrr\`（${CONTEXT_PAGE_MRR_LABEL}，加粗行为最优）`)

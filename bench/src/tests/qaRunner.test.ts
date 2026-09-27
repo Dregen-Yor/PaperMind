@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { EvalSample, QaQuestion } from '../types'
+import type { EvalSample, PdfStudySample, QaQuestion } from '../types'
 import type { StreamingLlmClient } from '../llmClient'
 import type { SpeedRunContract } from '../speed/contract'
 import type { IndexNode } from '../../../src/utils/pageIndex'
@@ -444,11 +444,45 @@ describe('runQaTask', () => {
         qasperQuestion({ id: 'p1#1', question: 'missing?', answers: ['x'], evidencePages: [], unanswerable: false, evidenceMapping: 'unmapped' }),
       ],
     }
-    const smoke: EvalSample = { ...qasper, paperId: 'smoke', source: 'smoke' }
+    // smoke 语料在真实加载里不携带质量定义；此处用展开快捷构造，须显式剥掉 qasper 题目上的
+    // qualityDefinition，否则按「显式质量定义」筛选会把冒烟题也计入质量批次（重复 id 抛错）。
+    const smoke: EvalSample = {
+      ...qasper,
+      paperId: 'smoke',
+      source: 'smoke',
+      questions: qasper.questions.map(question => ({
+        ...question,
+        qualityDefinition: undefined,
+        qualityAnswers: undefined,
+      })),
+    }
     const result = await runQaTask(argsWith({ samples: [qasper, smoke] }))
     expect(result.meta.evidenceMappingCoverage).toBe(0.5)
     expect(result.meta.unmappedEvidenceRate).toBe(0.5)
     expect(result.meta.qaExpectedQuestionIds).toEqual(['p1#0', 'p1#1'])
+  })
+
+  it('pdf-study 按显式 qualityDefinition 走质量收尾，落来源与 manifest 指纹', async () => {
+    const pdfStudy: PdfStudySample = {
+      paperId: 'pdf1',
+      title: 'PDF 1',
+      pages: ['EVIDENCE_MARKER_7f3a', 'b', 'c', 'd'],
+      source: 'pdf-study',
+      questions: [{
+        id: 'pdf1#0', question: 'Q1?', answers: ['8'], evidencePages: [0], unanswerable: false,
+        qualityAnswers: ['8'], qualityDefinition: 'pdf-qa-all-questions-v1',
+      }],
+      pdfPath: '/tmp/pdf1.pdf',
+      manifestFingerprint: 'manifest-pdf1',
+      pdfOutline: [],
+    }
+    const result = await runQaTask(argsWith({ samples: [pdfStudy] }))
+    expect(result.meta.qaQualityDefinition).toBe('pdf-qa-all-questions-v1')
+    expect(result.meta.qaQualitySource).toBe('pdf-study')
+    expect(result.meta.qaQualityManifestFingerprint).toBeTypeOf('string')
+    expect((result.meta.qaQualityManifestFingerprint as string).length).toBe(64)
+    expect(result.meta.qaExpectedQuestionIds).toEqual(['pdf1#0'])
+    expect(result.metrics.answerF1AllQuestions).toBe(1)
   })
 
   it('perPaper 记录索引时长、问题数、cache 差值与 leafCount', async () => {

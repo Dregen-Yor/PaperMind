@@ -15,6 +15,11 @@ const DEFINITION_SOURCE: Record<QaQualityDefinition, SampleSource> = {
   [PDF_QA_QUALITY_DEFINITION]: 'pdf-study',
 }
 
+/** 定义 → 期望来源的唯一判定点；qComparison 复用，避免两处各自硬编码来源映射。 */
+export function sourceForQaQualityDefinition(definition: QaQualityDefinition): SampleSource {
+  return DEFINITION_SOURCE[definition]
+}
+
 export interface QaQualityMetrics {
   answerF1AllQuestions: number
   answerF1AllQuestionsSampleCount: number
@@ -77,11 +82,14 @@ export function aggregateQaQuality(
 export function finalizeQaQuality(
   records: PerSampleRecord[],
   questions: QaQuestion[],
+  manifestFingerprint?: string,
 ): {
   metrics: QaQualityMetrics
   meta: {
     qaQualityDefinition: QaQualityDefinition
     qaExpectedQuestionIds: string[]
+    qaQualitySource?: SampleSource
+    qaQualityManifestFingerprint?: string
   }
 } {
   const ids = questions.map(question => question.id)
@@ -98,6 +106,12 @@ export function finalizeQaQuality(
     }
   }
   const expectedSource = DEFINITION_SOURCE[definition]
+  const isPdf = definition === PDF_QA_QUALITY_DEFINITION
+  // manifest 指纹只在 pdf-study 有意义；提供了就校验，避免空串落进结果元数据。
+  if (isPdf && manifestFingerprint !== undefined
+    && (typeof manifestFingerprint !== 'string' || manifestFingerprint.trim().length === 0)) {
+    throw new Error('pdf-study QA quality manifest fingerprint must be a non-empty string')
+  }
 
   const expected = new Set(ids)
   // 记录按定义对应的来源过滤：另一来源的记录不参与本定义的聚合——这保留了 QASPER
@@ -147,6 +161,13 @@ export function finalizeQaQuality(
     meta: {
       qaQualityDefinition: definition,
       qaExpectedQuestionIds: [...ids],
+      // 只有 pdf-study 写来源与 manifest 指纹；QASPER 不加任何新键，保证旧结果逐字不变。
+      ...(isPdf
+        ? {
+            qaQualitySource: expectedSource,
+            ...(manifestFingerprint !== undefined ? { qaQualityManifestFingerprint: manifestFingerprint } : {}),
+          }
+        : {}),
     },
   }
 }
