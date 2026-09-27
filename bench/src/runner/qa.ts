@@ -37,9 +37,9 @@ import type {
   SampleError,
 } from '../types'
 import type { LlmClient, StreamingLlmClient } from '../llmClient'
-import { pdfStudyQualityManifestFingerprint } from '../metrics/qaQuality'
+import { selectQaQualityBatch } from '../metrics/qaQuality'
 import { applyRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
-import { executedQuestions, isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
+import { isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
@@ -175,15 +175,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const retrieveContext = args.deps?.retrieveContext ?? retrieveRagContext
   const generateAnswer = args.deps?.generateAnswer ?? generateRagAnswer
   const contract = args.evaluationContract
-  // 质量收尾的题目按**题目自身携带的显式质量定义**选择，而不是按字面来源 `qasper`：
-  // 这样 pdf-study 的 `pdf-qa-all-questions-v1` 也能进 finalizeQaQuality，而 smoke
-  // （无定义）仍被排除。整批定义一致性由 finalizeQaQuality 继续强制，混批照旧抛错。
-  const qualityExecuted = executedQuestions(samples, limit)
-    .filter(({ question }) => question.qualityDefinition !== undefined)
-  const qualityQuestions = qualityExecuted.map(({ question }) => question)
-  const qualityManifestFingerprint = pdfStudyQualityManifestFingerprint(
-    qualityExecuted.map(({ sample }) => sample),
-  )
+  const { qualityQuestions, qualityManifestFingerprint } = selectQaQualityBatch(samples, limit)
   // 语言覆盖指令追加在调用方 systemPrompt 之后；未传时 prompt 原样透传
   const systemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`

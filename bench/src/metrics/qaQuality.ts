@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { EvalSample, PerSampleRecord, QaQuestion, SampleSource } from '../types'
 import { isPdfStudySample } from '../types'
+import { executedQuestions } from '../evaluationContract'
 import { qasperAnswerF1 } from './qasperQuality'
 
 export const QA_QUALITY_DEFINITION = 'qasper-all-questions-v1' as const
@@ -198,4 +199,29 @@ export function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): strin
     .update('\0')
     .update(JSON.stringify(canonical))
     .digest('hex')
+}
+
+/**
+ * 质量批次的唯一选择点：**题目属于质量批次，当且仅当它自身携带显式的 `qualityDefinition`**，
+ * 而不是按字面来源 `qasper` 判定。
+ *
+ * 以定义而非来源为判据，才能让 pdf-study 的 `pdf-qa-all-questions-v1` 进入 finalizeQaQuality
+ * （全文参考臂是 Q 契约要求的第一份结果），同时把 smoke 冒烟题（无定义）排除在外。整批定义
+ * 一致性仍由下游的 finalizeQaQuality 强制——混批照旧抛错。
+ *
+ * 平面 `runQaTask` 与全文参考臂 `runFullContextQaTask` 共用此处实现，避免复写分叉或
+ * runner→runner 依赖。
+ */
+export function selectQaQualityBatch(
+  samples: EvalSample[],
+  limit?: number,
+): { qualityQuestions: QaQuestion[]; qualityManifestFingerprint?: string } {
+  const qualityExecuted = executedQuestions(samples, limit)
+    .filter(({ question }) => question.qualityDefinition !== undefined)
+  return {
+    qualityQuestions: qualityExecuted.map(({ question }) => question),
+    qualityManifestFingerprint: pdfStudyQualityManifestFingerprint(
+      qualityExecuted.map(({ sample }) => sample),
+    ),
+  }
 }

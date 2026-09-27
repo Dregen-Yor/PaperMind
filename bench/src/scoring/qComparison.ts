@@ -50,7 +50,7 @@ function inspectResult(raw: unknown, label: string, reasons: string[]): QCompone
   }
   const expectedSource = definition === undefined ? undefined : sourceForQaQualityDefinition(definition)
   if (definition === PDF_QA_QUALITY_DEFINITION) {
-    if (meta.qaQualitySource !== 'pdf-study') issue('qaQualitySource must be pdf-study for pdf-qa-all-questions-v1')
+    if (meta.qaQualitySource !== expectedSource) issue('qaQualitySource must be pdf-study for pdf-qa-all-questions-v1')
     if (typeof meta.qaQualityManifestFingerprint !== 'string' || !meta.qaQualityManifestFingerprint.trim()) {
       issue('qaQualityManifestFingerprint must be a nonempty string for pdf-qa-all-questions-v1')
     }
