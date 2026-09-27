@@ -17,7 +17,7 @@ import type { PassageIndex } from '../../../src/utils/passageIndex'
 import type { StructureCard } from '../../../src/utils/structureCards'
 import type { Embedder } from '../../../src/utils/embedder'
 import type { QaTaskArgs } from '../runner/qa'
-import type { PassageIndexHook, PassageIndexInfo } from '../runner/passageIndexHook'
+import type { PassageIndexHook, PassageIndexInfo, PassageOutlineInfo } from '../runner/passageIndexHook'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -373,5 +373,78 @@ describe('runQaTask 段落路径 — 各臂预期模式与真降级的界线（�
     ))
     expect(raw.perPaper?.[0].coldStartOutlineAvailable).toBeUndefined()
     expect(raw.metrics.outlineAvailabilityRate).toBeUndefined()
+  })
+})
+
+describe('runQaTask 段落路径 — C 臂目录先验的逐题诊断（Task 5）', () => {
+  // 单个根节点覆盖全部 4 段；节点向量维度与段落 embedder 一致（DENSE_DIM）
+  const outlineNodes: PassageOutlineInfo['nodes'] = [{
+    id: '0',
+    title: 'Introduction',
+    path: [],
+    depth: 0,
+    startPage: 0,
+    endPage: 3,
+    passageOrders: [0, 1, 2, 3],
+    children: [],
+  }]
+  const outlineInfo = (available: boolean): PassageOutlineInfo => ({
+    nodes: available ? outlineNodes : [],
+    nodeCount: available ? 1 : 0,
+    available,
+    ...(available ? {} : { fallbackReason: 'missing-outline' }),
+    nodeVectors: available ? new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]) : new Map(),
+    elapsedMs: 5,
+  })
+  const outlineInfoPresentButDenseGone: PassageOutlineInfo = {
+    nodes: outlineNodes,
+    nodeCount: 1,
+    available: true,
+    nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]),
+    elapsedMs: 9,
+  }
+
+  it('目录可用 + dense 可用 → bm25+dense+outline，逐题记 outlineUsed 且不判降级', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-outline', stubHook(infoFor(denseIndex(embedder.id), { outline: outlineInfo(true) })),
+      embedder, capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25+dense+outline')
+    expect(result.perSample[0].outlineAvailable).toBe(true)
+    expect(result.perSample[0].outlineUsed).toBe(true)
+    expect(result.perSample[0].outlineFallbackReason).toBeUndefined()
+    expect(result.metrics.passageDegradedQuestionRate).toBe(0)
+    expect(result.meta.comparisonEligible).not.toBe(false)
+  })
+
+  it('目录缺失 → bm25+dense 合法回落，逐题记 missing-outline 且不判降级', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-outline', stubHook(infoFor(denseIndex(embedder.id), { outline: outlineInfo(false) })),
+      embedder, capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25+dense')
+    expect(result.perSample[0].outlineAvailable).toBe(false)
+    expect(result.perSample[0].outlineUsed).toBe(false)
+    expect(result.perSample[0].outlineFallbackReason).toBe('missing-outline')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(0)
+    expect(result.meta.comparisonEligible).not.toBe(false)
+  })
+
+  it('目录可用但 dense 不可用 → 目录未用、原因 dense-unavailable，模式如实降级为 bm25', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-outline',
+      stubHook(infoFor(bareIndex(), { outline: outlineInfoPresentButDenseGone })),
+      embedder, capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25')
+    expect(result.perSample[0].outlineAvailable).toBe(true)
+    expect(result.perSample[0].outlineUsed).toBe(false)
+    expect(result.perSample[0].outlineFallbackReason).toBe('dense-unavailable')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(1)
+    expect(result.meta.comparisonEligible).toBe(false)
+    expect(result.meta.comparisonIneligibleReason).toBe('passage-retrieval-degraded')
   })
 })

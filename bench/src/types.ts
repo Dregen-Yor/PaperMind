@@ -324,8 +324,19 @@ export interface PerSampleRecord {
   speed?: QuerySpeedRecord
   /** QA 专有 */
   retrievalQuery?: string
-  /** 段落混合检索实际使用的模式（bm25 / bm25+dense / full / full-title-fallback / bm25+card-lexical） */
+  /** 段落混合检索实际使用的模式（bm25 / bm25+dense / bm25+dense+outline / full / full-title-fallback / bm25+card-lexical） */
   retrievalMode?: string
+  /**
+   * C 臂逐题目录诊断（仅 hybrid-outline 且有目录产物的论文写入）。
+   * 与 perPaper 的 `coldStartOutline*` 分属两层：那三个是**每篇**的索引期事实，
+   * 这三个随**逐题**记录，供算「目录可用率 / 目录实际使用率」。
+   */
+  /** 本篇目录是否可用（索引期事实，同一篇的所有问题相同） */
+  outlineAvailable?: boolean
+  /** 本问题的目录先验是否真的进入了融合（查询期事实；dense 不可用或目录缺失时为 false） */
+  outlineUsed?: boolean
+  /** 目录未启用时的原因：索引期回落（missing-outline …）或查询期（dense-unavailable） */
+  outlineFallbackReason?: string
   /**
    * 诊断专用：被选中候选的页区间包络（去重升序）。
    * 它包含「仅被选中、但可能被最终预算截掉」的页，**不是**生成模型实际读到的页集合，

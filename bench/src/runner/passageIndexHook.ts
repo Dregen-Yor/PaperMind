@@ -15,6 +15,7 @@ import {
   PASSAGE_INDEX_SCHEMA_VERSION, PASSAGE_INDEX_VERSION,
   passageConfigHash, structureHash, type PassageIndex,
 } from '../../../src/utils/passageIndex'
+import type { OutlineScoringNode } from '../../../src/utils/passageRetrieval'
 import { startPassagePipeline, type PassageStageEvent } from '../../../src/utils/passageIndexBuilder'
 import type { TokenCounter } from '../../../src/utils/passages'
 import { STRUCTURE_CARD_PROMPT_VERSION } from '../../../src/utils/structureCards'
@@ -130,6 +131,18 @@ function flattenOutline(nodes: PdfOutlineNode[]): PdfOutlineNode[] {
   }
   walk(nodes)
   return out
+}
+
+/**
+ * 目录产物 → 查询期打分视图（Task 5）：前序展开，只取打分需要的 `id` / `passageOrders` /
+ * 索引期算好的 `vector`。缺向量的节点直接跳过——`available:true` 已承诺向量齐全，这里只是防御，
+ * 不让一份畸形产物在查询期变成 `undefined.vector` 的崩溃。
+ */
+export function toOutlineScoringNodes(info: PassageOutlineInfo): OutlineScoringNode[] {
+  return flattenOutline(info.nodes).flatMap(node => {
+    const vector = info.nodeVectors.get(node.id)
+    return vector ? [{ id: node.id, passageOrders: node.passageOrders, vector }] : []
+  })
 }
 
 /**

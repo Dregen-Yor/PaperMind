@@ -4,7 +4,12 @@ import {
   routeWithSemanticTree,
   type SemanticRouteDiagnostics,
 } from './semanticRoute'
-import { retrievePassageContext, type HybridPassageDiagnostics } from './passageRetrieval'
+import {
+  DEFAULT_HYBRID_OPTIONS,
+  retrievePassageContext,
+  type HybridPassageDiagnostics,
+  type OutlineScoringNode,
+} from './passageRetrieval'
 import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type MaterializedContext } from './contextTrace'
 import type { EvidenceBlock } from './evidenceBlock'
 import type { Embedder } from './embedder'
@@ -54,6 +59,13 @@ export interface IndexedPaper {
    * 否则回落语义树路由或平面 scoreAndSelect。
    */
   passageIndex?: PassageIndex
+  /**
+   * 原生 PDF 目录先验（方案 C 臂）。**按篇携带**，只在该篇同时有 `passageIndex` 时转发给段落
+   * 检索。benchmark 一次只喂一篇，若把它挂在 per-run 的 `RagPipelineDeps.passage` 上会
+   * 「看起来能用」，却对多篇的产品路径是错的（先验属于某篇论文，不属于整轮检索）。
+   * `weight` 不参与打分：权重唯一来源是 `sectionWeight`（见 `PassageRetrievalOptions.outline`）。
+   */
+  outline?: { nodes: OutlineScoringNode[]; weight?: number }
 }
 
 export interface RagOptions extends ScoreOptions {
@@ -253,6 +265,16 @@ export async function retrieveRagContext(
             ...(deps.passage?.sectionWeight !== undefined ? { sectionWeight: deps.passage.sectionWeight } : {}),
             ...(deps.passage?.neighbourFactor !== undefined ? { neighbourFactor: deps.passage.neighbourFactor } : {}),
             ...(deps.passage?.skipLimit !== undefined ? { skipLimit: deps.passage.skipLimit } : {}),
+            // 目录先验**只在同时有段落索引与目录的那篇**转发：先验属于某篇论文而非整轮。
+            // weight 仅接口对齐，检索侧一律取 sectionWeight；这里填同一个值，不制造第二个数。
+            ...(paper.outline
+              ? {
+                  outline: {
+                    nodes: paper.outline.nodes,
+                    weight: deps.passage?.sectionWeight ?? DEFAULT_HYBRID_OPTIONS.sectionWeight,
+                  },
+                }
+              : {}),
           })
         : paper.semantic
           ? await routeWithSemanticTree(paper.semantic.tree, paper.semantic.blocks, retrievalQuery, llm, {

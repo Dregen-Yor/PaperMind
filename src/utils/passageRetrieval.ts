@@ -23,7 +23,7 @@ import type { PassageIndex } from './passageIndex'
 import { createMaxHeap } from './priorityQueue'
 import { reciprocalRankFusion, type RankedItem } from './rrf'
 
-export type RetrievalMode = 'bm25' | 'bm25+dense' | 'full' | 'full-title-fallback' | 'bm25+card-lexical'
+export type RetrievalMode = 'bm25' | 'bm25+dense' | 'full' | 'full-title-fallback' | 'bm25+card-lexical' | 'bm25+dense+outline'
 
 export interface PassageCandidate {
   order: number
@@ -41,6 +41,8 @@ export interface FusePassageCandidatesArgs {
   dense?: ((query: string) => RankedItem[]) | undefined
   /** 卡片先验路（向量或词法）；卡片不可用时为 undefined */
   card?: ((query: string) => RankedItem[]) | undefined
+  /** 原生目录先验路（查询期零嵌入调用）；与 card 互斥，同时给出时只用本路 */
+  outline?: (() => RankedItem[]) | undefined
   rrfK: number
   sectionWeight: number
   /** 占位参数：调用方已决定各路的可用性，这里只做融合 */
@@ -98,7 +100,12 @@ export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageC
     lists.push(args.dense(args.query))
     weights.push(1)
   }
-  if (args.card) {
+  // 卡片先验与目录先验**互斥**（方案禁止同一实验同时启用两者）：同时传入时目录胜出、
+  // 卡片整路不进入融合。刻意用显式分支而非依赖压路顺序——顺序被日后调整时行为不会悄悄反转。
+  if (args.outline) {
+    lists.push(args.outline())
+    weights.push(args.sectionWeight)
+  } else if (args.card) {
     lists.push(args.card(args.query))
     weights.push(args.sectionWeight)
   }
@@ -111,7 +118,70 @@ export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageC
   return candidates
 }
 
-export interface HybridPassageDiagnostics {
+/**
+ * 目录节点打分视图：只取打分需要的三样——`id`（确定性破平）、`passageOrders`（节点覆盖
+ * 哪些段落）、`vector`（**索引期**算好的节点文本向量，文本口径见
+ * `bench/src/runner/passageIndexHook.ts` 的 `outlineNodeEmbedText`）。
+ * `PdfOutlineNode` 是纯结构（Task 3 的单测形状），**不**加向量字段；查询期用这个窄视图承载
+ * 评分所需，查询向量则复用同一次检索已算好的那一个，因此查询期零额外嵌入调用。
+ */
+export interface OutlineScoringNode {
+  id: string
+  passageOrders: number[]
+  vector: Float32Array
+}
+
+/**
+ * 目录先验路：节点文本向量与查询向量的余弦相似度，节点覆盖的段落继承「所属节点的最大相似度」，
+ * 再按相似度给段落排名次。
+ *
+ * 只排名次、**绝不裁剪**：未被任何节点覆盖的段落与其它段落一样留在这条路里，并列末位
+ * （`covered.length + 1`），因此目录只会改变名次贡献，不会把段落实体删掉——融合后的候选集合
+ * 恒等于不加目录时的集合。
+ *
+ * 一个段落被父子（或兄弟）节点共同覆盖时取**最大**相似度而非求和/重复计入，避免祖先链把分数
+ * 叠加放大。节点向量维度与查询向量不符时按既有向量策略**丢弃该节点**（与卡片向量一样，
+ * 参 `retrievePassageContext` 对 `cardVectors[cardIndex]` 按长度取 `-Infinity` 的处理）。
+ */
+export function rankOutlinePassages(
+  queryVector: Float32Array,
+  nodes: OutlineScoringNode[],
+  passageCount: number,
+): RankedItem[] {
+  const best = new Array<number>(passageCount).fill(Number.NEGATIVE_INFINITY)
+  for (const node of nodes) {
+    if (node.vector.length !== queryVector.length) continue
+    const similarity = cosineSimilarity(queryVector, node.vector)
+    for (const order of node.passageOrders) {
+      if (order < 0 || order >= passageCount) continue
+      if (similarity > best[order]) best[order] = similarity
+    }
+  }
+  const covered: RankedItem[] = []
+  for (let order = 0; order < passageCount; order++) {
+    if (Number.isFinite(best[order])) covered.push({ id: order, score: best[order] })
+  }
+  covered.sort((a, b) => b.score - a.score || a.id - b.id)
+  const rankById = new Map(covered.map((item, index) => [item.id, index + 1]))
+  const tailRank = covered.length + 1
+  return Array.from({ length: passageCount }, (_, order) => ({
+    id: order,
+    score: Number.isFinite(best[order]) ? best[order] : 0,
+    rank: rankById.get(order) ?? tailRank,
+  }))
+}
+
+/** 目录先验的可用/使用诊断，作为 `HybridPassageDiagnostics` 的一部分。 */
+export interface OutlinePassageDiagnostics {
+  /** 本次检索是否拿到了目录先验（节点非空） */
+  outlineAvailable: boolean
+  /** 目录先验是否真的进入了融合（要求 dense 可用且节点向量维度与查询向量自洽） */
+  outlineUsed: boolean
+  /** `outlineAvailable && !outlineUsed` 时的原因：`dense-unavailable` / `outline-vector-dim-mismatch` */
+  outlineFallbackReason?: string
+}
+
+export interface HybridPassageDiagnostics extends OutlinePassageDiagnostics {
   retrievalMode: RetrievalMode
   selectedPassageIds: string[]
   /** 入队值来自邻段扩展（「该段分 × neighbourFactor」压过了它自己的融合分）的段落 */
@@ -137,6 +207,15 @@ export interface PassageRetrievalOptions {
   sectionWeight?: number
   neighbourFactor?: number
   skipLimit?: number
+  /**
+   * 原生 PDF 目录先验（方案 C 臂）。仅在 dense 可用时生效（打分复用同一次查询向量，查询期
+   * 零额外嵌入调用），且与卡片先验互斥。
+   *
+   * `weight` 只为接口对齐而存在：**实际权重一律取自 `sectionWeight`**——目录先验与卡片先验
+   * 在本实验中互斥，二者共用同一个旋钮（方案禁止同一实验同时启用），因此该字段永远不该成为
+   * 第二个配置来源，检索侧刻意不读它。
+   */
+  outline?: { nodes: OutlineScoringNode[]; weight: number }
 }
 
 export const DEFAULT_HYBRID_OPTIONS: Required<Pick<PassageRetrievalOptions, 'maxTokens' | 'rrfK' | 'sectionWeight' | 'neighbourFactor' | 'skipLimit'>> = {
@@ -249,7 +328,12 @@ function cardTitlesByOrder(index: PassageIndex): Map<number, string> {
   return titles
 }
 
-function emptyResult(mode: RetrievalMode): PassageRetrievalResult {
+const NO_OUTLINE_DIAGNOSTICS: OutlinePassageDiagnostics = { outlineAvailable: false, outlineUsed: false }
+
+function emptyResult(
+  mode: RetrievalMode,
+  outline: OutlinePassageDiagnostics = NO_OUTLINE_DIAGNOSTICS,
+): PassageRetrievalResult {
   return {
     context: '',
     contextGroups: [],
@@ -258,13 +342,17 @@ function emptyResult(mode: RetrievalMode): PassageRetrievalResult {
     scores: [],
     degraded: false,
     llmCalled: false,
-    hybrid: { retrievalMode: mode, selectedPassageIds: [], neighbourSelectedIds: [], candidateCount: 0, skippedCount: 0 },
+    hybrid: { retrievalMode: mode, selectedPassageIds: [], neighbourSelectedIds: [], candidateCount: 0, skippedCount: 0, ...outline },
   }
 }
 
 /**
  * 段落级混合检索。降级顺序严格按方案 §4 的表：
  * `full` → `full-title-fallback` → `bm25+dense` → `bm25+card-lexical` → `bm25`。
+ *
+ * 目录先验（C 臂）不是降级链上的一环，而是叠加在 `bm25+dense` 之上的一条额外 RRF 路：
+ * dense 可用且目录可用时模式为 `bm25+dense+outline`；目录缺失/非法/向量维度不符时目录整路
+ * 不参与、退回 B 的 `bm25+dense`（查询向量本就依赖 dense，dense 不可用时目录也无从打分）。
  */
 export async function retrievePassageContext(
   index: PassageIndex,
@@ -313,8 +401,13 @@ export async function retrievePassageContext(
 
   const bm25 = buildBm25Scorer(passages.map(passage => passage.searchText))
 
+  // 目录先验（方案 C 臂）：只排名次、不裁剪，且打分复用上面这一次查询向量——查询期零额外嵌入。
+  const outlineNodes = opts.outline?.nodes ?? []
+  const outlineAvailable = outlineNodes.length > 0
+
   let dense: ((query: string) => RankedItem[]) | undefined
   let card: ((query: string) => RankedItem[]) | undefined
+  let outline: (() => RankedItem[]) | undefined
   let mode: RetrievalMode
 
   if (denseAvailable) {
@@ -324,19 +417,27 @@ export async function retrievePassageContext(
       id: passage.order,
       score: cosineSimilarity(vector, passageVectors[passage.order]),
     }))
-    let cardScores: number[] | undefined
-    if (cards && index.cardVectors) {
-      const cardVectors = index.cardVectors
-      cardScores = cards.map((_, cardIndex) => vector.length === cardVectors[cardIndex].length
-        ? cosineSimilarity(vector, cardVectors[cardIndex])
-        : Number.NEGATIVE_INFINITY)
-    }
-    if (cardScores && cardByPassage) {
-      const scores = cardScores
-      card = () => inheritCardRanks(passages, scores, cardByPassage, false)
-      mode = index.structureFallback ? 'full-title-fallback' : 'full'
+    // 节点向量维度与查询向量不符 ⇒ 目录先验整路停用（与「段落向量数不齐」「embedderId 不符」
+    // 同一种既有向量策略）。不能让它在融合内部才由 cosineSimilarity 抛错——那已过嵌入器的
+    // try/catch，异常会直接冒给调用方，而不是契约承诺的降级。
+    if (outlineAvailable && outlineNodes.every(node => node.vector.length === vector.length)) {
+      outline = () => rankOutlinePassages(vector, outlineNodes, passages.length)
+      mode = 'bm25+dense+outline'
     } else {
-      mode = 'bm25+dense'
+      let cardScores: number[] | undefined
+      if (cards && index.cardVectors) {
+        const cardVectors = index.cardVectors
+        cardScores = cards.map((_, cardIndex) => vector.length === cardVectors[cardIndex].length
+          ? cosineSimilarity(vector, cardVectors[cardIndex])
+          : Number.NEGATIVE_INFINITY)
+      }
+      if (cardScores && cardByPassage) {
+        const scores = cardScores
+        card = () => inheritCardRanks(passages, scores, cardByPassage, false)
+        mode = index.structureFallback ? 'full-title-fallback' : 'full'
+      } else {
+        mode = 'bm25+dense'
+      }
     }
   } else if (cards && cards.length > 0) {
     // 向量不可用但卡片已生成：卡片先验退化为卡片文本的词法匹配（方案 §4 的表）
@@ -350,12 +451,23 @@ export async function retrievePassageContext(
     mode = 'bm25'
   }
 
+  const outlineUsed = outline !== undefined
+  const outlineFallbackReason = outlineAvailable && !outlineUsed
+    ? (denseAvailable ? 'outline-vector-dim-mismatch' : 'dense-unavailable')
+    : undefined
+  const outlineDiagnostics: OutlinePassageDiagnostics = {
+    outlineAvailable,
+    outlineUsed,
+    ...(outlineFallbackReason !== undefined ? { outlineFallbackReason } : {}),
+  }
+
   const candidates = fusePassageCandidates({
     passages,
     query,
     bm25: text => rankWithTiedZeros(bm25(text)),
     ...(dense ? { dense } : {}),
     ...(card ? { card } : {}),
+    ...(outline ? { outline } : {}),
     rrfK,
     sectionWeight,
     passagesCannotUseVectors: !denseAvailable,
@@ -370,7 +482,7 @@ export async function retrievePassageContext(
     skipLimit,
   })
 
-  return assembleResult(index, fill, candidates, mode)
+  return assembleResult(index, fill, candidates, mode, outlineDiagnostics)
 }
 
 /** 选中段落 → 原文顺序组装。组与组的页序即 materializeContext 的输入。 */
@@ -379,17 +491,19 @@ function assembleResult(
   fill: FillPassageBudgetResult,
   candidates: PassageCandidate[],
   mode: RetrievalMode,
+  outline: OutlinePassageDiagnostics,
 ): PassageRetrievalResult {
   const passages = index.passages
   if (fill.selectedOrders.length === 0) {
     return {
-      ...emptyResult(mode),
+      ...emptyResult(mode, outline),
       hybrid: {
         retrievalMode: mode,
         selectedPassageIds: [],
         neighbourSelectedIds: [],
         candidateCount: candidates.length,
         skippedCount: fill.skippedCount,
+        ...outline,
       },
     }
   }
@@ -442,6 +556,7 @@ function assembleResult(
       neighbourSelectedIds: fill.neighbourOrders.map(order => passages[order].id),
       candidateCount: candidates.length,
       skippedCount: fill.skippedCount,
+      ...outline,
     },
   }
 }
