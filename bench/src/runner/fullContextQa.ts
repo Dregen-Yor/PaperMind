@@ -11,7 +11,7 @@ import { aggregateSpeedMetrics } from '../speed/metrics'
 import { speedContractMeta } from '../speed/contract'
 import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
 import { executedQuestions } from '../evaluationContract'
-import { finalizeQaQuality } from '../metrics/qaQuality'
+import { finalizeQaQuality, pdfStudyQualityManifestFingerprint } from '../metrics/qaQuality'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { newSampleRecord } from './support'
 
@@ -41,9 +41,16 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
   const errors: SampleError[] = []
   let total = 0
   const judgeState: JudgeSampleState = { sawUnanswerable: false, usedPatternFallback: false }
-  const qualityQuestions = executedQuestions(args.samples, args.limit)
-    .filter(({ sample }) => sample.source === 'qasper')
-    .map(({ question }) => question)
+  // 质量收尾的题目按**题目自身携带的显式质量定义**选择，而不是按字面来源 `qasper`：
+  // 这样 pdf-study 的 `pdf-qa-all-questions-v1` 也能进 finalizeQaQuality（全文参考臂是 Q 契约
+  // 要求的第一份结果），而 smoke（无定义）仍被排除。整批定义一致性由 finalizeQaQuality 继续强制。
+  const qualityExecuted = executedQuestions(args.samples, args.limit)
+    .filter(({ question }) => question.qualityDefinition !== undefined)
+  const qualityQuestions = qualityExecuted.map(({ question }) => question)
+  // 指纹只在有 pdf-study 样本时存在；QASPER 批次返回 undefined，meta 因此保持 legacy 两键不变。
+  const qualityManifestFingerprint = pdfStudyQualityManifestFingerprint(
+    qualityExecuted.map(({ sample }) => sample),
+  )
   let qasperEvidenceQuestions = 0; let mappedEvidenceQuestions = 0; let ambiguousEvidenceQuestions = 0; let unmappedEvidenceQuestions = 0
   const language = args.answerLanguageInstruction ? `\n\n${args.answerLanguageInstruction}` : ''
 
@@ -155,7 +162,7 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
     llmNetworkLatency: args.client.latencies(),
   }
   const finishedAt = new Date().toISOString()
-  const quality = qualityQuestions.length > 0 ? finalizeQaQuality(records, qualityQuestions) : undefined
+  const quality = qualityQuestions.length > 0 ? finalizeQaQuality(records, qualityQuestions, qualityManifestFingerprint) : undefined
   const qualityMetrics = {
     ...withPercentiles(withLatencyStats(renameQaRates(aggregate(records)), args.client.latencies()), timingValues),
     ...quality?.metrics,

@@ -1,4 +1,6 @@
-import type { PerSampleRecord, QaQuestion, SampleSource } from '../types'
+import { createHash } from 'node:crypto'
+import type { EvalSample, PerSampleRecord, QaQuestion, SampleSource } from '../types'
+import { isPdfStudySample } from '../types'
 import { qasperAnswerF1 } from './qasperQuality'
 
 export const QA_QUALITY_DEFINITION = 'qasper-all-questions-v1' as const
@@ -170,4 +172,30 @@ export function finalizeQaQuality(
         : {}),
     },
   }
+}
+
+/**
+ * 质量批次里 pdf-study 论文集合的 manifest 指纹：对参与质量收尾的 pdf-study 样本，
+ * 按 paperId 升序取 `[paperId, manifestFingerprint]` 对做 SHA-256。只有 pdf-study 才有
+ * 该指纹（QASPER 用 datasetFingerprint 表达数据集身份），没有 pdf-study 样本时返回 undefined。
+ * 每篇论文的 manifestFingerprint 已覆盖文件名/标题/原始 PDF 字节/页文本/标注/目录树，
+ * 因此两份「提取文本相同但底层 PDF 或标注不同」的运行会在比较门禁被拒。
+ *
+ * 定义在本模块（质量协议的唯一归属地）而非某个 runner，使平面 `runQaTask` 与
+ * 全文参考臂 `runFullContextQaTask` 共用同一处实现，避免 runner→runner 依赖或复写分叉。
+ */
+export function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): string | undefined {
+  const papers = new Map<string, string>()
+  for (const sample of samples) {
+    if (isPdfStudySample(sample)) papers.set(sample.paperId, sample.manifestFingerprint)
+  }
+  if (papers.size === 0) return undefined
+  const canonical = [...papers.entries()]
+    .map(([paperId, manifestFingerprint]) => ({ paperId, manifestFingerprint }))
+    .sort((a, b) => a.paperId.localeCompare(b.paperId))
+  return createHash('sha256')
+    .update('pdf-study-quality-manifest-v1')
+    .update('\0')
+    .update(JSON.stringify(canonical))
+    .digest('hex')
 }

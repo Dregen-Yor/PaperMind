@@ -25,6 +25,7 @@ const ragPipeline = await import('../../../src/utils/ragPipeline')
 const { MATH_FORMAT_INSTRUCTION } = ragPipeline
 // token 估算口径不在此处复写第二份：跟着生产实现走，改了公式测试也跟着改
 const { estimateTokens } = await import('../metrics/retrieval')
+const { PDF_QA_QUALITY_DEFINITION } = await import('../metrics/qaQuality')
 
 function qasperQuestion(question: Omit<QaQuestion, 'qualityAnswers' | 'qualityDefinition'>): QaQuestion {
   return {
@@ -1051,7 +1052,18 @@ describe('runFullContextQaTask — 生成上限基线', () => {
   })
 
   it('omits the QASPER quality contract when the selected slice contains only smoke questions', async () => {
-    const smoke: EvalSample = { ...sample, paperId: 'smoke', source: 'smoke' }
+    // smoke 语料在真实加载里不携带质量定义；此处用展开快捷构造，须显式剥掉 qasper 题目上的
+    // qualityDefinition，否则按「显式质量定义」筛选会把冒烟题误计入质量批次（来源错配抛错）。
+    const smoke: EvalSample = {
+      ...sample,
+      paperId: 'smoke',
+      source: 'smoke',
+      questions: sample.questions.map(question => ({
+        ...question,
+        qualityDefinition: undefined,
+        qualityAnswers: undefined,
+      })),
+    }
     const result = await runFullContextQaTask({
       samples: [smoke, sample],
       limit: 1,
@@ -1064,6 +1076,59 @@ describe('runFullContextQaTask — 生成上限基线', () => {
 
     expect(result.meta.qaQualityDefinition).toBeUndefined()
     expect(result.metrics.answerF1AllQuestions).toBeUndefined()
+  })
+
+  it('pdf-study 全文直投结果落 PDF 质量定义、来源与非空 manifest 指纹', async () => {
+    // 全文参考臂是 Q 契约要求的第一份结果；pdf-study 产品实验的 Q 分数靠它当参考。
+    // 若质量批次仍按字面来源 `qasper` 过滤，pdf-study 题永远进不了批次，比较门禁会以
+    // 「qaQualityDefinition 必须是 qasper/pdf 定义之一」硬拒参考——这里把它钉死。
+    const pdfStudy: PdfStudySample = {
+      paperId: 'pdf1',
+      title: 'PDF 1',
+      pages: ['EVIDENCE_MARKER_7f3a', 'b', 'c', 'd'],
+      source: 'pdf-study',
+      questions: [{
+        id: 'pdf1#0', question: 'Q1?', answers: ['8'], evidencePages: [0], unanswerable: false,
+        qualityAnswers: ['8'], qualityDefinition: PDF_QA_QUALITY_DEFINITION,
+      }],
+      pdfPath: '/tmp/pdf1.pdf',
+      manifestFingerprint: 'manifest-pdf1',
+      pdfOutline: [],
+    }
+    const result = await runFullContextQaTask({
+      samples: [pdfStudy],
+      config: { name: 'default', topK: 2 },
+      client: { ...fullContextClient, chat: vi.fn(async () => '8') } as never,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+    })
+
+    expect(result.meta.qaQualityDefinition).toBe(PDF_QA_QUALITY_DEFINITION)
+    expect(result.meta.qaQualitySource).toBe('pdf-study')
+    expect(result.meta.qaQualityManifestFingerprint).toBeTypeOf('string')
+    expect((result.meta.qaQualityManifestFingerprint as string).length).toBe(64)
+    expect(result.meta.qaExpectedQuestionIds).toEqual(['pdf1#0'])
+    expect(result.metrics.answerF1AllQuestions).toBe(1)
+  })
+
+  it('QASPER 全文直投结果的 meta 键仍是 legacy 两键，不落 pdf 专属来源与指纹', async () => {
+    // QASPER 路径必须逐字不变：只多 qaQualityDefinition / qaExpectedQuestionIds 两键，
+    // 绝不出现 qaQualitySource / qaQualityManifestFingerprint。
+    const result = await runFullContextQaTask({
+      samples: [sample],
+      config: { name: 'default', topK: 2 },
+      client: { ...fullContextClient, chat: vi.fn(async () => '8') } as never,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      gitSha: 'abc1234',
+      model: 'test-model',
+    })
+
+    const keys = Object.keys(result.meta)
+    expect(keys).toContain('qaQualityDefinition')
+    expect(keys).toContain('qaExpectedQuestionIds')
+    expect(keys).not.toContain('qaQualitySource')
+    expect(keys).not.toContain('qaQualityManifestFingerprint')
   })
 
   it('保持全文直投：system 报文含整篇论文与数学格式约束，user 报文只含原始问题', async () => {
