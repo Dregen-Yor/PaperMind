@@ -25,6 +25,7 @@ import {
 import type { LlmClient } from '../llmClient'
 import type { EvalSample, PaperTimingRecord, PassageMode } from '../types'
 import { introspectPassageStageEvent } from '../metrics/passageDiagnostics'
+import { errorMessage } from './support'
 
 export interface HybridKnobs {
   minTokens: number
@@ -88,6 +89,11 @@ export interface PassageOutlineInfo {
    * **零 embedder 调用**复用（spec §3.2）。文本口径见 {@link outlineNodeEmbedText}。
    */
   nodeVectors: Map<string, Float32Array>
+  /**
+   * 本次目录构建的真实耗时（解析 + 建节点 + 节点向量），毫秒。C 臂的
+   * `coldStartTotalMs` 把它算在里面（方案 §9.4），此处单列供产物逐篇核对。
+   */
+  elapsedMs: number
 }
 
 export interface PassageIndexInfo {
@@ -124,6 +130,8 @@ function flattenOutline(nodes: PdfOutlineNode[]): PdfOutlineNode[] {
 /**
  * 构建 C 臂的原生目录索引并计算节点向量。任何失败都**降级**（`available:false` + 原因），
  * 不抛：目录是可选先验，缺了只是这一臂退化成 B，不该让整篇论文的索引失败。
+ *
+ * 每条返回路径都带上真实耗时：C 臂的冷启动总时长覆盖这一段（方案 §9.4「冷计时含真实等待」）。
  */
 async function buildOutline(
   index: PassageIndex,
@@ -131,38 +139,54 @@ async function buildOutline(
   opts: PassageIndexHookOptions,
   embedder: Embedder | undefined,
 ): Promise<PassageOutlineInfo> {
+  const now = opts.now ?? Date.now
+  const startedAt = now()
+  const done = (info: Omit<PassageOutlineInfo, 'elapsedMs'>): PassageOutlineInfo =>
+    ({ ...info, elapsedMs: Math.max(0, now() - startedAt) })
+
   const roots = opts.outlineIndex?.(sample)
   if (!roots || roots.length === 0) {
-    return { nodes: [], available: false, fallbackReason: 'missing-outline', nodeVectors: new Map() }
+    return done({ nodes: [], available: false, fallbackReason: 'missing-outline', nodeVectors: new Map() })
   }
   let nodes: PdfOutlineNode[]
   try {
     nodes = buildPdfOutlineIndex(roots, index.passages, sample.pages.length)
   } catch (error) {
-    return {
+    return done({
       nodes: [],
       available: false,
       fallbackReason: error instanceof PdfOutlineIndexError ? error.reason : 'invalid-outline',
       nodeVectors: new Map(),
-    }
+    })
   }
-  if (nodes.length === 0) {
-    return { nodes: [], available: false, fallbackReason: 'empty-outline-index', nodeVectors: new Map() }
-  }
+  // 这里刻意**没有** `nodes.length === 0` 分支：`buildPdfOutlineIndex` 只在 `roots` 为空时返回 `[]`
+  // （已在上面处理），其余情况下每个非外链条目都会变成一个节点——空数组在本函数内不可达。
   // 节点向量是 Task 5 在查询期**不发嵌入调用**的前提：没有向量就没有可用的目录先验
   if (!embedder) {
-    return { nodes, available: false, fallbackReason: 'embedder-unavailable', nodeVectors: new Map() }
+    return done({ nodes, available: false, fallbackReason: 'embedder-unavailable', nodeVectors: new Map() })
   }
   const flat = flattenOutline(nodes)
   const nodeVectors = new Map<string, Float32Array>()
   try {
     const vectors = await embedder.embedPassages(flat.map(outlineNodeEmbedText))
-    if (vectors.length !== flat.length) throw new Error('目录节点向量数量与节点数不一致')
+    // `available:true` 必须自证：数量、维度、有限性三者一起校验。只查数量时，一条错维度的向量
+    // 会挂着「可用」的名义进入查询期的余弦计算（`cosineSimilarity` 对维度不符会抛错）。
+    // 与 `carryStoredPassageVectors` 的逐条防御同一口径。
+    if (vectors.length !== flat.length) {
+      throw new Error(`目录节点向量数量与节点数不一致：${vectors.length} ≠ ${flat.length}`)
+    }
+    const dim = vectors[0]?.length ?? 0
+    if (dim <= 0 || vectors.some(vector => vector.length !== dim || !vector.every(Number.isFinite))) {
+      throw new Error('目录节点向量维度不一致或含非有限值')
+    }
     flat.forEach((node, i) => nodeVectors.set(node.id, vectors[i]))
-  } catch {
-    return { nodes, available: false, fallbackReason: 'outline-embed-failed', nodeVectors: new Map() }
+  } catch (error) {
+    // 与 cli.ts 的「向量模型加载失败」同一风格：静默降级会把 C→B 的退化藏起来，必须留一条可诊断的日志。
+    // 目录失败**不写** `coldStartStructureFallback`——那不是卡片失败，写进去会让 LLM 结构回落率失真。
+    console.warn(`目录节点向量计算失败，C 臂本篇回落为 B（${sample.paperId}）：${errorMessage(error)}`)
+    return done({ nodes, available: false, fallbackReason: 'outline-embed-failed', nodeVectors: new Map() })
   }
-  return { nodes, available: true, nodeVectors }
+  return done({ nodes, available: true, nodeVectors })
 }
 
 export function createPassageIndexHook(opts: PassageIndexHookOptions): PassageIndexHook {
@@ -264,15 +288,18 @@ export function createPassageIndexHook(opts: PassageIndexHookOptions): PassageIn
 
     const ready = (async (): Promise<PassageIndexInfo> => {
       const index = await rest
-      coldStart.coldStartTotalMs = Math.max(0, now() - startedAt)
       // 只有 legacy 口径要求阶段③ 的卡片；A/B/C 三个实验臂本就关掉了阶段③
       if (buildStructure && index.cards === undefined) {
         throw new Error(`论文 ${sample.paperId} 未走到阶段③，卡片刻度缺失`)
       }
-      // C 臂：阶段② 之后构建原生目录索引与节点向量（必须在阶段① 之后——它要 passages）
+      // C 臂：阶段② 之后构建原生目录索引与节点向量（必须在阶段① 之后——它要 passages）。
+      // 计时**必须**在这之后收口：目录建树 + 逐节点嵌入是 C 臂真实等待的一部分（方案 §9.4），
+      // 放在它之前会让 C 的冷启动总时长系统性少报，而 qa.ts 的 indexBuildLatencyMs 覆盖的是同一段——
+      // 两个字段描述一次冷启动却各说各话。A/B/legacy 不调 buildOutline，行为逐字不变。
       const outline = opts.mode === 'hybrid-outline'
         ? await buildOutline(index, sample, opts, embedder)
         : undefined
+      coldStart.coldStartTotalMs = Math.max(0, now() - startedAt)
 
       const after = opts.client.stats()
       return {

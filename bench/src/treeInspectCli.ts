@@ -118,7 +118,12 @@ async function renderCardSections(
     try {
       const { index } = await (await hook(sample)).ready
       const cards = index.cards
-      // hook 契约保证阶段③ 一定有成型的卡片；真缺了就说实话，不渲染一张空表
+      // 本工具是**卡片核对**入口，与零卡片的 A/B/C（lexical / hybrid-raw / hybrid-outline）不兼容。
+      // B/C 带 `passage` 块，会被 `isPassageConfig` 路由到这里，但它们的 hook 以 `buildStructure:false`
+      // 运行，阶段③ 整体关闭，`index.cards` 恒为 undefined——于是这一行对每篇论文都抛
+      // 「未走到阶段③」（A 臂没有 `passage` 块，连这一步都到不了，走最外层 else 抛
+      // 「缺少 passage 参数块」）。这是工具与模式的固有冲突，不是本轮的临时故障；
+      // 不在这里加静默跳过，只如实把症状说清楚（对零卡片模式做前置拒绝是另一项改动）。
       if (cards === undefined) throw new Error(`论文 ${sample.paperId} 未走到阶段③，卡片刻度缺失`)
       lines.push(renderCardReport({
         paperId: sample.paperId,

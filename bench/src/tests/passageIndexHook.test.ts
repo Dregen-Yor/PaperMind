@@ -64,6 +64,24 @@ function stubClient(): { client: LlmClient; complete: ReturnType<typeof vi.fn> }
   }
 }
 
+/**
+ * 时钟只在 `embedPassages` 内推进的假 embedder + `now`：目录批次（含 'Methods > Retrieval'）
+ * 推 1000ms，段落向量批次推 10ms。于是「总时长有没有把目录那一段算进去」变成可精确断言的数字，
+ * 而不是靠真实时钟的宽松不等式。
+ */
+function timedEmbedder(): { embedder: Embedder; now: () => number; elapsed: () => number } {
+  let t = 0
+  const embedder: Embedder = {
+    id: 'timed@main#q8',
+    embedQuery: async () => new Float32Array([1, 0]),
+    embedPassages: async (texts: string[]) => {
+      t += texts.includes('Methods > Retrieval') ? 1000 : 10
+      return texts.map(() => new Float32Array([1, 0]))
+    },
+  }
+  return { embedder, now: () => t, elapsed: () => t }
+}
+
 describe('createPassageIndexHook — A/B/C 模式', () => {
   it('A（lexical）：无向量、不碰 embedder、零 LLM 调用', async () => {
     const embedder = fakeEmbedder()
@@ -156,6 +174,87 @@ describe('createPassageIndexHook — A/B/C 模式', () => {
     const info = await (await hook(SAMPLE)).ready
     expect(info.outline?.available).toBe(false)
     expect(info.outline?.fallbackReason).toBe('null-page')
+  })
+
+  it('C 的冷启动总时长覆盖目录构建，目录耗时另记进专用字段', async () => {
+    const { client } = stubClient()
+    const { embedder, now, elapsed } = timedEmbedder()
+    const hook = createPassageIndexHook({
+      knobs: KNOBS, client, embedder, countTokens, modelIdentity: 'm', mode: 'hybrid-outline',
+      outlineIndex: () => OUTLINE, now,
+    })
+
+    const info = await (await hook(SAMPLE)).ready
+    // 目录批次（含 'Methods > Retrieval'）推时钟 1000，段落向量批次推 10
+    expect(elapsed()).toBe(1010)
+    expect(info.outline?.available).toBe(true)
+    // 目录耗时单独记在 outline 上：该段是 C 臂独有的真实等待，不能只折进总时长
+    expect(info.outline?.elapsedMs).toBe(1000)
+    // 计时在 buildOutline 之后收口：总时长必须涵盖目录段（10 + 1000），而不是停在目录开始之前
+    expect(info.coldStart.coldStartTotalMs).toBe(1010)
+  })
+
+  it('A/B/legacy 的冷启动总时长与目录无关（不写目录字段）', async () => {
+    const { client } = stubClient()
+    const b = timedEmbedder()
+    const hookB = createPassageIndexHook({
+      knobs: KNOBS, client, embedder: b.embedder, countTokens, modelIdentity: 'm', mode: 'hybrid-raw', now: b.now,
+    })
+    const infoB = await (await hookB(SAMPLE)).ready
+    expect(infoB.coldStart.coldStartOutlineMs).toBeUndefined()
+    // 只跑了段落向量批次：总时长 = 10，与目录无关（挪计时对 A/B/legacy 逐字不变）
+    expect(infoB.coldStart.coldStartTotalMs).toBe(10)
+
+    const a = timedEmbedder()
+    const hookA = createPassageIndexHook({
+      knobs: KNOBS, client, embedder: a.embedder, countTokens, modelIdentity: 'm', mode: 'lexical', now: a.now,
+    })
+    const infoA = await (await hookA(SAMPLE)).ready
+    expect(infoA.coldStart.coldStartOutlineMs).toBeUndefined()
+    expect(infoA.coldStart.coldStartTotalMs).toBe(0)
+  })
+
+  it('目录节点嵌入抛错：留 warn 日志并回落 outline-embed-failed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const embedder = fakeEmbedder()
+    embedder.embedPassages.mockImplementation(async (texts: string[]) => {
+      if (texts.includes('Methods > Retrieval')) throw new Error('boom')
+      return texts.map(() => new Float32Array([1, 0]))
+    })
+    const { client } = stubClient()
+    const hook = createPassageIndexHook({
+      knobs: KNOBS, client, embedder, countTokens, modelIdentity: 'm', mode: 'hybrid-outline',
+      outlineIndex: () => OUTLINE,
+    })
+
+    const info = await (await hook(SAMPLE)).ready
+    expect(info.outline?.available).toBe(false)
+    expect(info.outline?.fallbackReason).toBe('outline-embed-failed')
+    // 静默降级会把 C→B 的退化藏起来：必须留下一条可诊断的日志（与 cli.ts 的向量加载失败同风格）
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('目录节点向量计算失败'))
+    warn.mockRestore()
+  })
+
+  it('目录节点向量维度不一致：不声称 available:true，回落 outline-embed-failed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const embedder: Embedder = {
+      id: 'mixed@main#q8',
+      embedQuery: vi.fn(async () => new Float32Array([1, 0])),
+      // 同一批里混入不同维度：只查数量会漏掉，余弦相似度随后会按错维度静默算错
+      embedPassages: vi.fn(async (texts: string[]) =>
+        texts.map((_, i) => (i === 0 ? new Float32Array([1, 0]) : new Float32Array([1, 0, 0])))),
+    }
+    const { client } = stubClient()
+    const hook = createPassageIndexHook({
+      knobs: KNOBS, client, embedder, countTokens, modelIdentity: 'm', mode: 'hybrid-outline',
+      outlineIndex: () => OUTLINE,
+    })
+
+    const info = await (await hook(SAMPLE)).ready
+    expect(info.outline?.available).toBe(false)
+    expect(info.outline?.fallbackReason).toBe('outline-embed-failed')
+    expect(info.outline?.nodeVectors.size).toBe(0)
+    warn.mockRestore()
   })
 
   it('lexicalReady 是阶段① 快照：ready 解析前即可用，且不被后续阶段改写', async () => {

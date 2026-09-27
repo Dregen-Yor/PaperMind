@@ -291,6 +291,22 @@ export interface PaperTimingRecord {
   coldStartPassageCount?: number
   /** 1 = 本篇建索引失败 */
   coldStartFailed?: number
+  /** —— C 臂原生目录（方案 §10.1 交付物 3）；仅 hybrid-outline 的论文写入 —— */
+  /**
+   * 目录构建耗时（解析 + 建节点 + 节点向量）。**包含在** `coldStartTotalMs` 之内
+   * （方案 §9.4「冷计时含真实等待」）；单列一项是因为它是 C 臂独有的真实等待。
+   */
+  coldStartOutlineMs?: number
+  /**
+   * 1 = 本篇目录可用（解析成功且节点向量齐全）；0 = 目录缺失/非法/向量失败，C 臂本篇
+   * 回落为 B 的检索口径（方案 §221 预声明的合法回落）。只有 hybrid-outline 的论文写这个字段，
+   * 因此它也是「C 臂这一篇到底有没有用上目录」的唯一证据。
+   */
+  coldStartOutlineAvailable?: number
+  /** 目录顶层节点数（`outline.nodes.length`）；目录不可用（节点为空）时为 0 */
+  coldStartOutlineNodeCount?: number
+  /** 目录不可用的原因（missing-outline / null-page / outline-embed-failed …）；可用时不写。 */
+  coldStartOutlineFallback?: string
 }
 
 /** 逐样本记录，用于错误分析——聚合分数只说好不好，这里说为什么。 */

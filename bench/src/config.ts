@@ -194,9 +194,16 @@ function validateSemanticTreeParams(value: unknown, path: string): SemanticTreeP
   return { evidence: { targetChars, maxChars, minChars }, maxInputChars: raw.maxInputChars as number }
 }
 
-/** 段落混合检索的旋钮必须齐全且在合理范围：缺一个就会静默用产品默认值，配置就不等于口径了。 */
+/**
+ * 段落混合检索的旋钮必须齐全且在合理范围：缺一个就会静默用产品默认值，配置就不等于口径了。
+ *
+ * 只在「`passage` 块与全部旋钮都缺席」时放行——`default.json` 那种纯平铺配置。
+ * **不能**改成 `if (!config.passage) return`：A 臂（lexical）有旋钮、无 `passage` 块，
+ * 那样写它的旋钮就只过类型检查、不过范围检查，一个 `maxTokens < minTokens` 或越界的
+ * `sectionWeight` 会静默通过——配置即口径，A 臂也不能例外。
+ */
 function validateHybridKnobs(config: PaperMindConfig, path: string): void {
-  if (!config.passage) return
+  if (!config.passage && !PASSAGE_KNOB_KEYS.some(key => config[key] !== undefined)) return
   const require = (name: keyof PaperMindConfig, predicate: (v: unknown) => boolean, hint: string) => {
     const value = config[name]
     if (!predicate(value)) fail(path, `passage`, `${String(name)} ${hint}`)
@@ -290,7 +297,9 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
   // 旋钮校验挂在本函数自己身上（而不是只挂在 loadConfigs 上）：配置即口径，
   // 任何拿到 ConfigFile 的入口（含单测直接调用）都必须面对同一道校验，
   // 而不是展开之后才在另一处补一刀。expandMatrix 同在本模块导出，不构成循环。
-  if (file.passage) for (const config of expandMatrix(file)) validateHybridKnobs(config, path)
+  // 不再门控 `file.passage`：A 臂（lexical）有旋钮、无 passage 块，门控会把它整段跳过；
+  // 校验函数自身对「无 passage 且无旋钮」的纯平铺配置早退，这里对每条展开点跑一遍无副作用。
+  for (const config of expandMatrix(file)) validateHybridKnobs(config, path)
   return file
 }
 

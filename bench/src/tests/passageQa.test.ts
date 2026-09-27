@@ -10,12 +10,14 @@
  * 用例必须对「旋钮改变了进入 prompt 的原文」负责，而不是对某个内部字段的写法负责。
  */
 import { describe, it, expect, vi } from 'vitest'
-import type { EvalSample } from '../types'
+import type { EvalSample, PassageMode } from '../types'
 import type { ContextGroup } from '../../../src/utils/contextTrace'
 import type { Passage } from '../../../src/utils/passages'
 import type { PassageIndex } from '../../../src/utils/passageIndex'
 import type { StructureCard } from '../../../src/utils/structureCards'
+import type { Embedder } from '../../../src/utils/embedder'
 import type { QaTaskArgs } from '../runner/qa'
+import type { PassageIndexHook, PassageIndexInfo } from '../runner/passageIndexHook'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -25,7 +27,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
 
 const { runQaTask } = await import('../runner/qa')
 const { materializeContext } = await import('../../../src/utils/contextTrace')
-const { cardsToIndexNodes } = await import('../../../src/utils/structureCards')
+const { buildTitleCards, cardsToIndexNodes } = await import('../../../src/utils/structureCards')
 const { PASSAGE_INDEX_VERSION, passageConfigHash } = await import('../../../src/utils/passageIndex')
 const { buildEvaluationContract } = await import('../evaluationContract')
 
@@ -116,6 +118,87 @@ function capturingMaterialize() {
   return { seen, materialize }
 }
 
+/** B 臂（hybrid-raw）真产物：阶段① 的标题树在、段落向量齐全，但**没有**卡片。 */
+const DENSE_DIM = 8
+const DENSE_ID = 'dense@main#q8'
+
+function denseEmbedder(): Embedder & { embedQuery: ReturnType<typeof vi.fn> } {
+  return {
+    id: DENSE_ID,
+    embedQuery: vi.fn(async () => new Float32Array(DENSE_DIM).fill(1)),
+    embedPassages: vi.fn(async (texts: string[]) => texts.map(() => new Float32Array(DENSE_DIM).fill(1))),
+  } as Embedder & { embedQuery: ReturnType<typeof vi.fn> }
+}
+
+function denseIndex(embedderId: string | undefined = DENSE_ID): PassageIndex {
+  return {
+    version: PASSAGE_INDEX_VERSION,
+    stage: 2,
+    passages,
+    tree: cardsToIndexNodes(buildTitleCards(passages), passages),
+    passageVectors: passages.map(() => new Float32Array(DENSE_DIM).fill(1)),
+    vectorDim: DENSE_DIM,
+    ...(embedderId !== undefined ? { embedderId } : {}),
+    passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+    separatorTokens: 2,
+  }
+}
+
+/** 意外降级形态：停在阶段①，没有段落向量（单篇向量计算失败的产物）。 */
+function bareIndex(): PassageIndex {
+  const { passageVectors, vectorDim, embedderId, ...rest } = denseIndex()
+  return { ...rest, stage: 1 }
+}
+
+function infoFor(index: PassageIndex, extra: Partial<PassageIndexInfo> = {}): PassageIndexInfo {
+  return {
+    index,
+    coldStart: { coldStartPassageMs: 0, coldStartPassageCount: passages.length, coldStartTotalMs: 0 },
+    cacheHits: 0,
+    cacheMisses: 0,
+    ...extra,
+  }
+}
+
+/** 与真实 hook 同形态的桩：lexicalReady 与 ready 都给同一份索引。 */
+function stubHook(info: PassageIndexInfo): PassageIndexHook {
+  return async () => ({ lexicalReady: info, ready: Promise.resolve(info) })
+}
+
+/**
+ * 通用段落 args：唯一变量是 `mode` 与 hook 产出的索引 / embedder。
+ * `legacy-llm` 刻意不写 `mode` 字段（既有口径的形态就是缺席）。
+ */
+function argsForMode(
+  mode: PassageMode,
+  hook: PassageIndexHook,
+  embedder: Embedder | undefined,
+  materialize: QaTaskArgs['materialize'],
+  embedderUnavailable = false,
+): QaTaskArgs {
+  return {
+    samples: [sample],
+    config: { name: `papermind-${mode}`, ...(mode === 'legacy-llm' ? {} : { mode }) },
+    client: client as never,
+    systemPrompt: '系统提示词',
+    gitSha: 'abc1234',
+    model: 'test-model',
+    materialize,
+    evaluationContract: buildEvaluationContract([sample]),
+    passage: {
+      hook,
+      embedder,
+      countTokens,
+      contextBudgetTokens: CONTEXT_BUDGET,
+      rrfK: 60,
+      sectionWeight: 0.5,
+      neighbourFactor: 0.5,
+      skipLimit: 20,
+      embedderUnavailable,
+    },
+  }
+}
+
 /** 两次运行的唯一变量是 sectionWeight；其余三个旋钮显式冻结，不吃默认值。 */
 function argsWithSectionWeight(
   sectionWeight: number,
@@ -187,5 +270,101 @@ describe('runQaTask 段落路径 — 逐题降级判不可比', () => {
     expect(result.meta.comparisonEligible).toBe(false)
     expect(result.meta.comparisonIneligibleReason).toBe('passage-retrieval-degraded')
     expect(result.metrics.passageDegradedQuestionRate).toBe(1)
+  })
+})
+
+/**
+ * 方案 §221：A 的 bm25、B 的 bm25+dense、C 的 bm25+dense+outline 或预声明 outline-fallback
+ * 都合法，不能因为没有某个词就判降级；意外向量失败仍必须可见。
+ * 这组用例就是把「合法模式」与「真降级」两边的界线钉住——旧实现用 startsWith('bm25')
+ * 判定，会把每一道 B 题都算成降级、把实验自己的基线臂排除出对照。
+ */
+describe('runQaTask 段落路径 — 各臂预期模式与真降级的界线（方案 §221）', () => {
+  it('B（hybrid-raw）真段落向量：bm25+dense 是预期模式，不判降级、不排除出对照', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-raw', stubHook(infoFor(denseIndex(embedder.id))), embedder, capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25+dense')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(0)
+    expect(result.meta.comparisonEligible).not.toBe(false)
+    expect(result.meta.comparisonIneligibleReason).toBeUndefined()
+  })
+
+  it('C（hybrid-outline）目录缺失的预声明回落：bm25+dense 合法，不算降级', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-outline',
+      stubHook(infoFor(denseIndex(embedder.id), {
+        outline: { nodes: [], available: false, fallbackReason: 'missing-outline', nodeVectors: new Map(), elapsedMs: 3 },
+      })),
+      embedder,
+      capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25+dense')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(0)
+    expect(result.meta.comparisonEligible).not.toBe(false)
+  })
+
+  it('B 意外没有段落向量：bm25 是降级，仍标不可比', async () => {
+    const embedder = denseEmbedder()
+    const result = await runQaTask(argsForMode(
+      'hybrid-raw', stubHook(infoFor(bareIndex())), embedder, capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(1)
+    expect(result.meta.comparisonEligible).toBe(false)
+    expect(result.meta.comparisonIneligibleReason).toBe('passage-retrieval-degraded')
+  })
+
+  it('B 查询向量失败：模式回落 bm25，同样计入降级（真信号不被修掉）', async () => {
+    const embedder = denseEmbedder()
+    embedder.embedQuery.mockRejectedValue(new Error('query embed down'))
+    const result = await runQaTask(argsForMode(
+      'hybrid-raw', stubHook(infoFor(denseIndex(embedder.id))), embedder, capturingMaterialize().materialize,
+    ))
+    expect(result.perSample[0].retrievalMode).toBe('bm25')
+    expect(result.metrics.passageDegradedQuestionRate).toBe(1)
+    expect(result.meta.comparisonIneligibleReason).toBe('passage-retrieval-degraded')
+  })
+
+  it('C 臂逐篇目录事实进入 perPaper：可用篇 / 失败篇 / B 式无目录篇三者可区分', async () => {
+    const nodes = [{
+      id: '0', title: 'Introduction', path: [] as string[], depth: 0,
+      startPage: 0, endPage: 0, passageOrders: [0], children: [],
+    }]
+    const ok = await runQaTask(argsForMode(
+      'hybrid-outline',
+      stubHook(infoFor(denseIndex(), {
+        outline: { nodes, available: true, nodeVectors: new Map([['0', new Float32Array(DENSE_DIM).fill(1)]]), elapsedMs: 42 },
+      })),
+      denseEmbedder(),
+      capturingMaterialize().materialize,
+    ))
+    expect(ok.perPaper?.[0].coldStartOutlineAvailable).toBe(1)
+    expect(ok.perPaper?.[0].coldStartOutlineNodeCount).toBe(1)
+    expect(ok.perPaper?.[0].coldStartOutlineMs).toBe(42)
+    expect(ok.perPaper?.[0].coldStartOutlineFallback).toBeUndefined()
+    expect(ok.metrics.outlineAvailabilityRate).toBe(1)
+
+    const failed = await runQaTask(argsForMode(
+      'hybrid-outline',
+      stubHook(infoFor(denseIndex(), {
+        outline: { nodes: [], available: false, fallbackReason: 'outline-embed-failed', nodeVectors: new Map(), elapsedMs: 5 },
+      })),
+      denseEmbedder(),
+      capturingMaterialize().materialize,
+    ))
+    expect(failed.perPaper?.[0].coldStartOutlineAvailable).toBe(0)
+    expect(failed.perPaper?.[0].coldStartOutlineNodeCount).toBe(0)
+    expect(failed.perPaper?.[0].coldStartOutlineFallback).toBe('outline-embed-failed')
+    expect(failed.metrics.outlineAvailabilityRate).toBe(0)
+
+    // B 式（hook 不产出 outline）：这些字段整体缺席，不会被填 0 冒充「目录失败」
+    const raw = await runQaTask(argsForMode(
+      'hybrid-raw', stubHook(infoFor(denseIndex())), denseEmbedder(), capturingMaterialize().materialize,
+    ))
+    expect(raw.perPaper?.[0].coldStartOutlineAvailable).toBeUndefined()
+    expect(raw.metrics.outlineAvailabilityRate).toBeUndefined()
   })
 })

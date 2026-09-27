@@ -123,6 +123,17 @@ describe('段落构建模式（结构实验 A/B/C）', () => {
     expect(lexical.maxTokens).toBe(350)
   })
 
+  it('lexical（A 臂）的旋钮同样过范围校验：有旋钮、无 passage 块不是免检牌', () => {
+    // 越界的 sectionWeight 与 maxTokens < minTokens 都必须在配置期被拒。
+    // 旧实现把整段旋钮范围校验门控在 `if (!config.passage)`，lexical 因此只过类型、不过范围。
+    expect(() => validatePaperMind(
+      { name: 'x', kind: 'papermind', mode: 'lexical', matrix: { ...KNOBS, sectionWeight: [-0.5] } }, 'test',
+    )).toThrow(/sectionWeight/)
+    expect(() => validatePaperMind(
+      { name: 'x', kind: 'papermind', mode: 'lexical', matrix: { ...KNOBS, minTokens: [400], maxTokens: [350] } }, 'test',
+    )).toThrow(/minTokens/)
+  })
+
   it('legacy 配置（无 mode）展开后仍不带 mode 字段', () => {
     const configs = expandMatrix(validatePaperMind(baseConfig, 'test'))
     expect(configs).toHaveLength(3)

@@ -9,6 +9,7 @@
  */
 import { withPercentiles } from './aggregate'
 import type { PaperTimingRecord } from '../types'
+import type { PassageOutlineInfo } from '../runner/passageIndexHook'
 
 /**
  * 取均值，空数组返回 `undefined` 而非 0（与 `treeDiagnostics.ts` 的私有 `mean` 同口径，
@@ -40,6 +41,23 @@ export function introspectPassageStageEvent(
     coldStartStructureOutputTokens: Math.max(1, Math.round(input.outputChars / 4)),
     coldStartStructureCacheHit: (input.cacheHit ?? event.cacheHit) ? 1 : 0,
     ...(event.fallback ? { coldStartStructureFallback: event.fallback } : {}),
+  }
+}
+
+/**
+ * C 臂原生目录结果 → perPaper 的冷启动字段。
+ *
+ * 目录的可用性 / 节点数 / 回落原因是「C 臂到底有没有真的用上目录」的唯一证据：只把耗时
+ * 折进总时长，会让「目录一直失败、整臂退化成 B」的一次运行在产物里读起来与 B 逐字相同。
+ * 用 `coldStartOutline*` 前缀与 `coldStartStructure*`（LLM 卡片）刻意分开——目录失败不是卡片失败。
+ */
+export function outlineRecordFields(outline: PassageOutlineInfo | undefined): Partial<PaperTimingRecord> {
+  if (!outline) return {}
+  return {
+    coldStartOutlineMs: outline.elapsedMs,
+    coldStartOutlineAvailable: outline.available ? 1 : 0,
+    coldStartOutlineNodeCount: outline.nodes.length,
+    ...(outline.fallbackReason !== undefined ? { coldStartOutlineFallback: outline.fallbackReason } : {}),
   }
 }
 
@@ -88,6 +106,14 @@ export function summarizeColdStart(records: PaperTimingRecord[]): Record<string,
   store('avgColdStartCardCount', meanOf(valuesOf(records, record => record.coldStartCardCount)))
   store('passageEmbedFailureRate', records.filter(record => record.coldStartEmbedFailed === 1).length / attempted)
   store('avgColdStartPassageCount', meanOf(valuesOf(records, record => record.coldStartPassageCount)))
+
+  // 目录可用率的分母是**尝试过目录的论文**（只有 hybrid-outline 的篇会写这个字段）：
+  // 目录失败的 C 篇正是「这一臂退化成 B 了」的证据，必须留在分母里，不能被悄悄剔除
+  const outlineAttempted = records.filter(record => record.coldStartOutlineAvailable !== undefined)
+  store('outlineAvailabilityRate', outlineAttempted.length
+    ? outlineAttempted.filter(record => record.coldStartOutlineAvailable === 1).length / outlineAttempted.length
+    : undefined)
+  store('avgColdStartOutlineMs', meanOf(valuesOf(outlineAttempted, record => record.coldStartOutlineMs)))
 
   return withPercentiles(metrics, { coldStartTotal: totalMs, structureCall: uncachedCallMs })
 }

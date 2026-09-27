@@ -19,13 +19,15 @@ import type { Embedder } from '../../../src/utils/embedder'
 import type { TokenCounter } from '../../../src/utils/passages'
 import type { SemanticTreeHook } from '../metrics/treeDiagnostics'
 import { summarizeTreeDiagnostics, treeRecordFields } from '../metrics/treeDiagnostics'
-import { summarizeColdStart } from '../metrics/passageDiagnostics'
+import { outlineRecordFields, summarizeColdStart } from '../metrics/passageDiagnostics'
+import { resolvePassageMode } from '../config'
 import type { PassageIndexHook, PassageIndexInfo } from './passageIndexHook'
 import type {
   PaperMindConfig,
   BenchResult,
   EvalSample,
   PaperTimingRecord,
+  PassageMode,
   PerSampleRecord,
   PipelineTiming,
   QaQuestion,
@@ -45,6 +47,26 @@ import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, sk
 /** 与 src/stores/chat.ts 的 DEFAULT_PROFILE.systemPrompt 保持一致的字面值。 */
 export const DEFAULT_SYSTEM_PROMPT =
   '你是一个专业的学术论文阅读助手，帮助用户理解和分析论文内容。'
+
+/**
+ * 各臂**预期**的检索模式集合（方案 §221）。只有实际模式不在其中才算「降级」——
+ * 降级是「本该有的那一路没走上」，不是「模式名里没有某个词」。
+ *
+ * - `lexical`（A）：bm25 是它唯一的合法模式，不是降级；
+ * - `hybrid-raw`（B）：bm25+dense；
+ * - `hybrid-outline`（C）：目录可用时走 bm25+dense+outline（Task 5 才会产出，此处按方案 §221
+ *   预先声明）；目录缺失/非法/向量失败时**预声明**的回落就是 B 的 bm25+dense，同样合法；
+ * - `legacy-llm`：full / full-title-fallback。卡片在 legacy 是预期产物，缺了 dense 而走
+ *   bm25+card-lexical / bm25 都是真实降级，必须继续可见。
+ *
+ * 意外失败（原文向量失败、查询向量失败）产生的模式不在这张表里，照常计入降级。
+ */
+const EXPECTED_RETRIEVAL_MODES: Record<PassageMode, readonly string[]> = {
+  'legacy-llm': ['full', 'full-title-fallback'],
+  'lexical': ['bm25'],
+  'hybrid-raw': ['bm25+dense'],
+  'hybrid-outline': ['bm25+dense+outline', 'bm25+dense'],
+}
 
 export interface QaTaskDeps {
   buildIndex?: typeof buildPageIndex
@@ -246,6 +268,9 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
       ...treeRecordFields(treeInfo),
       // 段落索引的冷启动成本（不进入 Q，与 Q 并列报告）
       ...(passageInfo ? passageInfo.coldStart : {}),
+      // C 臂的原生目录事实（可用性/节点数/回落原因/耗时）：缺了这一行，一次目录全失败的 C 运行
+      // 在产物里与 B 逐字相同，§10.1 的「目录解析/建树/向量耗时」无从回答
+      ...(passageInfo ? outlineRecordFields(passageInfo.outline) : {}),
     })
 
     for (const question of sample.questions) {
@@ -477,16 +502,21 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   // 树诊断与检索质量指标合流进同一份 metrics，报表才能在同一行同时回答
   // 「检索有没有变好」与「树是什么样、贵不贵、失败得多不多」（§阶段 E）
   const treeAgg = summarizeTreeDiagnostics(perPaper)
-  // 段落配置：只要有一题实际走了 bm25*（单篇向量失败、查询向量失败、来源不符），
-  // 本轮检索信号就与正式对照不同源——整轮标为不可比，而不只是在 CLI 模型整体加载失败时（方案 §7/§8）
+  // 段落配置：只要有一题实际走的模式**不在本臂预期集合里**（原文向量失败、查询向量失败、
+  // 来源不符），本轮检索信号就与正式对照不同源——整轮标为不可比，而不只是在 CLI 模型
+  // 整体加载失败时（方案 §7/§8）。逐题比对本臂预期模式，A 的 bm25、B 的 bm25+dense、
+  // C 的 bm25+dense+outline / 预声明回落 bm25+dense 都合法，不会被误判为降级。
   const passageModes = args.passage ? perSample.filter(record => record.retrievalMode !== undefined) : []
-  // lexical（A 臂）本就只有词法一路：bm25 是它**预期**的模式而非降级，也本就不加载嵌入器。
-  // 把这两件事按模式区分开，A 臂才不会被误标为「向量降级」或「embedder-unavailable」而排除出对照。
-  const expectsEmbedder = (config.mode ?? 'legacy-llm') !== 'lexical'
-  const degradedQuestions = expectsEmbedder
-    ? passageModes.filter(record => record.retrievalMode!.startsWith('bm25')).length
-    : 0
+  const mode = resolvePassageMode(config)
+  const degradedQuestions = passageModes
+    .filter(record => !EXPECTED_RETRIEVAL_MODES[mode].includes(record.retrievalMode!))
+    .length
   const passageDegradedQuestionRate = passageModes.length > 0 ? degradedQuestions / passageModes.length : 0
+  // lexical（A 臂）本就只有词法一路、也本就不加载嵌入器：它永远不会拿到不可比理由。
+  // 其余臂保留两条真实失败通道，都不能因为「模式合法」而被静默吞掉：
+  // 整轮 embedder 加载失败（`args.passage.embedderUnavailable` ⇒ embedder-unavailable）与
+  // 单篇段落向量失败（`coldStartEmbedFailed === 1` ⇒ passage-retrieval-degraded）。
+  const expectsEmbedder = mode !== 'lexical'
   const passageIneligibleReason = expectsEmbedder && args.passage?.embedderUnavailable
     ? 'embedder-unavailable'
     : expectsEmbedder && (degradedQuestions > 0 || perPaper.some(record => record.coldStartEmbedFailed === 1))
