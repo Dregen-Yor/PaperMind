@@ -186,7 +186,14 @@ export function finalizeQaQuality(
  * 全文参考臂 `runFullContextQaTask` 共用同一处实现，避免 runner→runner 依赖或复写分叉。
  */
 export function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): string | undefined {
-  return pdfStudyFieldFingerprint(samples, 'pdf-study-quality-manifest-v1', sample => sample.manifestFingerprint)
+  // 该指纹在 Task 6 已作为质量协议 pin 落库；规范化 JSON 的**键名必须是 `manifestFingerprint`**，
+  // 否则同一批论文会算出不同的哈希、把跨 manifest 的结果误判为同一份。泛化时保留原键名。
+  return pdfStudyFieldFingerprint(
+    samples,
+    'pdf-study-quality-manifest-v1',
+    'manifestFingerprint',
+    sample => sample.manifestFingerprint,
+  )
 }
 
 /**
@@ -195,7 +202,8 @@ export function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): strin
  * 返回 undefined，结果 meta 因此只在实际 pin 了 PDF 身份时写这个键。
  */
 export function pdfStudyPdfFingerprint(samples: EvalSample[]): string | undefined {
-  return pdfStudyFieldFingerprint(samples, 'pdf-study-pdf-v1', sample => sample.pdfFingerprint)
+  // 新增指纹，键名自由；用 `pdfFingerprint` 与 manifest 指纹的双轴语义呼应。
+  return pdfStudyFieldFingerprint(samples, 'pdf-study-pdf-v1', 'pdfFingerprint', sample => sample.pdfFingerprint)
 }
 
 /**
@@ -203,17 +211,27 @@ export function pdfStudyPdfFingerprint(samples: EvalSample[]): string | undefine
  * 与 PDF 指纹分开，让「换了 PDF 字节」与「只换了目录解析结果」能被各自定位。
  */
 export function pdfStudyOutlineFingerprint(samples: EvalSample[]): string | undefined {
-  return pdfStudyFieldFingerprint(samples, 'pdf-study-outline-v1', sample => sample.outlineFingerprint)
+  // 新增指纹，键名自由；用 `outlineFingerprint` 与单轴语义呼应。
+  return pdfStudyFieldFingerprint(
+    samples,
+    'pdf-study-outline-v1',
+    'outlineFingerprint',
+    sample => sample.outlineFingerprint,
+  )
 }
 
 /**
  * 三份聚合指纹的共用实现：按 paperId 升序取 `[paperId, fieldValue]` 对做 SHA-256。
  * 某一篇缺该字段时**整体返回 undefined**——半数的身份 pin 比没有更误导（会让人以为
  * 某篇的 PDF 身份已钉住，实则缺失）。域名前缀让三份指纹互不串值。
+ *
+ * `fieldName` 是规范化 JSON 里的键名，**必须由调用方逐字给出**：manifest 指纹的键名
+ * 是已落库的协议契约（`manifestFingerprint`），改了哈希就变、协议静默漂移。
  */
 function pdfStudyFieldFingerprint(
   samples: EvalSample[],
   domain: string,
+  fieldName: string,
   pick: (sample: PdfStudySample) => string | undefined,
 ): string | undefined {
   const papers = new Map<string, string>()
@@ -225,7 +243,7 @@ function pdfStudyFieldFingerprint(
   }
   if (papers.size === 0) return undefined
   const canonical = [...papers.entries()]
-    .map(([paperId, value]) => ({ paperId, value }))
+    .map(([paperId, value]) => ({ paperId, [fieldName]: value }))
     .sort((a, b) => a.paperId.localeCompare(b.paperId))
   return createHash('sha256')
     .update(domain)

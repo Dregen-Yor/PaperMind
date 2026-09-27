@@ -3,10 +3,13 @@ import {
   aggregateQaQuality,
   finalizeQaQuality,
   PDF_QA_QUALITY_DEFINITION,
+  pdfStudyOutlineFingerprint,
+  pdfStudyPdfFingerprint,
+  pdfStudyQualityManifestFingerprint,
   QA_QUALITY_DEFINITION,
 } from '../metrics/qaQuality'
 import { qasperAnswerF1, qasperReference } from '../metrics/qasperQuality'
-import type { PerSampleRecord, QaQuestion } from '../types'
+import type { PerSampleRecord, PdfStudySample, QaQuestion } from '../types'
 
 const record = (
   id: string,
@@ -239,6 +242,61 @@ describe('all-question PDF study quality', () => {
       [pdfQuestion('p#0', ['cat'])],
       '   ',
     )).toThrow(/manifest fingerprint/i)
+  })
+})
+
+describe('pdf-study aggregate fingerprints', () => {
+  const pdfStudySample = (
+    paperId: string,
+    fields: { manifestFingerprint: string; pdfFingerprint?: string; outlineFingerprint?: string },
+  ): PdfStudySample => ({
+    paperId,
+    title: paperId,
+    pages: [],
+    questions: [],
+    source: 'pdf-study',
+    pdfPath: `/tmp/${paperId}.pdf`,
+    manifestFingerprint: fields.manifestFingerprint,
+    pdfFingerprint: fields.pdfFingerprint,
+    outlineFingerprint: fields.outlineFingerprint,
+    pdfOutline: [],
+  })
+
+  // 这是 Task 6 已落库的质量协议 pin：规范化 JSON 的键名必须是 `manifestFingerprint`，
+  // 域名前缀是 `pdf-study-quality-manifest-v1`。任何一个改动都会静默改变同一批论文的哈希，
+  // 让跨 manifest 的结果被误判为同一份——所以这里逐字钉死，防止再次静默漂移。
+  it('pins the manifest fingerprint value for a fixed pdf-study batch', () => {
+    const samples = [
+      pdfStudySample('pB', { manifestFingerprint: 'bbb' }),
+      pdfStudySample('pA', { manifestFingerprint: 'aaa' }),
+    ]
+    expect(pdfStudyQualityManifestFingerprint(samples))
+      .toBe('fd8acda5bbd4af574b38cdc66b600daaecd634252fe96e0c82b876bed98f2883')
+  })
+
+  it('is insensitive to input order (paperId-sorted canonicalization)', () => {
+    const forward = [
+      pdfStudySample('pA', { manifestFingerprint: 'aaa' }),
+      pdfStudySample('pB', { manifestFingerprint: 'bbb' }),
+    ]
+    const backward = [...forward].reverse()
+    expect(pdfStudyQualityManifestFingerprint(forward))
+      .toBe(pdfStudyQualityManifestFingerprint(backward))
+  })
+
+  it('keeps the three fingerprints collision-free via distinct domain prefixes and field names', () => {
+    const samples = [
+      pdfStudySample('pA', { manifestFingerprint: 'aaa', pdfFingerprint: 'aaa', outlineFingerprint: 'aaa' }),
+    ]
+    const manifest = pdfStudyQualityManifestFingerprint(samples)
+    const pdf = pdfStudyPdfFingerprint(samples)
+    const outline = pdfStudyOutlineFingerprint(samples)
+    // 同一字段值也因域名/键名不同而得到三个不同哈希——三者不可能串值。
+    expect(new Set([manifest, pdf, outline]).size).toBe(3)
+  })
+
+  it('returns undefined for a batch with no pdf-study samples', () => {
+    expect(pdfStudyQualityManifestFingerprint([])).toBeUndefined()
   })
 })
 
