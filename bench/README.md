@@ -162,7 +162,7 @@ npm run bench -- --compare bench/results/qa-outline-study-full-context-*.json be
 - **零生成不变量**：A/B/C 索引阶段 `client.complete` 调用数恒为 **0**——A 停在阶段①（无向量、不碰 embedder），B/C 停在阶段②，C 另加原生目录索引与逐节点向量。该不变量由 `bench/src/tests/passageIndexHook.test.ts`（A/B/C 各断言 `complete` 未被调用）与 `bench/src/tests/cli.test.ts` 的 sweep 级用例共同钉住。
 - **指纹**：三篇的 manifest / PDF 字节 / 目录 JSON 三份 SHA-256 均为 64 位十六进制，随结果元数据一并落盘，供跨轮追溯与「清单未变」核对。
 
-预检只打开本地 PDF、只切段与向量化、不做任何回答生成；预检出现意料外的回落或阶段缺失时，先查因再启动付费运行。
+预检只打开本地 PDF、只走本地索引步骤（切段、按臂向量化）、不做任何回答生成；预检出现意料外的回落或阶段缺失时，先查因再启动付费运行。三项中**零生成不变量与指纹写盘由上述测试钉住**，而**目录解析的页数与条数是一次性本地探针的核对结果，未入库为测试**——换 PDF 或换标注集后需重新探针确认。
 
 ## 指标速查
 
