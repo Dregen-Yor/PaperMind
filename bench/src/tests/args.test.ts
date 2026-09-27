@@ -16,6 +16,14 @@ describe('parseArgs', () => {
     expect(a.dataset).toBe('qasper')
   })
 
+  it('解析 --dataset outline-study', () => {
+    expect(parseArgs(['--task', 'qa', '--dataset', 'outline-study']).dataset).toBe('outline-study')
+  })
+
+  it('--dataset all 仍可解析（outline-study 不属于 all）', () => {
+    expect(parseArgs(['--dataset', 'all']).dataset).toBe('all')
+  })
+
   it('解析 --limit 为数字', () => {
     expect(parseArgs(['--limit', '20']).limit).toBe(20)
   })
@@ -59,7 +67,13 @@ describe('parseArgs', () => {
   })
 
   it('--dataset 取值非法时抛错', () => {
-    expect(() => parseArgs(['--dataset', 'nope'])).toThrow(/qasper/)
+    const message = (() => {
+      try { parseArgs(['--dataset', 'nope']) } catch (error) { return (error as Error).message }
+      return ''
+    })()
+    expect(message).toMatch(/qasper/)
+    expect(message).toMatch(/outline-study/)
+    expect(message).toMatch(/all/)
   })
 
   it('--limit 非正整数时抛错', () => {

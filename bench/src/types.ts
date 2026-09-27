@@ -1,8 +1,9 @@
 import type { IndexOptions } from '../../src/utils/pageIndex'
 import type { RagOptions } from '../../src/utils/ragPipeline'
+import type { PdfOutlineEntry, PdfOutlineResult } from '../../src/utils/pdfOutline'
 
 /** 数据来源，用于报表中分开统计语义分块指标 */
-export type SampleSource = 'qasper' | 'smoke'
+export type SampleSource = 'qasper' | 'smoke' | 'pdf-study'
 
 /** 失败阶段，用于区分「网络问题」与「代码问题」 */
 export type SampleStage = 'load' | 'index' | 'retrieve' | 'generate' | 'stream' | 'summarize' | 'judge'
@@ -19,7 +20,7 @@ export interface QaQuestion {
   evidenceMapping?: 'mapped' | 'ambiguous' | 'unmapped'
   /** Versioned references used only by the all-question QASPER quality metric. */
   qualityAnswers?: string[]
-  qualityDefinition?: 'qasper-all-questions-v1'
+  qualityDefinition?: 'qasper-all-questions-v1' | 'pdf-qa-all-questions-v1'
 }
 
 /** 一篇论文及其挂载的问答/摘要标注。 */
@@ -37,6 +38,25 @@ export interface EvalSample {
   sectionPages?: number[][]
   /** 数据来源，用于报表中分开统计语义分块指标 */
   source: SampleSource
+}
+
+/**
+ * 冻结的 PDF 大纲研究集样本（`--dataset outline-study`）。
+ *
+ * 下面三个字段是**在 `EvalSample` 之上追加的运行期元数据**。正因为它们只增不减，
+ * 才保证不会泄漏进结果 JSON：所有 runner 与聚合都只接收 `EvalSample[]` / `QaQuestion[]`，
+ * 且 `PerSampleRecord` 是封闭字段集，路径与目录树没有任何路径能到达一条被序列化的行。
+ * 冷首问需要重新打开原始字节，故 `pdfPath` 只在内存里的样本对象上存活。
+ */
+export interface PdfStudySample extends EvalSample {
+  /** 运行期元数据：冷首问需要重新打开原始字节。绝不写进结果 JSON。 */
+  readonly pdfPath: string
+  /** PDF 字节 + 页文本 + 标注 + 目录 JSON 的 SHA-256 */
+  readonly manifestFingerprint: string
+  /** 解析后的原生目录；缺失或非法时为空数组 */
+  readonly pdfOutline: PdfOutlineEntry[]
+  /** 目录解析结果（含失败原因与原始条目数）；未读取时为 undefined */
+  readonly pdfOutlineResult?: PdfOutlineResult
 }
 
 /**
@@ -360,8 +380,8 @@ export interface BenchResult {
     endpointIdentity?: string
     generationSettingsHash?: string
     executionEnvironmentFingerprint?: string
-    /** Versioned all-question QASPER quality provenance. */
-    qaQualityDefinition?: 'qasper-all-questions-v1'
+    /** Versioned all-question quality provenance. */
+    qaQualityDefinition?: 'qasper-all-questions-v1' | 'pdf-qa-all-questions-v1'
     qaExpectedQuestionIds?: string[]
   }
   metrics: Record<string, number>

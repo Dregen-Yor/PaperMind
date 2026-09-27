@@ -12,6 +12,7 @@ import { loadConfigs, configLabel } from './config'
 import { createLlmClient, resolveEnvConfig } from './llmClient'
 import { loadQasperDataset } from './datasets/qasper'
 import { loadSmokeDataset } from './datasets/smoke'
+import { loadOutlineStudyDataset } from './datasets/outlineStudy'
 import { runQaTask, DEFAULT_SYSTEM_PROMPT, type QaTaskArgs } from './runner/qa'
 import { runFullContextQaTask } from './runner/fullContextQa'
 import { runTraditionalRagQaTask } from './runner/traditionalRagQa'
@@ -63,8 +64,12 @@ const RESULTS_DIR = () => benchPath(import.meta.url, '../results/')
 // 受控物化器与检索侧加载的是同一份 BGE-M3 词表
 const MODEL_CACHE_DIR = () => benchPath(import.meta.url, '../cache/models/')
 
-/** QASPER 参考答案是英文而生产 prompt 是中文，不强制英文作答则 answerF1 恒≈0（Task 10 裁定 3） */
-const QASPER_LANGUAGE_INSTRUCTION = '请依据参考内容，用论文原文语言（英文）作答。'
+/**
+ * 参考答案是英文而生产 prompt 是中文，不强制英文作答则 answerF1 恒≈0（Task 10 裁定 3）。
+ * QASPER 与 PDF 大纲研究集（其 PDF 与 12 条参考作答均为英文）共用同一份指令；
+ * 文本必须逐字稳定——它进入 systemPromptHash，改动会让既有强基线断点签名整体失效。
+ */
+const ENGLISH_ANSWER_INSTRUCTION = '请依据参考内容，用论文原文语言（英文）作答。'
 const retryLog = (event: { attempt: number; retryAttempts: number; delayMs: number; error: string }) => {
   process.stderr.write(
     `[LLM 重试 ${event.attempt}/${event.retryAttempts}] ${event.error}; ` +
@@ -84,10 +89,13 @@ async function loadDatasets(which: string): Promise<EvalSample[]> {
   const out: EvalSample[] = []
   if (which === 'qasper' || which === 'all') out.push(...await loadQasperDataset())
   if (which === 'smoke' || which === 'all') out.push(...await loadSmokeDataset())
+  // outline-study 有独立的论文/页身份，绝不并进 `all`，也绝不与其他来源混跑一轮
+  if (which === 'outline-study') out.push(...await loadOutlineStudyDataset())
   if (out.length === 0) {
     throw new Error(
       `数据集为空（--dataset ${which}）。QASPER 需先运行 ` +
-      `npx tsx bench/datasets/qasper/fetch.ts；冒烟集见 bench/datasets/smoke/README.md`,
+      `npx tsx bench/datasets/qasper/fetch.ts；冒烟集见 bench/datasets/smoke/README.md；` +
+      `PDF 大纲研究集见 bench/minibatch/annotations.json`,
     )
   }
   return out
@@ -294,7 +302,7 @@ for (const config of configs) {
     // 时无法一次传入，故按 source 分组各跑一次、结果分别落盘（文件名带 source 后缀）
     for (const [source, group] of groupBySource(samples)) {
       const env = resolveEnvConfig(process.env)
-      const promptLanguage = source === 'qasper' ? QASPER_LANGUAGE_INSTRUCTION : undefined
+      const promptLanguage = source === 'qasper' || source === 'pdf-study' ? ENGLISH_ANSWER_INSTRUCTION : undefined
       const answerSystemPrompt = composeBaseSystemPrompt(DEFAULT_SYSTEM_PROMPT, promptLanguage)
       // Speed needs the same dataset identity even in full-context mode. Ordinary full-context
       // keeps its prior path and does not build an otherwise-unused retrieval contract.

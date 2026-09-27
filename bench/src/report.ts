@@ -1,4 +1,4 @@
-import type { BenchResult } from './types'
+import type { BenchResult, SampleSource } from './types'
 import { REFUSAL_PATTERN_VERSION } from './metrics/answerF1'
 import { aggregate } from './metrics/aggregate'
 import { MRR_DEFINITION } from './evaluationContract'
@@ -12,6 +12,16 @@ export const PRIMARY_METRIC: Record<'qa' | 'summary', string> = {
 
 /** Context Page MRR 的展示名（§9）：以口径名出现，避免与 legacy `mrr` 混读。 */
 const CONTEXT_PAGE_MRR_LABEL = `MRR (${MRR_DEFINITION})`
+
+/**
+ * 数据来源展示名。用 `Record<SampleSource, string>` 而非二元三目：
+ * 新增来源时编译器强制补标签，否则会被静默错标成冒烟集。
+ */
+const SOURCE_LABELS: Record<SampleSource, string> = {
+  qasper: 'QASPER（标题注入伪页）',
+  smoke: 'smoke（真实 PDF）',
+  'pdf-study': 'pdf-study（人工标注真实 PDF）',
+}
 
 /**
  * 四个受控检索指标（含命中率的改名口径）。横向门禁不通过时它们的差值必须为「—」：
@@ -192,7 +202,7 @@ export function renderReport(
         const records = result.perSample.filter(record => record.source === source)
         if (records.length === 0) continue
         const sourceMetrics = renameSourceRates(aggregate(records))
-        lines.push(`| ${result.config.name} | ${source === 'qasper' ? 'QASPER（标题注入伪页）' : 'smoke（真实 PDF）'} | ${records.length} | ${sourceMetrics.evidenceRecall === undefined ? '—' : fmt(sourceMetrics.evidenceRecall)} | ${sourceMetrics.evidenceHitRate === undefined ? '—' : fmt(sourceMetrics.evidenceHitRate)} |`)
+        lines.push(`| ${result.config.name} | ${SOURCE_LABELS[source]} | ${records.length} | ${sourceMetrics.evidenceRecall === undefined ? '—' : fmt(sourceMetrics.evidenceRecall)} | ${sourceMetrics.evidenceHitRate === undefined ? '—' : fmt(sourceMetrics.evidenceHitRate)} |`)
       }
     }
     lines.push('')

@@ -1,6 +1,6 @@
 export interface BenchArgs {
   task: 'qa' | 'summary' | 'all'
-  dataset: 'qasper' | 'smoke' | 'all'
+  dataset: 'qasper' | 'smoke' | 'outline-study' | 'all'
   config: string
   limit?: number
   judge: boolean
@@ -13,7 +13,7 @@ export interface BenchArgs {
 }
 
 const TASKS = ['qa', 'summary', 'all'] as const
-const DATASETS = ['qasper', 'smoke', 'all'] as const
+const DATASETS = ['qasper', 'smoke', 'outline-study', 'all'] as const
 
 /**
  * 结果文件名时间戳部分：ISO 时间转文件名安全格式。
@@ -55,7 +55,7 @@ export function parseArgs(argv: string[]): BenchArgs {
       case '--dataset': {
         const v = argv[++i]
         if (!DATASETS.includes(v as never)) {
-          throw new Error(`--dataset 取值非法：${v}（合法值：qasper / smoke / all）`)
+          throw new Error(`--dataset 取值非法：${v}（合法值：qasper / smoke / outline-study / all）`)
         }
         args.dataset = v as BenchArgs['dataset']
         break

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { aggregateQaQuality, finalizeQaQuality, QA_QUALITY_DEFINITION } from '../metrics/qaQuality'
+import {
+  aggregateQaQuality,
+  finalizeQaQuality,
+  PDF_QA_QUALITY_DEFINITION,
+  QA_QUALITY_DEFINITION,
+} from '../metrics/qaQuality'
 import { qasperAnswerF1, qasperReference } from '../metrics/qasperQuality'
 import type { PerSampleRecord, QaQuestion } from '../types'
 
@@ -138,5 +143,80 @@ describe('all-question QA quality aggregation', () => {
     expect(() => finalizeQaQuality([record('p#0', 'failed')], [{ ...question('p#0', ['cat']), qualityDefinition: undefined }])).toThrow(/definition/i)
     expect(() => finalizeQaQuality([record('p#0', 'failed')], [question('p#0', [])])).toThrow(/reference/i)
     expect(() => finalizeQaQuality([record('p#0', 'failed')], [question('p#0', ['cat']), question('p#0', ['dog'])])).toThrow(/duplicate/i)
+  })
+})
+
+describe('all-question PDF study quality', () => {
+  const pdfRecord = (
+    id: string,
+    generationStatus: PerSampleRecord['generationStatus'],
+    score?: number,
+  ): PerSampleRecord => ({
+    id,
+    paperId: 'p',
+    source: 'pdf-study',
+    metrics: score === undefined ? {} : { answerF1AllQuestions: score },
+    generationStatus,
+  })
+
+  const pdfQuestion = (id: string, refs: string[]): QaQuestion => ({
+    id,
+    question: `${id}?`,
+    answers: refs,
+    evidencePages: [],
+    unanswerable: false,
+    qualityAnswers: refs,
+    qualityDefinition: PDF_QA_QUALITY_DEFINITION,
+  })
+
+  it('scores a completed pdf-study answer with the same token F1 and emits its own definition', () => {
+    const records = [{ ...pdfRecord('p#0', 'completed'), answer: 'The cat.' }]
+    const result = finalizeQaQuality(records, [pdfQuestion('p#0', ['cat'])])
+    expect(records[0]).toMatchObject({ referenceAnswers: ['cat'], metrics: { answerF1AllQuestions: 1 } })
+    expect(result.metrics).toEqual({
+      answerF1AllQuestions: 1,
+      answerF1AllQuestionsSampleCount: 1,
+      qaCompletionRate: 1,
+    })
+    expect(result.meta.qaQualityDefinition).toBe(PDF_QA_QUALITY_DEFINITION)
+  })
+
+  it('keeps failed and skipped pdf-study rows in the fixed denominator at zero', () => {
+    const records = [
+      { ...pdfRecord('p#0', 'completed'), answer: 'cat' },
+      pdfRecord('p#1', 'failed'),
+      pdfRecord('p#2', 'skipped'),
+    ]
+    const result = finalizeQaQuality(records, [
+      pdfQuestion('p#0', ['cat']),
+      pdfQuestion('p#1', ['dog']),
+      pdfQuestion('p#2', ['eel']),
+    ])
+    expect(result.metrics).toEqual({
+      answerF1AllQuestions: 1 / 3,
+      answerF1AllQuestionsSampleCount: 3,
+      qaCompletionRate: 1 / 3,
+    })
+  })
+
+  it('rejects a pdf-study question carrying the wrong definition', () => {
+    expect(() => finalizeQaQuality(
+      [pdfRecord('p#0', 'failed')],
+      [{ ...pdfQuestion('p#0', ['cat']), qualityDefinition: QA_QUALITY_DEFINITION }],
+    )).toThrow()
+  })
+
+  it('rejects a question whose definition is not a known one', () => {
+    expect(() => finalizeQaQuality(
+      [pdfRecord('p#0', 'failed')],
+      [{ ...pdfQuestion('p#0', ['cat']), qualityDefinition: 'made-up-v1' as never }],
+    )).toThrow(/definition/i)
+  })
+
+  it('rejects a record whose source does not match the definition source', () => {
+    expect(() => finalizeQaQuality(
+      [record('p#0', 'failed')],  // source: qasper, definition expects pdf-study
+      [pdfQuestion('p#0', ['cat'])],
+    )).toThrow(/source/i)
   })
 })
