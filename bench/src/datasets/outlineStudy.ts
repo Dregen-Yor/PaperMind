@@ -113,9 +113,9 @@ function fingerprintOutline(outline: unknown): string {
  * 加载冻结的 PDF 大纲研究集。每篇论文只读一次字节、只 base64 一次、只解析一次
  * （方案 §7：A/B/C 各自只打开 PDF 一次，绝不按臂重复解析）。
  *
- * `deps.extract` 默认 `extractPdfDocument`，生产路径下会**读取原生目录**
- * （`readOutline` 缺省 true）；缺失或非法目录返回空数组而非抛错，只有 PDF/标注本身
- * 的问题才会让加载失败。
+ * `deps.extract` 默认 `extractPdfDocument`，其缺省 `readOutline: true` 会**读取原生目录**
+ * （注意：这不是 PaperMind 产品默认路径——产品走 `extractPages` 且显式传 `readOutline: false`）；
+ * 缺失或非法目录返回空数组而非抛错，只有 PDF/标注本身的问题才会让加载失败。
  */
 export async function loadOutlineStudyDataset(
   dir: string = DEFAULT_DIR(),

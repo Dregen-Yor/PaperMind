@@ -12,7 +12,7 @@
  * 吐固定 token；BGE-M3 tokenizer 用空白切词的确定性替身。
  */
 import { describe, expect, it, vi } from 'vitest'
-import type { BenchResult, PdfStudySample } from '../types'
+import type { BenchResult, ColdFirstQueryResult, PdfStudySample } from '../types'
 import type { PdfOutlineEntry } from '../../../src/utils/pdfOutline'
 import type { Embedder } from '../../../src/utils/embedder'
 import type { StreamingLlmClient } from '../llmClient'
@@ -260,10 +260,56 @@ describe('sweep 逐臂回调与退出码口径（Issue 1/2 修复）', () => {
   })
 })
 
+describe('sweep 冷首问本地模型初始化计时（Fix 2）', () => {
+  it('冷首问各自懒加载一份全新 embedder：localModelInitMs 记真实初始化成本而非复用热臂实例', async () => {
+    let clock = 0
+    // 注入的工厂每被调用一次即模拟 100ms 真实模型初始化成本
+    const initColdEmbedder = vi.fn(async () => {
+      clock += 100
+      return fakeEmbedder()
+    })
+    const result = await runProductSweep({
+      ...sweepArgs({ initColdEmbedder }),
+      now: () => (clock += 1),
+    })
+
+    // 只有 hybrid 臂加载稠密模型：hybrid-raw / hybrid-outline × 2 策略，各轮首篇付一次真实加载
+    expect(initColdEmbedder).toHaveBeenCalledTimes(4)
+
+    const hybridColds = result.cold.filter(cold => cold.mode !== 'lexical')
+    expect(hybridColds).toHaveLength(4)
+    for (const cold of hybridColds) {
+      // 首篇计入注入的初始化成本（>= 100ms），而不是复用热臂已预热实例的 ~0
+      expect(cold.records[0].localModelInitMs).toBeGreaterThanOrEqual(100)
+      // 后续篇命中本轮已加载实例，不再重复付加载成本
+      expect(cold.records.slice(1).every(record => record.localModelInitMs < 100)).toBe(true)
+    }
+  })
+})
+
 describe('hasHarnessFailure（sweep 与主路径共用的退出码判定）', () => {
   const counts = (completed: number, total: number): BenchResult => ({
     task: 'qa', config: { name: 'x' }, metrics: {}, perSample: [], errors: [],
     meta: { model: 'm', timestamp: 't', gitSha: 's', completed, total },
+  })
+
+  /** 冷首问结果 fixture：只有 completionStatus 序列是可变量，其余字段取稳定值。 */
+  const cold = (statuses: Array<'completed' | 'failed' | 'skipped'>): ColdFirstQueryResult => ({
+    definition: 'cold-first-query-v1',
+    mode: 'hybrid-raw',
+    strategy: 'ready-before-query',
+    records: statuses.map((completionStatus, i) => ({
+      id: `p${i}#0`,
+      paperId: `p${i}`,
+      strategy: 'ready-before-query',
+      inputKind: 'pdf-bytes',
+      pdfLoadMs: 1,
+      localModelInitMs: 1,
+      lexicalReadyMs: 1,
+      actualPassageStage: 1,
+      completionStatus,
+    })),
+    metrics: {},
   })
 
   it('整轮零完成 → true（exit 1）；有任何完成 → false（exit 0）', () => {
@@ -273,6 +319,16 @@ describe('hasHarnessFailure（sweep 与主路径共用的退出码判定）', ()
     expect(hasHarnessFailure([counts(0, 12), counts(12, 12)])).toBe(true)
     expect(hasHarnessFailure([counts(12, 12), counts(12, 12)])).toBe(false)
     expect(hasHarnessFailure([])).toBe(false)
+  })
+
+  it('冷首问整轮零完成 → true；部分完成 → false；空记录 → false', () => {
+    // 全部失败 / 全部跳过 = 零完成，判为 harness 故障（exit 1）
+    expect(hasHarnessFailure([cold(['failed', 'failed']), cold(['skipped', 'failed'])])).toBe(true)
+    // 有任何一篇完成即部分完成，是正常数据点（exit 0）
+    expect(hasHarnessFailure([cold(['completed', 'failed']), cold(['completed'])])).toBe(false)
+    expect(hasHarnessFailure([cold([])])).toBe(false)
+    // 热冷混合：任一零完成即整轮失败
+    expect(hasHarnessFailure([counts(0, 12), cold(['completed'])])).toBe(true)
   })
 })
 

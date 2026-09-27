@@ -56,6 +56,12 @@ export interface ProductSweepArgs {
   client: StreamingLlmClient
   /** B/C 共用的段落 embedder；lexical 臂不使用（undefined 时 B/C 会按 embedder-unavailable 降级）。 */
   embedder: Embedder | undefined
+  /**
+   * 冷首问在 t0 之后懒加载一份**全新**本地稠密模型的工厂（每次调用返回未预热实例）。
+   * 缺省时冷阶段退回复用热臂已预热的 `embedder`（旧行为）——这会漏记真实的模型初始化成本，
+   * 只在确实没有冷启动测量需求时省略；CLI 的 `--sweep` 始终注入真实工厂。
+   */
+  initColdEmbedder?: () => Promise<Embedder | undefined>
   /** 本次运行的 query-timeline-v2 契约；datasetFingerprint 必须与 samples 的评测契约一致。 */
   speedContract: SpeedRunContract
   /** 冷首问在 t0 之后重新打开原始 PDF 字节并抽取页文本。 */
@@ -127,9 +133,15 @@ export function createProductPassageHook(args: ProductPassageHookArgs): PassageI
 /**
  * harness 故障判定（与 CLI 主路径同一口径）：有任何一份结果 `total>0` 却 `completed===0`
  * （典型为 API key 配错）即整轮无效。单样本失败是正常数据点，不算 harness 故障。
+ * 冷首问结果按同一定义折算：`records.length>0` 却没有任何一条 `completionStatus === 'completed'`
+ * （整轮全部失败）才算 harness 故障——部分完成仍算正常数据点。
  */
-export function hasHarnessFailure(results: BenchResult[]): boolean {
-  return results.some(result => result.meta.total > 0 && result.meta.completed === 0)
+export function hasHarnessFailure(results: Array<BenchResult | ColdFirstQueryResult>): boolean {
+  return results.some(result =>
+    'meta' in result
+      ? result.meta.total > 0 && result.meta.completed === 0
+      : result.records.length > 0 && result.records.every(record => record.completionStatus !== 'completed'),
+  )
 }
 
 /** sweep 结果的 meta 定格（Issue 2）：跳过读缓存；非 full-context 一律标 rag。 */
@@ -156,6 +168,28 @@ function readProductQConfigs(): { qDefault: QConfig; qSpeed: QConfig } {
   return {
     qDefault: readQSource(benchPath(import.meta.url, '../../configs/scoring/q-score.json')).data as QConfig,
     qSpeed: readQSource(benchPath(import.meta.url, '../../configs/scoring/q-speed-first.json')).data as QConfig,
+  }
+}
+
+/**
+ * 冷首问的本地模型懒加载（与 `--cold-first-query` 独立路径的 `initLocalModel` 同口径）：
+ * 每轮冷首问各自持有一个「已加载」标记——首篇在 t0 之后付真实加载成本，后续篇命中本轮实例。
+ * lexical（A）臂本就不加载稠密模型（返回 undefined 是设计，不是降级）；未注入 `initColdEmbedder`
+ * 时退回热臂实例（旧行为，供无需冷启动测量的调用方保持兼容）。
+ */
+function makeColdEmbedderLoader(
+  mode: PassageMode,
+  initColdEmbedder: (() => Promise<Embedder | undefined>) | undefined,
+  fallbackEmbedder: Embedder | undefined,
+): (sample: PdfStudySample) => Promise<Embedder | undefined> {
+  let loaded = false
+  let embedder: Embedder | undefined
+  return async () => {
+    if (loaded) return embedder
+    loaded = true
+    if (mode === 'lexical') return undefined
+    embedder = initColdEmbedder ? await initColdEmbedder() : fallbackEmbedder
+    return embedder
   }
 }
 
@@ -265,7 +299,7 @@ export async function runProductSweep(args: ProductSweepArgs): Promise<ProductSw
         systemPrompt: answerSystemPrompt,
         materialize,
         readPdf: args.readPdf,
-        initLocalModel: async () => (mode === 'lexical' ? undefined : args.embedder),
+        initLocalModel: makeColdEmbedderLoader(mode, args.initColdEmbedder, args.embedder),
         createHook: embedder => createHook(paperConfig, mode, embedder),
         countTokens,
         contextBudgetTokens: args.contextBudgetTokens,

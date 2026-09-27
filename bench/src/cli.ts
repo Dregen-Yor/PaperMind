@@ -326,7 +326,8 @@ try {
 }
 writeBenchmarkPathLine(process.stdout.write.bind(process.stdout), '缓存目录：', cacheDir, { speed: args.speed })
 
-// --cold-first-query 是独立路径：只测冷首问、不跑 QA/摘要，写独立结果文件后退出
+// --cold-first-query 是独立路径：只测冷首问、不跑 QA/摘要，写独立结果文件后退出。
+// 退出码与 QA/sweep 同一口径（hasHarnessFailure）：整轮零完成（典型为 API key 配错）→ exit 1
 if (args.coldFirstQuery) {
   if (args.dataset !== 'outline-study') {
     throw new Error('--cold-first-query 仅支持 --dataset outline-study（冷首问需要重新打开原始 PDF 字节）')
@@ -351,7 +352,7 @@ if (args.coldFirstQuery) {
   }
   for (const result of coldResults) writeColdResult(result)
   process.stdout.write(renderColdFirstQueryReport(coldResults) + '\n')
-  process.exit(0)
+  process.exit(hasHarnessFailure(coldResults) ? 1 : 0)
 }
 
 process.stdout.write(
@@ -506,6 +507,25 @@ if (args.sweep) {
     }
   }
 
+  // 冷首问必须在 t0 之后**懒加载一份全新 embedder**（首篇付真实加载成本），不得复用热臂已预热的
+  // sweepEmbedder——否则冷表的「本地模型」列恒为 ~0，与 --cold-first-query 独立路径口径不一致。
+  const initColdEmbedder = async (): Promise<Embedder | undefined> => {
+    if (!embedderParams) return undefined
+    try {
+      applyHfEndpoint(await import('@huggingface/transformers'))
+      return await createTransformersEmbedder({
+        model: embedderParams.model,
+        revision: embedderParams.revision,
+        dtype: embedderParams.dtype,
+        dim: embedderParams.dim,
+        cacheDir: MODEL_CACHE_DIR(),
+      })
+    } catch (error) {
+      console.warn(`向量模型加载失败，冷首问降级为 bm25*：${errorMessage(error)}`)
+      return undefined
+    }
+  }
+
   const readPdf = async (sample: PdfStudySample): Promise<string[]> => {
     const bytes = await readFile(sample.pdfPath)
     return (await extractPdfDocument(bytes.toString('base64'), { readOutline: false })).pages
@@ -540,6 +560,7 @@ if (args.sweep) {
       contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
       client,
       embedder: sweepEmbedder,
+      initColdEmbedder,
       speedContract: speedPolicy.contract,
       readPdf,
       onHot,
@@ -556,8 +577,9 @@ if (args.sweep) {
   process.stdout.write(finalizeProductSweep(sweepHot, sweepCold).report)
 
   // 与主路径同一 harness 故障口径：整轮零完成（典型为 API key 配错）→ exit 1；
+  // 冷半边整轮零完成同样视为 harness 故障（hasHarnessFailure 一并判定冷记录）。
   // 某臂抛错同样视为 harness 故障，退出 1。单样本失败是正常数据点，不算。
-  process.exit(sweepFailure !== undefined || hasHarnessFailure(sweepHot) ? 1 : 0)
+  process.exit(sweepFailure !== undefined || hasHarnessFailure([...sweepHot, ...sweepCold]) ? 1 : 0)
 }
 
 for (const config of configs) {
