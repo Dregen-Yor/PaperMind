@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { extractPdfDocument, type ExtractedPdfDocument } from '../../../src/utils/pdfDocument'
 import { PDF_QA_QUALITY_DEFINITION } from '../metrics/qaQuality'
@@ -20,6 +20,29 @@ export interface OutlineStudyAnnotation {
 
 export interface OutlineStudyDeps {
   extract?: (base64: string) => Promise<ExtractedPdfDocument>
+}
+
+/**
+ * 本地是否存在可用的完整 fixture：`annotations.json` 存在且其中每篇论文引用的 PDF 都在。
+ * 只有 `annotations.json` 入库，PDF 字节刻意不入库（体积大、且属「不得提交」清单），
+ * 故全新 clone 上应为 false——依赖真实 PDF 的用例据此跳过而非报错（仓库 hermeticity 约定）。
+ * 自建临时 fixture 的用例不走这里，永远无条件运行。
+ */
+export function hasOutlineStudyFixture(dir: string = DEFAULT_DIR()): boolean {
+  const annotationsPath = join(dir, 'annotations.json')
+  if (!existsSync(annotationsPath)) return false
+  let annotations: OutlineStudyAnnotation[]
+  try {
+    annotations = JSON.parse(readFileSync(annotationsPath, 'utf-8')) as OutlineStudyAnnotation[]
+  } catch {
+    return false
+  }
+  if (!Array.isArray(annotations) || annotations.length === 0) return false
+  return annotations.every(ann =>
+    ann !== null && typeof ann === 'object'
+    && typeof ann.file === 'string'
+    && !ann.file.includes('/') && !ann.file.includes('\\') && !ann.file.includes('..')
+    && existsSync(join(dir, ann.file)))
 }
 
 /**

@@ -43,9 +43,15 @@ models/
 # Benchmark 产物
 bench/cache/
 bench/results/
-bench/minibatch/
 papermind-speed-demo*.json
 bench/datasets/qasper/*.jsonl
 bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/semantic-headings.pdf
+
+# PDF 大纲研究集：只入库手写标注与说明，PDF 字节（体积大、不得提交）一律忽略。
+# 用 `bench/minibatch/*` 而非 `bench/minibatch/`：后者会连目录一并排除，导致 negate
+# 只能靠 `!bench/minibatch/` 整体放行（那样 5 个 PDF 都会变成可提交）。
+bench/minibatch/*
+!bench/minibatch/annotations.json
+!bench/minibatch/README.md
