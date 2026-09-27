@@ -156,6 +156,14 @@ npm run bench -- --compare bench/results/qa-outline-study-full-context-*.json be
 
 **pilot 口径与规模**：这 3 篇 / 12 题是**可启动的产品 pilot**，不足以证明普遍优势。单轮逻辑请求数（不含重试）为：热 A/B/C/R 各 12 题 = **48 个回答请求**；冷首问每篇固定首题，3 臂 × 2 策略 × 3 篇 = **18 个请求**。n=3 篇 PDF 的 P95 只是 3 个观测的分位数，**不得据此宣称稳定长尾收益**——趋势确认需按方案复跑并扩大到预冻结的真实 PDF 标注集（覆盖有/无目录、长短论文）。
 
+**启动前离线预检（Task 9）**：正式跑 pilot 前，先在一次**不发起任何回答模型请求**的离线预检里，用**本地假 embedder**（确定性向量 + 计数器）与**零生成计数器**驱动真实索引路径（`extractPdfDocument` → `resolvePdfOutline`，以及 `createProductPassageHook` 装配的 A/B/C hook），核对三件事：
+
+- **目录解析**：`01-method-attention-is-all-you-need.pdf` 15 页 / 22 条目录全部解析成功（7 个顶层根）；`02-theory-deep-sets.pdf` 29 页 / 35 条全部解析成功（14 个顶层根）；`03-experiments-bert.pdf` 16 页**无原生目录**（`missing-outline`）。C 臂因此预期 `outlineAvailableCount=2` / `outlineFallbackCount=1`——BERT 那篇按 B 的 `bm25+dense` 回落并留在全 PDF 分母。
+- **零生成不变量**：A/B/C 索引阶段 `client.complete` 调用数恒为 **0**——A 停在阶段①（无向量、不碰 embedder），B/C 停在阶段②，C 另加原生目录索引与逐节点向量。该不变量由 `bench/src/tests/passageIndexHook.test.ts`（A/B/C 各断言 `complete` 未被调用）与 `bench/src/tests/cli.test.ts` 的 sweep 级用例共同钉住。
+- **指纹**：三篇的 manifest / PDF 字节 / 目录 JSON 三份 SHA-256 均为 64 位十六进制，随结果元数据一并落盘，供跨轮追溯与「清单未变」核对。
+
+预检只打开本地 PDF、只切段与向量化、不做任何回答生成；预检出现意料外的回落或阶段缺失时，先查因再启动付费运行。
+
 ## 指标速查
 
 **检索** —— `contextPageMrr`、`evidenceRecall`、`evidenceHitRate`、`contextPrecision`、`contextTokens`，以及分母计数 `contextPageMrrSampleCount` / `contextPageMrrEligibleCount`
