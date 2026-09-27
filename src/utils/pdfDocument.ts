@@ -1,8 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { resolvePdfOutline, type PdfDestResolver, type PdfJsOutlineEntry, type PdfOutlineEntry, type PdfOutlineResult } from './pdfOutline'
 
-export type { PdfOutlineResult } from './pdfOutline'
-
 // Worker setup stays here so this module can load a document on its own.
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
 
