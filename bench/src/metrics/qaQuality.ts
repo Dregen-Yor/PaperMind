@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { EvalSample, PerSampleRecord, QaQuestion, SampleSource } from '../types'
+import type { EvalSample, PdfStudySample, PerSampleRecord, QaQuestion, SampleSource } from '../types'
 import { isPdfStudySample } from '../types'
 import { executedQuestions } from '../evaluationContract'
 import { qasperAnswerF1 } from './qasperQuality'
@@ -186,16 +186,49 @@ export function finalizeQaQuality(
  * 全文参考臂 `runFullContextQaTask` 共用同一处实现，避免 runner→runner 依赖或复写分叉。
  */
 export function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): string | undefined {
+  return pdfStudyFieldFingerprint(samples, 'pdf-study-quality-manifest-v1', sample => sample.manifestFingerprint)
+}
+
+/**
+ * pdf-study 批次的 PDF 字节聚合指纹（Task 8）：与 manifest 指纹同一「按 paperId 升序、
+ * 逐篇取值」的口径，只覆盖原始 PDF 字节单轴。没有 pdf-study 样本（或样本缺该字段）时
+ * 返回 undefined，结果 meta 因此只在实际 pin 了 PDF 身份时写这个键。
+ */
+export function pdfStudyPdfFingerprint(samples: EvalSample[]): string | undefined {
+  return pdfStudyFieldFingerprint(samples, 'pdf-study-pdf-v1', sample => sample.pdfFingerprint)
+}
+
+/**
+ * pdf-study 批次的目录 JSON 聚合指纹（Task 8）：口径同上，覆盖目录树单轴。
+ * 与 PDF 指纹分开，让「换了 PDF 字节」与「只换了目录解析结果」能被各自定位。
+ */
+export function pdfStudyOutlineFingerprint(samples: EvalSample[]): string | undefined {
+  return pdfStudyFieldFingerprint(samples, 'pdf-study-outline-v1', sample => sample.outlineFingerprint)
+}
+
+/**
+ * 三份聚合指纹的共用实现：按 paperId 升序取 `[paperId, fieldValue]` 对做 SHA-256。
+ * 某一篇缺该字段时**整体返回 undefined**——半数的身份 pin 比没有更误导（会让人以为
+ * 某篇的 PDF 身份已钉住，实则缺失）。域名前缀让三份指纹互不串值。
+ */
+function pdfStudyFieldFingerprint(
+  samples: EvalSample[],
+  domain: string,
+  pick: (sample: PdfStudySample) => string | undefined,
+): string | undefined {
   const papers = new Map<string, string>()
   for (const sample of samples) {
-    if (isPdfStudySample(sample)) papers.set(sample.paperId, sample.manifestFingerprint)
+    if (!isPdfStudySample(sample)) continue
+    const value = pick(sample)
+    if (value === undefined) return undefined
+    papers.set(sample.paperId, value)
   }
   if (papers.size === 0) return undefined
   const canonical = [...papers.entries()]
-    .map(([paperId, manifestFingerprint]) => ({ paperId, manifestFingerprint }))
+    .map(([paperId, value]) => ({ paperId, value }))
     .sort((a, b) => a.paperId.localeCompare(b.paperId))
   return createHash('sha256')
-    .update('pdf-study-quality-manifest-v1')
+    .update(domain)
     .update('\0')
     .update(JSON.stringify(canonical))
     .digest('hex')
@@ -215,13 +248,19 @@ export function pdfStudyQualityManifestFingerprint(samples: EvalSample[]): strin
 export function selectQaQualityBatch(
   samples: EvalSample[],
   limit?: number,
-): { qualityQuestions: QaQuestion[]; qualityManifestFingerprint?: string } {
+): {
+  qualityQuestions: QaQuestion[]
+  qualityManifestFingerprint?: string
+  qualityPdfFingerprint?: string
+  qualityOutlineFingerprint?: string
+} {
   const qualityExecuted = executedQuestions(samples, limit)
     .filter(({ question }) => question.qualityDefinition !== undefined)
+  const qualitySamples = qualityExecuted.map(({ sample }) => sample)
   return {
     qualityQuestions: qualityExecuted.map(({ question }) => question),
-    qualityManifestFingerprint: pdfStudyQualityManifestFingerprint(
-      qualityExecuted.map(({ sample }) => sample),
-    ),
+    qualityManifestFingerprint: pdfStudyQualityManifestFingerprint(qualitySamples),
+    qualityPdfFingerprint: pdfStudyPdfFingerprint(qualitySamples),
+    qualityOutlineFingerprint: pdfStudyOutlineFingerprint(qualitySamples),
   }
 }

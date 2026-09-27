@@ -53,6 +53,16 @@ export interface PdfStudySample extends EvalSample {
   readonly pdfPath: string
   /** 文件名 + 标题 + PDF 字节 + 页文本 + 标注 + 目录 JSON 的 SHA-256 */
   readonly manifestFingerprint: string
+  /**
+   * 原始 PDF 字节的 SHA-256（独立于 manifest 指纹的单轴 pin）。
+   * 由加载器对真实 PDF 计算；测试手工构造的样本可缺席。
+   */
+  readonly pdfFingerprint?: string
+  /**
+   * 目录 JSON 树的 SHA-256（独立于 manifest 指纹的单轴 pin）。
+   * 由加载器计算；测试手工构造的样本可缺席。
+   */
+  readonly outlineFingerprint?: string
   /** 解析后的原生目录；缺失或非法时为空数组 */
   readonly pdfOutline: PdfOutlineEntry[]
   /** 目录解析结果（含失败原因与原始条目数）；未读取时为 undefined */
@@ -513,6 +523,16 @@ export interface BenchResult {
     qaQualitySource?: SampleSource
     /** pdf-study 质量批次的 manifest 指纹（仅 pdf-study 写此键；同一论文集合的摘要必须一致）。 */
     qaQualityManifestFingerprint?: string
+    /**
+     * pdf-study 批次原始 PDF 字节的聚合指纹（Task 8）：对参与运行的 pdf-study 样本，
+     * 按 paperId 升序取 `[paperId, pdfFingerprint]` 对做 SHA-256。仅 pdf-study 写此键。
+     */
+    pdfStudyPdfFingerprint?: string
+    /**
+     * pdf-study 批次目录 JSON 树的聚合指纹（Task 8）：口径同上，覆盖 `[paperId, outlineFingerprint]`。
+     * 仅 pdf-study 写此键；与 manifest 指纹分开，让「只换目录解析」与「换了 PDF 字节」可各自定位。
+     */
+    pdfStudyOutlineFingerprint?: string
   }
   metrics: Record<string, number>
   perSample: PerSampleRecord[]

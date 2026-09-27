@@ -131,6 +131,26 @@ describe('parseArgs', () => {
   it('未知 flag 时抛错，避免拼错静默生效', () => {
     expect(() => parseArgs(['--topk', '2'])).toThrow(/--topk/)
   })
+
+  it('解析 --sweep（产品实验入口）', () => {
+    const a = parseArgs(['--task', 'qa', '--dataset', 'outline-study', '--speed', '--sweep'])
+    expect(a.sweep).toBe(true)
+  })
+
+  it('--sweep 缺 --speed 或非 outline-study 数据集时抛错', () => {
+    expect(() => parseArgs(['--task', 'qa', '--dataset', 'outline-study', '--sweep']))
+      .toThrow(/--sweep 需要 --speed/)
+    expect(() => parseArgs(['--task', 'qa', '--dataset', 'qasper', '--speed', '--sweep']))
+      .toThrow(/--sweep 仅支持 --dataset outline-study/)
+  })
+
+  it('--sweep 与 --mode full-context 互斥；与 --cold-first-query 同跑也被既有互斥规则拒绝', () => {
+    expect(() => parseArgs(['--task', 'qa', '--dataset', 'outline-study', '--speed', '--sweep', '--mode', 'full-context']))
+      .toThrow(/--sweep.*full-context/)
+    // --sweep 需要 --speed，而 --speed 与 --cold-first-query 的互斥检查在前，先抛出
+    expect(() => parseArgs(['--task', 'qa', '--dataset', 'outline-study', '--speed', '--sweep', '--cold-first-query']))
+      .toThrow(/互斥/)
+  })
 })
 
 describe('fileStamp', () => {

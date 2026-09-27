@@ -91,6 +91,24 @@ function fingerprintManifest(
   return hash.digest('hex')
 }
 
+/** 单轴指纹：原始 PDF 字节（Task 8 把 PDF 与 outline 从 manifest 里拆开各自 pin）。 */
+function fingerprintPdfBytes(pdfBytes: Uint8Array): string {
+  return createHash('sha256')
+    .update('outline-study-pdf-v1')
+    .update('\0')
+    .update(pdfBytes)
+    .digest('hex')
+}
+
+/** 单轴指纹：目录 JSON 树（缺失/非法时为空数组，仍是确定值）。 */
+function fingerprintOutline(outline: unknown): string {
+  return createHash('sha256')
+    .update('outline-study-outline-v1')
+    .update('\0')
+    .update(JSON.stringify(outline))
+    .digest('hex')
+}
+
 /**
  * 加载冻结的 PDF 大纲研究集。每篇论文只读一次字节、只 base64 一次、只解析一次
  * （方案 §7：A/B/C 各自只打开 PDF 一次，绝不按臂重复解析）。
@@ -167,6 +185,8 @@ export async function loadOutlineStudyDataset(
       source: 'pdf-study',
       pdfPath,
       manifestFingerprint: fingerprintManifest(ann.file, pdfBytes, pages, ann, extracted.outline),
+      pdfFingerprint: fingerprintPdfBytes(pdfBytes),
+      outlineFingerprint: fingerprintOutline(extracted.outline),
       pdfOutline: extracted.outline,
       ...(extracted.outlineResult ? { pdfOutlineResult: extracted.outlineResult } : {}),
     })

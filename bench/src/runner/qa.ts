@@ -20,7 +20,7 @@ import type { TokenCounter } from '../../../src/utils/passages'
 import { DEFAULT_HYBRID_OPTIONS } from '../../../src/utils/passageRetrieval'
 import type { SemanticTreeHook } from '../metrics/treeDiagnostics'
 import { summarizeTreeDiagnostics, treeRecordFields } from '../metrics/treeDiagnostics'
-import { outlineRecordFields, summarizeColdStart } from '../metrics/passageDiagnostics'
+import { outlineRecordFields, summarizeColdStart, summarizeOutlineUse } from '../metrics/passageDiagnostics'
 import { resolvePassageMode } from '../config'
 import type { PassageIndexHook, PassageIndexInfo } from './passageIndexHook'
 import { toOutlineScoringNodes } from './passageIndexHook'
@@ -175,7 +175,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const retrieveContext = args.deps?.retrieveContext ?? retrieveRagContext
   const generateAnswer = args.deps?.generateAnswer ?? generateRagAnswer
   const contract = args.evaluationContract
-  const { qualityQuestions, qualityManifestFingerprint } = selectQaQualityBatch(samples, limit)
+  const { qualityQuestions, qualityManifestFingerprint, qualityPdfFingerprint, qualityOutlineFingerprint } = selectQaQualityBatch(samples, limit)
   // 语言覆盖指令追加在调用方 systemPrompt 之后；未传时 prompt 原样透传
   const systemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`
@@ -580,22 +580,27 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     ...(qualityQuestions.length > 0
       ? { qualityQuestions, ...(qualityManifestFingerprint !== undefined ? { qualityManifestFingerprint } : {}) }
       : {}),
-    // 段落配置下 extraMetrics 换成冷启动成本（树诊断在段落路径上恒为空：hook 接管后不再建树）
+    // 段落配置下 extraMetrics 换成冷启动成本（树诊断在段落路径上恒为空：hook 接管后不再建树），
+    // 目录使用率（Task 8）是逐题口径，与每篇口径的目录可用率并列报告
     extraMetrics: args.passage
-      ? { ...summarizeColdStart(perPaper), passageDegradedQuestionRate }
+      ? { ...summarizeColdStart(perPaper), ...summarizeOutlineUse(perSample), passageDegradedQuestionRate }
       : treeAgg.metrics,
-    ...(args.passage
-      ? {
-          extraMeta: {
+    extraMeta: {
+      ...(args.passage
+        ? {
             baselineFamily: 'classic' as const,
             candidateGranularity: 'paragraph passage',
             // 向量模型不可用时本轮检索信号与其它基线不同源，如实标为不可比（方案 §7）
             ...(passageIneligibleReason
               ? { comparisonEligible: false, comparisonIneligibleReason: passageIneligibleReason }
               : {}),
-          },
-        }
-      : {}),
+          }
+        : {}),
+      // pdf-study 身份 pin（Task 8）：QASPER 批次没有 PDF/outline 指纹，两个键整体缺席，
+      // 既有结果形态不变；pdf-study 批次则把「换了 PDF 字节」与「只换目录」各自钉住
+      ...(qualityPdfFingerprint !== undefined ? { pdfStudyPdfFingerprint: qualityPdfFingerprint } : {}),
+      ...(qualityOutlineFingerprint !== undefined ? { pdfStudyOutlineFingerprint: qualityOutlineFingerprint } : {}),
+    },
     extraTimingValues: { treeBuildLatency: treeAgg.latencies },
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })

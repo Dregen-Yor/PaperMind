@@ -22,9 +22,10 @@ import { runLongSectionQaTask } from './runner/longSectionQa'
 import { runSemanticTreeQaTask } from './runner/semanticTreeQa'
 import { createPassageIndexHook, type HybridKnobs } from './runner/passageIndexHook'
 import { runColdFirstQuery } from './runner/coldFirstQuery'
+import { runProductSweep } from './runner/productSweep'
 import { errorMessage } from './runner/support'
 import { runSummaryTask } from './runner/summary'
-import { renderReport, renderComparison, renderColdFirstQueryReport } from './report'
+import { renderReport, renderComparison, renderColdFirstQueryReport, renderProductReport } from './report'
 import { benchPath } from './paths'
 import type { BenchResult, BenchConfig, ColdFirstQueryResult, EvalSample, PdfStudySample, SampleSource } from './types'
 import type { PaperMindConfig } from './types'
@@ -443,6 +444,105 @@ function writeResult(result: BenchResult, fileTag = '') {
   }
   writeFileSync(path, JSON.stringify(result, null, 2))
   writeBenchmarkPathLine(process.stdout.write.bind(process.stdout), '  结果已写入 ', path, { speed: args.speed })
+}
+
+// --sweep 是产品实验入口：一条命令跑 A/B/C 热速度 + R 全文参考 + A/B/C × 2 冷首问策略，
+// 落盘四份热结果 + 六份冷结果，再渲染三张产品表。固定三个结构配置与 full-context R，
+// 复用与正常 --speed 同一份流式客户端 / 契约 tokenizer / 速度协议身份口径。
+if (args.sweep) {
+  const pdfSamples = samples.filter(isPdfStudySample)
+  if (pdfSamples.length === 0) {
+    throw new Error('--sweep 需要带 pdfPath 的 PdfStudySample（仅 outline-study 提供）')
+  }
+  const env = resolveEnvConfig(process.env)
+  const answerOptions = QA_ANSWER_OPTIONS!
+  const answerSystemPrompt = composeBaseSystemPrompt(DEFAULT_SYSTEM_PROMPT, ENGLISH_ANSWER_INSTRUCTION)
+
+  const sweepContract = buildEvaluationContract(pdfSamples, args.limit)
+  const speedPolicy = buildSpeedExecutionPolicy({
+    evaluationContract: sweepContract,
+    executedQuestionIds: executedQuestionIds(pdfSamples, args.limit),
+    provider: env.provider,
+    model: env.model,
+    baseUrl: env.baseUrl,
+    retryAttempts: answerOptions.retryAttempts,
+    answerSystemPrompt,
+    temperature: answerOptions.temperature,
+    maxTokens: answerOptions.maxTokens,
+    topP: answerOptions.topP,
+    thinking: answerOptions.thinking,
+    stop: answerOptions.stop,
+    timeoutMs: answerOptions.timeoutMs,
+    environment: { platform: process.platform, arch: process.arch, nodeVersion: process.version },
+    localExecution: isLocalExecutionEndpoint(env.provider, env.baseUrl),
+    env: process.env,
+  })
+  const client = createLlmClient({
+    ...env,
+    useCache: false,
+    ...answerOptions,
+    onRetry: retryLog,
+    ...speedPolicy.answerClientOverrides,
+  })
+  assertSpeedAnswerClient(client)
+
+  const contractTokenizer = await createBgeM3Tokenizer({
+    model: CONTEXT_TOKENIZER_MODEL,
+    revision: CONTEXT_TOKENIZER_REVISION,
+    cacheDir: MODEL_CACHE_DIR(),
+  })
+
+  // B/C 共用同一个 embedder pin（从 hybrid-raw 配置读出，与 runQaTask 的加载口径一致）
+  const embedderConfigs = await loadConfigs('structure-hybrid-raw')
+  const embedderParams = (embedderConfigs[0] as PaperMindConfig).passage?.embedder
+  let sweepEmbedder: Embedder | undefined
+  if (embedderParams) {
+    try {
+      applyHfEndpoint(await import('@huggingface/transformers'))
+      sweepEmbedder = await createTransformersEmbedder({
+        model: embedderParams.model,
+        revision: embedderParams.revision,
+        dtype: embedderParams.dtype,
+        dim: embedderParams.dim,
+        cacheDir: MODEL_CACHE_DIR(),
+      })
+    } catch (error) {
+      console.warn(`向量模型加载失败，B/C 臂降级为 bm25*：${errorMessage(error)}`)
+    }
+  }
+
+  const readPdf = async (sample: PdfStudySample): Promise<string[]> => {
+    const bytes = await readFile(sample.pdfPath)
+    return (await extractPdfDocument(bytes.toString('base64'), { readOutline: false })).pages
+  }
+
+  const sweepResult = await runProductSweep({
+    samples: pdfSamples,
+    limit: args.limit,
+    gitSha: sha,
+    model: env.model,
+    systemPrompt: DEFAULT_SYSTEM_PROMPT,
+    answerLanguageInstruction: ENGLISH_ANSWER_INSTRUCTION,
+    tokenizer: contractTokenizer,
+    contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
+    client,
+    embedder: sweepEmbedder,
+    speedContract: speedPolicy.contract,
+    readPdf,
+  })
+
+  for (const result of sweepResult.hot) {
+    result.meta.cacheMode = 'bypass'
+    if (result.meta.mode !== 'full-context') result.meta.mode = 'rag'
+    qaResults.push(result)
+    writeResult(result, 'outline-study')
+  }
+  for (const coldResult of sweepResult.cold) writeColdResult(coldResult)
+
+  const qDefault = readQSource(benchPath(import.meta.url, '../configs/scoring/q-score.json')).data as QConfig
+  const qSpeed = readQSource(benchPath(import.meta.url, '../configs/scoring/q-speed-first.json')).data as QConfig
+  process.stdout.write(renderProductReport(sweepResult.hot, sweepResult.cold, qDefault, qSpeed))
+  process.exit(0)
 }
 
 for (const config of configs) {

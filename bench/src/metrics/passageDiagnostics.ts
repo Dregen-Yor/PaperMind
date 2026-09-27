@@ -113,7 +113,31 @@ export function summarizeColdStart(records: PaperTimingRecord[]): Record<string,
   store('outlineAvailabilityRate', outlineAttempted.length
     ? outlineAttempted.filter(record => record.coldStartOutlineAvailable === 1).length / outlineAttempted.length
     : undefined)
+  // Task 8：valid/fallback 计数与目录可用率同分母（只统计 C 臂尝试过目录的论文），
+  // 让「全 PDF 分母」与「有有效目录的配对子集」在产物里各自可见
+  store('outlineAvailableCount', outlineAttempted.filter(record => record.coldStartOutlineAvailable === 1).length)
+  store('outlineFallbackCount', outlineAttempted.filter(record => record.coldStartOutlineAvailable === 0).length)
   store('avgColdStartOutlineMs', meanOf(valuesOf(outlineAttempted, record => record.coldStartOutlineMs)))
+  // 目录解析/建树/向量耗时按「尝试过目录的论文」取 P50/P95（C 臂真实等待的独立观测）
+  const outlineMs = valuesOf(outlineAttempted, record => record.coldStartOutlineMs)
 
-  return withPercentiles(metrics, { coldStartTotal: totalMs, structureCall: uncachedCallMs })
+  return withPercentiles(metrics, { coldStartTotal: totalMs, structureCall: uncachedCallMs, outlineBuild: outlineMs })
+}
+
+/**
+ * 目录实际使用率（Task 8）：逐题 `outlineUsed` 的聚合。
+ *
+ * 分母是**写了目录诊断**的题（`outlineUsed !== undefined`，即 C 臂真的产出了目录产物的论文
+ * 的全部问题——含目录失败篇的「未使用」），分子是 `outlineUsed === true` 的题。目录可用率
+ * （每篇）与使用率（每题）是两个口径，分列才能同时回答「有多少篇用得上目录」与「多少题真的用了」。
+ */
+export function summarizeOutlineUse(records: Array<{ outlineUsed?: boolean }>): Record<string, number> {
+  const withDiagnostic = records.filter(record => record.outlineUsed !== undefined)
+  if (withDiagnostic.length === 0) return {}
+  const used = withDiagnostic.filter(record => record.outlineUsed).length
+  return {
+    outlineUsedRate: used / withDiagnostic.length,
+    outlineUsedCount: used,
+    outlineUseDenominatorCount: withDiagnostic.length,
+  }
 }

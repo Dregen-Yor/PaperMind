@@ -120,6 +120,42 @@ Q 要求两侧都是 schema 2 / `query-timeline-v2`，并逐项核对同一数�
 
 **退出码**：单样本失败是正常数据点（记入 `errors[]` 继续，exit 0）；整轮零完成（典型为 API key 配错）报表照常输出后 exit 1。
 
+### PDF 原生目录产品实验（`--sweep`）
+
+在 `bench/minibatch/` 的 3 篇人工标注真实 PDF / 12 题上比较「PDF 原生目录作为检索先验」是否值得：臂 A `structure-lexical`（原文段落 BM25）、B `structure-hybrid-raw`（BM25 + 段落向量）、C `structure-hybrid-outline`（B + 原生目录标题先验），R 为 full-context 全文直投参考。A/B/C 的索引阶段**零生成式 LLM 调用**，共享同一 PDF 页文本、120/350 切段、BGE 嵌入身份（B/C）、4096 token 上下文预算与回答 prompt；C 的目录缺失/非法按 B 的 bm25+dense 回落，**仍留在全 PDF 分母**。
+
+一条命令跑完整个 pilot（四臂热速度 + 六条冷首问，并渲染三张产品表）：
+
+```bash
+npm run bench -- --task qa --dataset outline-study --speed --sweep
+```
+
+等价的分臂命令（如需单独复跑或断点排查）：
+
+```bash
+# 热速度 + 质量（query-timeline-v2 七指标 + answerF1AllQuestions）
+npm run bench -- --task qa --dataset outline-study --config structure-lexical --speed
+npm run bench -- --task qa --dataset outline-study --config structure-hybrid-raw --speed
+npm run bench -- --task qa --dataset outline-study --config structure-hybrid-outline --speed
+npm run bench -- --task qa --dataset outline-study --mode full-context --speed   # R 参考
+
+# 冷首问（--cold-first-query 与 --speed 互斥；两个策略各跑一遍）
+npm run bench -- --task qa --dataset outline-study --config structure-lexical --cold-first-query --cold-strategy ready-before-query
+npm run bench -- --task qa --dataset outline-study --config structure-lexical --cold-first-query --cold-strategy ask-at-lexical-ready
+# …… 对 structure-hybrid-raw / structure-hybrid-outline 重复同样的两个策略
+```
+
+Q 用两套权重各自离线计算（第一份输入必须是同轮 `--mode full-context --speed` 的 R 结果）：
+
+```bash
+npm run bench -- --compare bench/results/qa-outline-study-full-context-*.json bench/results/qa-outline-study-structure-hybrid-outline-*.json --q-config bench/configs/scoring/q-score.json        # Q_default（F1 0.6 / TTFT 0.2 / 0.2）
+npm run bench -- --compare bench/results/qa-outline-study-full-context-*.json bench/results/qa-outline-study-structure-hybrid-outline-*.json --q-config bench/configs/scoring/q-speed-first.json  # Q_speed（F1 0.2 / TTFT 0.4 / 0.4）
+```
+
+`--sweep` 落盘四份热结果（`results/qa-outline-study-<arm>-<时间戳>.json`）与六份冷结果（`results/cold-first-query-<mode>-<strategy>-<时间戳>.json`），并在 stdout 渲染三张表：冷首问（按策略）、热速度七指标 + F1 + Q_default/Q_speed、目录解析/建树/使用/回落成本。pdf-study 结果元数据额外钉住 manifest / PDF 字节 / 目录 JSON 三份 SHA-256 指纹，并记录目录 valid / fallback 计数与逐篇回落原因。
+
+**pilot 口径与规模**：这 3 篇 / 12 题是**可启动的产品 pilot**，不足以证明普遍优势。单轮逻辑请求数（不含重试）为：热 A/B/C/R 各 12 题 = **48 个回答请求**；冷首问每篇固定首题，3 臂 × 2 策略 × 3 篇 = **18 个请求**。n=3 篇 PDF 的 P95 只是 3 个观测的分位数，**不得据此宣称稳定长尾收益**——趋势确认需按方案复跑并扩大到预冻结的真实 PDF 标注集（覆盖有/无目录、长短论文）。
+
 ## 指标速查
 
 **检索** —— `contextPageMrr`、`evidenceRecall`、`evidenceHitRate`、`contextPrecision`、`contextTokens`，以及分母计数 `contextPageMrrSampleCount` / `contextPageMrrEligibleCount`

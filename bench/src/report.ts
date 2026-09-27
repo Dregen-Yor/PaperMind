@@ -3,6 +3,8 @@ import { REFUSAL_PATTERN_VERSION } from './metrics/answerF1'
 import { aggregate } from './metrics/aggregate'
 import { MRR_DEFINITION } from './evaluationContract'
 import { SPEED_DEFINITION, speedComparisonIssues } from './speed/contract'
+import { buildQComparison } from './scoring/qComparison'
+import type { QConfig } from './scoring/qScore'
 
 /** 各任务的主指标，用于在矩阵报表中标出最优行（legacy 历史表按此加粗）。 */
 export const PRIMARY_METRIC: Record<'qa' | 'summary', string> = {
@@ -992,4 +994,125 @@ export function renderColdFirstQueryReport(results: ColdFirstQueryResult[]): str
   }
   lines.push('')
   return lines.join('\n')
+}
+
+/**
+ * 产品实验 Q 单元格：对「全文参考 R → 候选臂」离线计算 Q。计算失败（身份/cohort/质量
+ * 门禁不通过、参考 F1 为 0 等）一律渲染 `—` 而不是硬造一个数字——Q 只在通过全部校验时给出。
+ */
+function productQCell(reference: BenchResult, candidate: BenchResult, config: QConfig): string {
+  const comparison = buildQComparison(reference, candidate, config)
+  if (comparison.score === null || !Number.isFinite(comparison.score)) return '—'
+  return comparison.score.toFixed(2)
+}
+
+/** 产品实验热速度主表（Task 8 Step 4 第二张表）：现有热 speed 七指标 + F1 + Q_default/Q_speed。 */
+export function renderProductHotTable(hot: BenchResult[], qDefault: QConfig, qSpeed: QConfig): string[] {
+  const reference = hot.find(result => result.meta.mode === 'full-context')
+  const arms = hot.filter(result => result.meta.mode !== 'full-context')
+  if (arms.length === 0) return []
+
+  const lines: string[] = []
+  lines.push('### 热查询速度与质量（query-timeline-v2 + F1 + Q）')
+  lines.push('')
+  lines.push('| 方法 | Evidence Ready P50 | P95 | TTFT P50 | P95 | Full Answer P50 | P95 | Avg Online Tokens | answerF1AllQuestions | Q_default | Q_speed |')
+  lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+  for (const arm of arms) {
+    const metrics = arm.metrics
+    const qDefaultCell = reference ? productQCell(reference, arm, qDefault) : '—'
+    const qSpeedCell = reference ? productQCell(reference, arm, qSpeed) : '—'
+    lines.push(
+      `| ${arm.config.name} | ${speedValue(metrics, 'evidenceReadyLatencyP50Ms')} | ${speedValue(metrics, 'evidenceReadyLatencyP95Ms')} | `
+      + `${speedValue(metrics, 'timeToFirstTokenP50Ms')} | ${speedValue(metrics, 'timeToFirstTokenP95Ms')} | `
+      + `${speedValue(metrics, 'fullAnswerLatencyP50Ms')} | ${speedValue(metrics, 'fullAnswerLatencyP95Ms')} | `
+      + `${speedValue(metrics, 'avgOnlineTokensPerCompletedAnswer')} | ${fmt(metrics.answerF1AllQuestions)} | ${qDefaultCell} | ${qSpeedCell} |`,
+    )
+  }
+  lines.push('')
+  lines.push('> Q_default 用 `configs/scoring/q-score.json`（answerF1 0.6 / TTFT P50 0.2 / TTFT P95 0.2），Q_speed 用 `configs/scoring/q-speed-first.json`（0.2 / 0.4 / 0.4）；参考都是同轮 full-context R，Q 只在通过全部身份/cohort/质量校验时给出。')
+  return lines
+}
+
+/** 目录回落原因（按篇）聚合为 `原因 × n` 列表，供目录成本表脚注。 */
+function outlineFallbackSummary(result: BenchResult): string[] {
+  const counts = new Map<string, number>()
+  for (const paper of result.perPaper ?? []) {
+    const reason = paper.coldStartOutlineFallback
+    if (reason === undefined) continue
+    counts.set(reason, (counts.get(reason) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([reason, count]) => `${reason} × ${count}`)
+}
+
+/** 目录成本表（Task 8 Step 4 第三张表）：解析/建树耗时、可用率、使用率与回落，并显式区分全 PDF 分母与有效目录子集。 */
+export function renderOutlineCostTable(hot: BenchResult[]): string[] {
+  const arms = hot.filter(result =>
+    result.metrics.outlineAvailabilityRate !== undefined
+    || result.perPaper?.some(paper => paper.coldStartOutlineAvailable !== undefined))
+  if (arms.length === 0) return []
+
+  const lines: string[] = []
+  lines.push('### 目录解析/建树/使用/回落成本（仅 C 臂）')
+  lines.push('')
+  lines.push('| 方法 | 目录解析/建树 P50 / P95 | 目录可用率 | 可用 / 回落(篇) | 目录使用率 |')
+  lines.push('| --- | --- | --- | --- | --- |')
+  for (const result of arms) {
+    const m = result.metrics
+    const available = m.outlineAvailableCount === undefined ? '—' : String(m.outlineAvailableCount)
+    const fallback = m.outlineFallbackCount === undefined ? '—' : String(m.outlineFallbackCount)
+    lines.push(
+      `| ${result.config.name} | ${cell(m, 'outlineBuild')} | ${pctCell(m, 'outlineAvailabilityRate')} | `
+      + `${available} / ${fallback} | ${pctCell(m, 'outlineUsedRate')} |`,
+    )
+  }
+  lines.push('')
+  for (const result of arms) {
+    const papers = result.perPaper ?? []
+    const attempted = papers.filter(paper => paper.coldStartOutlineAvailable !== undefined)
+    const valid = attempted.filter(paper => paper.coldStartOutlineAvailable === 1)
+    const allQuestions = result.meta.total
+    const validQuestions = valid.reduce((sum, paper) => sum + (paper.questionCount ?? 0), 0)
+    lines.push(`> ${result.config.name}：全 PDF 分母 ${papers.length} 篇 / ${allQuestions} 题；有有效目录的配对子集 ${valid.length} 篇 / ${validQuestions} 题——回落篇仍留在全 PDF 分母里，可用率与使用率各按自己的分母报告。`)
+    const fallbackReasons = outlineFallbackSummary(result)
+    if (fallbackReasons.length > 0) lines.push(`> 目录回落原因（按篇）：${fallbackReasons.join('；')}。`)
+  }
+  lines.push('> 索引阶段生成式 LLM 调用数：0（A/B/C 三段结构构建均零 LLM 调用）。')
+  return lines
+}
+
+/**
+ * 产品实验报表（Task 8 Step 4）：三张固定表——冷首问（按策略）、热速度七指标 + F1 + Q、
+ * 目录成本。冷表复用 Task 7 的 `renderColdFirstQueryReport`，热表与目录成本表在本文件。
+ */
+export function renderProductReport(
+  hot: BenchResult[],
+  cold: ColdFirstQueryResult[],
+  qDefault: QConfig,
+  qSpeed: QConfig,
+): string {
+  const lines: string[] = []
+  lines.push('## 产品实验报表：PDF 原生目录（pilot）')
+  lines.push('')
+  const first = hot[0]
+  if (first) {
+    lines.push(`- 模型：\`${first.meta.model}\``)
+    lines.push(`- 代码版本：\`${first.meta.gitSha}\``)
+    lines.push(`- 时间：${first.meta.timestamp}`)
+    const reference = hot.find(result => result.meta.mode === 'full-context')
+    const retrieval = hot.find(result => result.meta.mode !== 'full-context')
+    if (reference) {
+      const paperCount = retrieval?.perPaper?.length
+      lines.push(`- 数据：${paperCount === undefined ? '—' : `${paperCount} 篇 PDF`} / ${reference.meta.total} 题（pdf-study，人工标注真实 PDF）`)
+      lines.push(`- manifest 指纹：\`${reference.meta.qaQualityManifestFingerprint ?? '—'}\``)
+      lines.push(`- PDF 指纹：\`${reference.meta.pdfStudyPdfFingerprint ?? '—'}\``)
+      lines.push(`- 目录指纹：\`${reference.meta.pdfStudyOutlineFingerprint ?? '—'}\``)
+    }
+    lines.push('')
+  }
+  lines.push(renderColdFirstQueryReport(cold))
+  lines.push('')
+  lines.push(...renderProductHotTable(hot, qDefault, qSpeed))
+  lines.push('')
+  lines.push(...renderOutlineCostTable(hot))
+  return `${lines.join('\n')}\n`
 }

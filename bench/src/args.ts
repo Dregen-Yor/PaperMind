@@ -10,6 +10,7 @@ export interface BenchArgs {
   speed: boolean
   coldFirstQuery: boolean
   coldStrategy?: ColdStrategy
+  sweep: boolean
   out?: string
   compare?: [string, string]
   qConfig?: string
@@ -44,6 +45,7 @@ export function parseArgs(argv: string[]): BenchArgs {
     useCache: true,
     speed: false,
     coldFirstQuery: false,
+    sweep: false,
     mode: 'rag',
   }
 
@@ -100,6 +102,9 @@ export function parseArgs(argv: string[]): BenchArgs {
       case '--cold-first-query':
         args.coldFirstQuery = true
         break
+      case '--sweep':
+        args.sweep = true
+        break
       case '--cold-strategy': {
         const v = argv[++i]
         if (!COLD_STRATEGIES.includes(v as never)) {
@@ -147,5 +152,13 @@ export function parseArgs(argv: string[]): BenchArgs {
     args.coldStrategy = 'ready-before-query'
   }
   if (args.qConfig && !args.compare) throw new Error('--q-config 需要 --compare')
+  if (args.sweep) {
+    if (args.task !== 'qa') throw new Error('--sweep 仅支持 --task qa（产品实验热速度 + 冷首问都是 QA）')
+    if (args.dataset !== 'outline-study') throw new Error('--sweep 仅支持 --dataset outline-study（需要真实 PDF 原生目录）')
+    if (!args.speed) throw new Error('--sweep 需要 --speed（热查询七指标是产品实验主表）')
+    if (args.coldFirstQuery) throw new Error('--sweep 与 --cold-first-query 互斥（sweep 已内含冷首问）')
+    if (args.compare) throw new Error('--sweep 与 --compare 互斥')
+    if (args.mode === 'full-context') throw new Error('--sweep 与 --mode full-context 互斥（sweep 已内含 R 全文参考臂）')
+  }
   return args
 }

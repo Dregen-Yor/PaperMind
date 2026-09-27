@@ -42,7 +42,7 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
   const judgeState: JudgeSampleState = { sawUnanswerable: false, usedPatternFallback: false }
   // 质量批次选择见 selectQaQualityBatch：指纹只在有 pdf-study 样本时存在，
   // QASPER 批次返回 undefined，meta 因此保持 legacy 两键不变。
-  const { qualityQuestions, qualityManifestFingerprint } = selectQaQualityBatch(args.samples, args.limit)
+  const { qualityQuestions, qualityManifestFingerprint, qualityPdfFingerprint, qualityOutlineFingerprint } = selectQaQualityBatch(args.samples, args.limit)
   let qasperEvidenceQuestions = 0; let mappedEvidenceQuestions = 0; let ambiguousEvidenceQuestions = 0; let unmappedEvidenceQuestions = 0
   const language = args.answerLanguageInstruction ? `\n\n${args.answerLanguageInstruction}` : ''
 
@@ -175,6 +175,9 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
       refusalPatternVersion: REFUSAL_PATTERN_VERSION, rubricVersion: RUBRIC_VERSION,
       ...(args.speed ? speedContractMeta(args.speed.contract, records, { evidenceRequired: false }) : {}),
       ...quality?.meta,
+      // pdf-study 身份 pin（Task 8）：与平面 runQaTask 同一口径，QASPER 批次两个键整体缺席
+      ...(qualityPdfFingerprint !== undefined ? { pdfStudyPdfFingerprint: qualityPdfFingerprint } : {}),
+      ...(qualityOutlineFingerprint !== undefined ? { pdfStudyOutlineFingerprint: qualityOutlineFingerprint } : {}),
       ...(qasperEvidenceQuestions ? { evidenceMappingCoverage: mappedEvidenceQuestions / qasperEvidenceQuestions, ambiguousEvidenceRate: ambiguousEvidenceQuestions / qasperEvidenceQuestions, unmappedEvidenceRate: unmappedEvidenceQuestions / qasperEvidenceQuestions } : {}),
       ...(judgeState.sawUnanswerable ? { unanswerableMethod: (args.judgeClient && !judgeState.usedPatternFallback ? 'judge' : 'pattern') as 'judge' | 'pattern' } : {}),
     },

@@ -5,7 +5,10 @@ import {
   retrievalComparisonIssues,
   RETRIEVAL_SECTION_METRICS, RETRIEVAL_EXEMPT_METRICS, TIMING_SECTION_METRICS, TREE_SECTION_METRICS,
   COLD_START_SECTION_METRICS,
+  renderProductHotTable, renderOutlineCostTable, renderProductReport,
 } from '../report'
+import { qFixture, qConfig } from './qFixture'
+import type { QConfig } from '../scoring/qScore'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { renderCardReport } from '../treeInspect'
 import { buildPassages, createEstimatingTokenCounter } from '../../../src/utils/passages'
@@ -1237,5 +1240,116 @@ describe('renderCardReport', () => {
     // 范围列本身不带方括号（渲染器输出 `P01–P01`），断言只查段落 ID 出现
     expect(markdown).toContain('P01')
     expect(markdown).toContain('回落')
+  })
+})
+
+/** 速度优先 Q 权重（`configs/scoring/q-speed-first.json` 的口径）。 */
+const qSpeedConfig: QConfig = {
+  schemaVersion: 1, formula: 'weighted-geometric-relative-v1', baselineMode: 'full-context',
+  weights: { answerF1: 0.2, ttftP50: 0.4, ttftP95: 0.4 },
+}
+
+/** pdf-study 侧的 speed fixture：与 qFixture 逐字同构，只换定义/来源/manifest 指纹。 */
+function pdfStudyFixture(name: string, mode: 'rag' | 'full-context' = 'rag'): BenchResult {
+  const fixture = qFixture(name, mode)
+  fixture.meta.qaQualityDefinition = 'pdf-qa-all-questions-v1'
+  fixture.meta.qaQualitySource = 'pdf-study'
+  fixture.meta.qaQualityManifestFingerprint = 'manifest-pdf'
+  fixture.meta.pdfStudyPdfFingerprint = 'pdf-fp'
+  fixture.meta.pdfStudyOutlineFingerprint = 'outline-fp'
+  for (const row of fixture.perSample) row.source = 'pdf-study'
+  return fixture
+}
+
+describe('renderProductHotTable（Task 8 产品热表）', () => {
+  it('七指标 + F1 + Q_default/Q_speed 并列，Q 按 full-context R 离线计算', () => {
+    const reference = pdfStudyFixture('full-context', 'full-context')
+    const arms = [
+      pdfStudyFixture('structure-lexical'),
+      pdfStudyFixture('structure-hybrid-raw'),
+      pdfStudyFixture('structure-hybrid-outline'),
+    ]
+    const md = renderProductHotTable([...arms, reference], qConfig, qSpeedConfig).join('\n')
+
+    // 列名：七指标 + F1 + 两个 Q
+    expect(md).toContain('answerF1AllQuestions')
+    expect(md).toContain('Q_default')
+    expect(md).toContain('Q_speed')
+    // 三臂各一行，full-context 只作参考、不进表
+    expect(md).toContain('| structure-lexical |')
+    expect(md).toContain('| structure-hybrid-raw |')
+    expect(md).toContain('| structure-hybrid-outline |')
+    expect(md).not.toContain('| full-context |')
+    // 与参考逐字相同的候选 → 两套权重下 Q 都是 100.00
+    expect(md).toContain('| 100.00 | 100.00 |')
+  })
+
+  it('无 full-context 参考时不硬造 Q（两列渲染 —）', () => {
+    const md = renderProductHotTable([pdfStudyFixture('structure-lexical')], qConfig, qSpeedConfig).join('\n')
+    expect(md).toContain('| — | — |')
+  })
+})
+
+describe('renderOutlineCostTable（Task 8 目录成本表）', () => {
+  function outlineArm(): BenchResult {
+    return {
+      task: 'qa',
+      config: { name: 'structure-hybrid-outline', kind: 'papermind', mode: 'hybrid-outline' },
+      meta: {
+        model: 'm', timestamp: 't', gitSha: 's', completed: 12, total: 12,
+        retrievalAlgorithm: 'hybrid-passage',
+      },
+      metrics: {
+        outlineAvailabilityRate: 2 / 3,
+        outlineAvailableCount: 2,
+        outlineFallbackCount: 1,
+        outlineUsedRate: 8 / 12,
+        outlineBuildP50Ms: 420,
+        outlineBuildP95Ms: 900,
+      },
+      perSample: [],
+      perPaper: [
+        { paperId: 'a', source: 'pdf-study', pageCount: 3, questionCount: 4, coldStartOutlineAvailable: 1, coldStartOutlineMs: 400 },
+        { paperId: 'b', source: 'pdf-study', pageCount: 3, questionCount: 4, coldStartOutlineAvailable: 1, coldStartOutlineMs: 500 },
+        { paperId: 'c', source: 'pdf-study', pageCount: 3, questionCount: 4, coldStartOutlineAvailable: 0, coldStartOutlineFallback: 'missing-outline' },
+      ],
+      errors: [],
+    }
+  }
+
+  it('解析/建树耗时、可用率、valid/fallback 计数与使用率并列，并区分全 PDF 分母与有效目录子集', () => {
+    const md = renderOutlineCostTable([outlineArm()]).join('\n')
+    expect(md).toContain('目录解析/建树 P50 / P95')
+    expect(md).toContain('| structure-hybrid-outline | 420 ms / 900 ms | 66.7% | 2 / 1 | 66.7% |')
+    // 全 PDF 分母（3 篇 / 12 题）与有有效目录的配对子集（2 篇 / 8 题）显式分开
+    expect(md).toContain('全 PDF 分母 3 篇 / 12 题')
+    expect(md).toContain('配对子集 2 篇 / 8 题')
+    // 回落原因按篇聚合
+    expect(md).toContain('missing-outline × 1')
+    // 索引阶段零生成式 LLM 调用
+    expect(md).toContain('索引阶段生成式 LLM 调用数：0')
+  })
+
+  it('没有目录诊断的结果不渲染该表', () => {
+    expect(renderOutlineCostTable([qFixture('rag-bm25')])).toEqual([])
+  })
+})
+
+describe('renderProductReport（Task 8 三表装配）', () => {
+  it('装配冷首问 + 热速度质量 + 目录成本三张表，并自证 PDF/outline/manifest 指纹', () => {
+    const reference = pdfStudyFixture('full-context', 'full-context')
+    const arms = [
+      pdfStudyFixture('structure-lexical'),
+      pdfStudyFixture('structure-hybrid-raw'),
+      pdfStudyFixture('structure-hybrid-outline'),
+    ]
+    const md = renderProductReport([...arms, reference], [], qConfig, qSpeedConfig)
+    expect(md).toContain('## 产品实验报表：PDF 原生目录（pilot）')
+    expect(md).toContain('冷首问')
+    expect(md).toContain('### 热查询速度与质量（query-timeline-v2 + F1 + Q）')
+    // manifest / PDF / 目录三份指纹都在表头自证
+    expect(md).toContain('manifest 指纹：`manifest-pdf`')
+    expect(md).toContain('PDF 指纹：`pdf-fp`')
+    expect(md).toContain('目录指纹：`outline-fp`')
   })
 })
