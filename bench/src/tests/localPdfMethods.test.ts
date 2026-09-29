@@ -1,6 +1,7 @@
 import { it, expect, vi } from 'vitest'
 import * as bm25 from '../../../src/utils/bm25'
 import { prepareMethod } from '../localPdf/methods'
+import type { PdfTextLine } from '../../../src/utils/pdfDocument'
 const corpus = { paperId: 'p', pages: ['This is a complete original paragraph.'], outline: [], layoutLines: [[]] }
 it('A avoids embedding and R keeps whole text', async () => {
   const embedder = { id: 'test', embedQuery: vi.fn(), embedPassages: vi.fn() }
@@ -29,4 +30,39 @@ it('builds BM25 before timed queries and reuses it', async () => {
   await a.retrieve!('first'); await a.retrieve!('second')
   expect(build).toHaveBeenCalledTimes(1)
   build.mockRestore()
+})
+
+it('prepares D before retrieval and routes without embeddings or body text in the prompt', async () => {
+  const line = (page: number, text: string): PdfTextLine => ({ page, text, x: 10, y: 700, fontSize: 18, bold: true })
+  const dCorpus = {
+    paperId: 'p', pages: ['SECRET INTRO BODY', 'SECRET METHOD BODY'], outline: [],
+    layoutLines: [[line(0, '1 Introduction')], [line(1, '2 Methods')]],
+  }
+  const routeToc = vi.fn(async (prompt: string) => {
+    expect(prompt).not.toContain('SECRET')
+    return '{"reasoning":"methods","node_ids":["n1"]}'
+  })
+  const embedder = { id: 'test', embedQuery: vi.fn(), embedPassages: vi.fn() }
+  const build = vi.spyOn(bm25, 'buildBm25Scorer')
+  const d = await prepareMethod('D', dCorpus, { countTokens: s => s.length, embedder, routeToc })
+  expect(d.tree?.roots.map(node => node.title)).toEqual(['1 Introduction', '2 Methods'])
+  expect(routeToc).not.toHaveBeenCalled()
+  const result = await d.retrieve!('What method?')
+  expect(result.text).toBe('SECRET METHOD BODY')
+  expect(result.trace[0].source).toEqual({ page: 1, start: 0, end: 18 })
+  expect(result.routing?.selectedNodeIds).toEqual(['n1'])
+  expect(embedder.embedPassages).not.toHaveBeenCalled()
+  expect(build).not.toHaveBeenCalled()
+  build.mockRestore()
+})
+
+it('fails D explicitly when routing or a valid tree is unavailable', async () => {
+  const line: PdfTextLine = { page: 0, text: '1 Introduction', x: 0, y: 1, fontSize: 18, bold: true }
+  await expect(prepareMethod('D', { ...corpus, layoutLines: [[line]] }, { countTokens: s => s.length }))
+    .rejects.toThrow(/rout/i)
+  const deps = { countTokens: (s: string) => s.length, routeToc: async () => 'invalid' }
+  await expect(prepareMethod('D', { ...corpus, layoutLines: [[line]] }, deps)).rejects.toThrow(/no-valid-toc-tree/)
+  const lines = [[line], [{ ...line, page: 1, text: '2 Methods' }]]
+  const d = await prepareMethod('D', { ...corpus, pages: ['one', 'two'], layoutLines: lines }, deps)
+  await expect(d.retrieve!('q')).rejects.toThrow(/two invalid/i)
 })

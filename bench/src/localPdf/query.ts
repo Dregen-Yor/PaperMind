@@ -14,6 +14,7 @@ export async function executeQuery(question: FrozenQuestion, prepared: PreparedM
     try {
       const context = await prepared.retrieve!(question.question)
       r.context = context.text; r.trace = context.trace
+      if (context.routing) r.routing = context.routing
       r.tContextReady = deps.now(); r.retrievalStatus = 'completed'
     } catch (error) { r.error = { stage: 'retrieve', message: safeError(error) }; return r }
   } else r.context = prepared.fullText!

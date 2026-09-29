@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { hashCanonical, validateManifest, validateRunSummary } from '../localPdf/contract'
-import { manifestFixture, summaryFixture } from './localPdfFixtures'
+import { hashCanonical, validateHeader, validateManifest, validateQueryRecord, validateRunSummary } from '../localPdf/contract'
+import { headerFixture, manifestFixture, recordFixture, summaryFixture } from './localPdfFixtures'
 describe('local PDF contract', () => {
   it('rejects duplicate question IDs', () => {
     const m = manifestFixture()
@@ -24,5 +24,23 @@ describe('local PDF contract', () => {
   it('hashes objects canonically but preserves array order', () => {
     expect(hashCanonical({ b: 2, a: 1 })).toBe(hashCanonical({ a: 1, b: 2 }))
     expect(hashCanonical([1, 2])).not.toBe(hashCanonical([2, 1]))
+  })
+  it('requires both TOC identities when D is present and preserves old headers', () => {
+    expect(() => validateHeader(headerFixture(['A', 'B', 'C', 'R']))).not.toThrow()
+    const d = headerFixture(['D'])
+    expect(() => validateHeader(d)).toThrow(/TOC identity/)
+    d.identity.tocTreeSha256 = 'tree'
+    d.identity.tocRoutingSha256 = 'routing'
+    expect(() => validateHeader(d)).not.toThrow()
+  })
+  it('requires routing diagnostics only for completed D retrievals', () => {
+    const d = recordFixture('D')
+    expect(() => validateQueryRecord(d)).toThrow(/routing/)
+    d.routing = {
+      rawAttempts: ['{}'], reasoning: 'methods', requestedNodeIds: ['n1'], selectedNodeIds: ['n1'],
+      selectedRanges: [{ nodeId: 'n1', startPage: 1, endPage: 1 }],
+    }
+    expect(() => validateQueryRecord(d)).not.toThrow()
+    expect(() => validateQueryRecord({ ...recordFixture('A'), routing: d.routing })).toThrow(/routing/)
   })
 })

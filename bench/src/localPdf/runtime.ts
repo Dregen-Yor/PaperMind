@@ -8,6 +8,8 @@ import { hashCanonical, requireThat } from './contract'
 import { fileIdentity } from './prepare'
 import { RETRIEVAL_CONFIG, type MethodDeps } from './methods'
 import type { FileIdentity, Method, RunIdentity } from './types'
+import { TOC_TREE_CONFIG_SHA256 } from './tocTree'
+import { TOC_ROUTING_CONFIG_SHA256, TOC_ROUTING_PROMPT_VERSION } from './tocRouting'
 export const ANSWER_PROMPT = 'Answer the question in concise English using only the provided paper text. If the paper does not provide the answer, respond exactly Unanswerable. For yes/no questions respond Yes or No. Do not add citations or repeat the question.'
 export type RuntimeIdentity = Omit<RunIdentity, 'manifestFingerprint' | 'gitSha' | 'evaluatorSha256'>
 async function modelFiles(dir: string): Promise<FileIdentity[]> {
@@ -21,6 +23,7 @@ async function modelFiles(dir: string): Promise<FileIdentity[]> {
 }
 export async function initializeRuntime(env: Record<string, string | undefined>, methods: Method[]) {
   const config = resolveEnvConfig(env); const generation = resolveQaAnswerOptions(env)
+  const client = createLlmClient({ ...config, ...generation, useCache: false })
   const cacheDir = resolve(env.BENCH_MODEL_CACHE_DIR ?? 'bench/cache/models')
   const endpoint = new URL(config.baseUrl)
   endpoint.username = ''; endpoint.password = ''; endpoint.search = ''; endpoint.hash = ''
@@ -35,6 +38,7 @@ export async function initializeRuntime(env: Record<string, string | undefined>,
     requireThat(tokenFiles.some(f => f.path.endsWith('tokenizer.json')), 'tokenizer files missing from cache')
     files.push(...tokenFiles)
   }
+  if (methods.includes('D')) deps.routeToc = prompt => client.complete(prompt)
   if (methods.some(m => m === 'B' || m === 'C')) {
     deps.embedder = await createTransformersEmbedder({ model: 'Xenova/bge-small-en-v1.5', revision: 'main', dtype: 'q8', dim: 384, cacheDir })
     await deps.embedder.embedQuery('Benchmark warmup.')
@@ -48,6 +52,17 @@ export async function initializeRuntime(env: Record<string, string | undefined>,
     endpointSha256: hashCanonical(endpoint.toString()),
     environmentSha256: hashCanonical({ platform: process.platform, arch: process.arch, node: process.version, backend: env.BENCH_EXECUTION_BACKEND ?? 'node' }),
     modelFiles: files,
+    ...(methods.includes('D') ? {
+      tocTreeSha256: TOC_TREE_CONFIG_SHA256,
+      tocRoutingSha256: hashCanonical({
+        config: TOC_ROUTING_CONFIG_SHA256,
+        promptVersion: TOC_ROUTING_PROMPT_VERSION,
+        generation,
+        model: config.model,
+        provider: config.provider,
+        cache: false,
+      }),
+    } : {}),
   }
-  return { client: createLlmClient({ ...config, ...generation, useCache: false }), methodDeps: deps, identity }
+  return { client, methodDeps: deps, identity }
 }

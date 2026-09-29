@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Manifest, QueryRecord, RunHeader, RunSummary } from './types'
 export const SCHEMA = 'local-pdf-qasper-v1' as const
-export const METHODS = ['A', 'B', 'C', 'R'] as const
+export const METHODS = ['A', 'B', 'C', 'D', 'R'] as const
 export const METRIC_KEYS = ['answerF1', 'evidenceF1', 'retrievalLatencyP50Ms', 'retrievalLatencyP95Ms', 'ttftP50Ms', 'ttftP95Ms'] as const
 export function requireThat(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
@@ -36,6 +36,20 @@ export function validateHeader(h: RunHeader): void {
   requireThat(h.methods.length > 0 && h.methods.every(m => METHODS.includes(m)), 'invalid methods')
   requireThat(['running', 'completed', 'incomplete', 'failed'].includes(h.status), 'invalid run status')
   requireThat(h.identity && Object.entries(h.identity).filter(([k]) => k !== 'modelFiles').every(([, v]) => typeof v === 'string' && v.length > 0), 'invalid identity')
+  if (h.methods.includes('D')) requireThat(h.identity.tocTreeSha256 && h.identity.tocRoutingSha256, 'D requires TOC identity hashes')
+}
+function validateRouting(value: QueryRecord['routing']): void {
+  requireThat(value && Array.isArray(value.rawAttempts) && value.rawAttempts.length >= 1 && value.rawAttempts.length <= 2
+    && value.rawAttempts.every(raw => typeof raw === 'string'), 'invalid routing attempts')
+  requireThat(typeof value.reasoning === 'string'
+    && Array.isArray(value.requestedNodeIds) && value.requestedNodeIds.length >= 1 && value.requestedNodeIds.length <= 3
+    && value.requestedNodeIds.every(id => typeof id === 'string'), 'invalid routing request')
+  requireThat(Array.isArray(value.selectedNodeIds) && value.selectedNodeIds.length >= 1
+    && value.selectedNodeIds.every(id => typeof id === 'string'), 'invalid routing selection')
+  requireThat(Array.isArray(value.selectedRanges) && value.selectedRanges.length === value.selectedNodeIds.length
+    && value.selectedRanges.every((range, index) => range.nodeId === value.selectedNodeIds[index]
+      && Number.isInteger(range.startPage) && Number.isInteger(range.endPage)
+      && range.startPage >= 0 && range.startPage <= range.endPage), 'invalid routing ranges')
 }
 export function validateQueryRecord(value: unknown): QueryRecord {
   const r = value as QueryRecord
@@ -45,6 +59,8 @@ export function validateQueryRecord(value: unknown): QueryRecord {
   requireThat(r.evidence === null || Array.isArray(r.evidence) && r.evidence.every(e => typeof e === 'string'), 'invalid evidence')
   for (const t of [r.t0, r.tContextReady, r.tFirstAnswerToken]) requireThat(t === null || Number.isFinite(t) && t >= 0, 'invalid time')
   if (r.method === 'R') requireThat(r.evidence === null && r.tContextReady === null && r.retrievalStatus === 'not-applicable', 'R retrieval must be null')
+  if (r.method === 'D' && r.retrievalStatus === 'completed') validateRouting(r.routing)
+  if (r.method !== 'D') requireThat(r.routing === undefined, 'routing diagnostics are D-only')
   if (r.generationStatus !== 'completed') requireThat(r.answer === '', 'failed answer must be empty')
   return r
 }

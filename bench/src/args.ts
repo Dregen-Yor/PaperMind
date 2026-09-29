@@ -23,7 +23,7 @@ export function parseArgs(argv: string[]): Args {
     return { command, root: options.get('--dataset-root') ?? 'dataset', split, out: required('--out'), ...(limitPapers ? { limitPapers } : {}) }
   }
   if (command === 'run') {
-    const methods = (options.get('--methods') ?? 'A,B,C,R').split(',') as Method[]
+    const methods = (options.get('--methods') ?? 'A,B,C,D,R').split(',') as Method[]
     uniqueIds(methods); requireThat(methods.every(m => METHODS.includes(m)), 'Unknown method')
     return { command, manifest: required('--manifest'), methods, out: required('--out') }
   }

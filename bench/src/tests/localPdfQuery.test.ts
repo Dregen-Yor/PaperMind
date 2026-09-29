@@ -24,3 +24,29 @@ it('does not transparently retry after visible stream output', async () => {
   await expect(c.chatStream([], () => {})).rejects.toThrow()
   expect(fetchImpl).toHaveBeenCalledTimes(1)
 })
+
+it('includes D routing and materialization in retrieval latency but keeps TTFT at the first visible answer token', async () => {
+  let now = 10
+  const routing = {
+    rawAttempts: ['ok'], reasoning: 'method', requestedNodeIds: ['n1'], selectedNodeIds: ['n1'],
+    selectedRanges: [{ nodeId: 'n1', startPage: 1, endPage: 1 }],
+  }
+  const client = { chatStream: async (_m: unknown, cb: (s: string) => void) => {
+    now = 80; cb(' '); now = 95; cb('Answer'); return { content: 'Answer' }
+  } } as unknown as StreamingLlmClient
+  const r = await executeQuery(question, { method: 'D', retrieve: async () => {
+    now = 60
+    return { text: 'method body', trace: [], routing }
+  } }, { client, now: () => now, systemPrompt: 'test' })
+  expect(r.tContextReady! - r.t0!).toBe(50)
+  expect(r.tFirstAnswerToken! - r.t0!).toBe(85)
+  expect(r.routing).toEqual(routing)
+})
+
+it('skips generation when D retrieval fails and does not fabricate evidence', async () => {
+  const client = { chatStream: vi.fn() } as unknown as StreamingLlmClient
+  const r = await executeQuery(question, { method: 'D', retrieve: async () => { throw new Error('routing failed') } }, { client, now: () => 1, systemPrompt: 'test' })
+  expect(r).toMatchObject({ retrievalStatus: 'failed', generationStatus: 'skipped', evidence: null, error: { stage: 'retrieve' } })
+  expect('routing' in r).toBe(false)
+  expect(client.chatStream).not.toHaveBeenCalled()
+})

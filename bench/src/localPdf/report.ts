@@ -1,6 +1,6 @@
 import type { MethodResult, RunSummary } from './types'
 import { hashCanonical, validateRunSummary } from './contract'
-const label = { A: 'A · BM25', B: 'B · BM25 + dense', C: 'C · BM25 + dense + outline', R: 'R · Full context' }
+const label = { A: 'A · BM25', B: 'B · BM25 + dense', C: 'C · BM25 + dense + outline', D: 'D · TOC tree routing', R: 'R · Full context' }
 const fmt = (n: number | null, digits: number) => n === null ? '—' : n.toFixed(digits)
 function table(rows: MethodResult[]): string[] {
   if (!rows.length) return []
