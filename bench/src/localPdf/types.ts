@@ -35,6 +35,8 @@ export interface RunIdentity {
   environmentSha256: string; modelFiles: FileIdentity[]
 }
 export interface RunHeader {
+  goldSha256?: string
+  dataset?: { split: Split; subset: boolean; papers: number }
   schema: 'local-pdf-qasper-v1'; runId: string; identity: RunIdentity
   methods: Method[]; expectedQuestionIds: string[]; status: RunStatus
 }
