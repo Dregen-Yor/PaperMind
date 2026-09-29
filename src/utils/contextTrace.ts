@@ -1,3 +1,4 @@
+import type { SourceRun } from './sourceTrace'
 export const CONTEXT_GROUP_SEPARATOR = '\n\n---\n\n'
 
 export interface ContextTokenizer {
@@ -5,6 +6,8 @@ export interface ContextTokenizer {
 }
 
 export interface ContextPiece {
+  passageId?: string
+  sourceRuns?: SourceRun[]
   page: number
   text: string
 }
