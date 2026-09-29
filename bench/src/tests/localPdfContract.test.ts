@@ -34,7 +34,7 @@ describe('local PDF contract', () => {
     expect(() => validateHeader(d)).not.toThrow()
   })
   it('requires routing diagnostics only for completed D retrievals', () => {
-    const d = recordFixture('D')
+    const d = recordFixture('D', 'q', { routing: undefined })
     expect(() => validateQueryRecord(d)).toThrow(/routing/)
     d.routing = {
       rawAttempts: ['{}'], reasoning: 'methods', requestedNodeIds: ['n1'], selectedNodeIds: ['n1'],

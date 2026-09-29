@@ -40,7 +40,14 @@ export async function runBenchmark(manifestPath: string, methods: Method[], out:
     const prepared = new Map<Method, PreparedMethod>(); const failures = new Map<Method, string>()
     if (corpus) for (const method of methods) {
       deps.progress?.(`paper ${p.id}: index ${method} start`)
-      try { prepared.set(method, await prepareMethod(method, corpus, deps.runtime.methodDeps)) }
+      try {
+        const ready = await prepareMethod(method, corpus, deps.runtime.methodDeps)
+        if (method === 'D') {
+          requireThat(ready.tree, 'D preparation did not produce a tree')
+          await writer.writeTree(p.id, ready.tree)
+        }
+        prepared.set(method, ready)
+      }
       catch (error) { failures.set(method, safeError(error)) }
     }
     for (const q of manifest.questions.filter(q => q.paperId === p.id)) for (const method of methods) {

@@ -1,6 +1,6 @@
 import type { MethodResult, RunSummary } from './types'
 import { hashCanonical, validateRunSummary } from './contract'
-const label = { A: 'A · BM25', B: 'B · BM25 + dense', C: 'C · BM25 + dense + outline', D: 'D · TOC tree routing', R: 'R · Full context' }
+const label = { A: 'A · BM25', B: 'B · BM25 + dense', C: 'C · BM25 + dense + outline', D: 'D · PageIndex-style TOC tree', R: 'R · Full context' }
 const fmt = (n: number | null, digits: number) => n === null ? '—' : n.toFixed(digits)
 function table(rows: MethodResult[]): string[] {
   if (!rows.length) return []
@@ -19,6 +19,7 @@ export function renderReport(summary: RunSummary): string {
     `Quality denominator: ${h.expectedQuestionIds.length}. Speed cohort: ${ids.length}; ${h.methods.length > 1 ? 'paired' : 'unpaired'}; hash ${hashCanonical(ids)}.`,
     `Generation identity: ${h.identity.generationSha256}. Evaluator: ${h.identity.evaluatorSha256}.`,
     'Input is parsed PDF text with canonical alignment; these are not official leaderboard inputs. Errors and original predictions are in records.jsonl.', '',
+    ...(h.methods.includes('D') ? ['D routes over title/page metadata without summaries; selected PDF page text is used only after routing.', ''] : []),
     ...table(summary.results.filter(r => r.method !== 'R')), '',
     ...(summary.results.some(r => r.method === 'R') ? ['Full-context reference (no evidence selection):', '', ...table(summary.results.filter(r => r.method === 'R'))] : []), '',
   ].join('\n')

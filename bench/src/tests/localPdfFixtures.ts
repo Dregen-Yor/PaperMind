@@ -11,7 +11,9 @@ export function headerFixture(methods: Method[] = ['A']): RunHeader {
   } }
 }
 export function recordFixture(method: Method = 'A', questionId = 'q', overrides: Partial<QueryRecord> = {}): QueryRecord {
-  return { method, questionId, paperId: 'p', retrievalStatus: method === 'R' ? 'not-applicable' : 'completed', generationStatus: 'completed', answer: 'yes', evidence: method === 'R' ? null : ['paragraph'], context: '', trace: [], t0: 0, tContextReady: method === 'R' ? null : 10, tFirstAnswerToken: 20, ...overrides }
+  return { method, questionId, paperId: 'p', retrievalStatus: method === 'R' ? 'not-applicable' : 'completed', generationStatus: 'completed', answer: 'yes', evidence: method === 'R' ? null : ['paragraph'], context: '', trace: [], t0: 0, tContextReady: method === 'R' ? null : 10, tFirstAnswerToken: 20,
+    ...(method === 'D' ? { routing: { rawAttempts: ['{}'], reasoning: 'section', requestedNodeIds: ['n0'], selectedNodeIds: ['n0'], selectedRanges: [{ nodeId: 'n0', startPage: 0, endPage: 0 }] } } : {}),
+    ...overrides }
 }
 export function summaryFixture(): RunSummary {
   return { header: headerFixture(), results: [{ method: 'A', metrics: { answerF1: 1, evidenceF1: 1, retrievalLatencyP50Ms: 10, retrievalLatencyP95Ms: 10, ttftP50Ms: 20, ttftP95Ms: 20 }, qualityQuestionIds: ['q'], speedQuestionIds: ['q'], paired: false }] }

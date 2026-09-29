@@ -3,7 +3,12 @@ import { join, resolve } from 'node:path'
 import type { QueryRecord, RunHeader, RunSummary } from './types'
 import { requireThat, validateHeader, validateQueryRecord, validateRunSummary } from './contract'
 import { safeError } from './errors'
-export interface RunWriter { append(record: QueryRecord): Promise<void>; finish(summary: RunSummary): Promise<void> }
+import { validateTocTree, type TocTreeArtifact } from './tocTree'
+export interface RunWriter {
+  append(record: QueryRecord): Promise<void>
+  writeTree(paperId: string, tree: TocTreeArtifact): Promise<void>
+  finish(summary: RunSummary): Promise<void>
+}
 async function atomicJson(path: string, value: unknown) {
   const temp = `${path}.tmp`
   const f = await open(temp, 'wx')
@@ -16,6 +21,7 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
   await writeFile(join(out, 'header.json'), JSON.stringify(header, null, 2) + '\n', { flag: 'wx' })
   await writeFile(join(out, 'records.jsonl'), '', { flag: 'wx' })
   const seen = new Set<string>()
+  const seenTrees = new Set<string>()
   return {
     append: async record => {
       validateQueryRecord(record)
@@ -26,6 +32,20 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
       const f = await open(join(out, 'records.jsonl'), 'a')
       try { await f.writeFile(JSON.stringify(safe) + '\n'); await f.sync() } finally { await f.close() }
       seen.add(key)
+    },
+    writeTree: async (paperId, tree) => {
+      requireThat(header.methods.includes('D'), 'trees are D-only artifacts')
+      requireThat(typeof paperId === 'string' && paperId.length > 0
+        && !paperId.includes('/') && !paperId.includes('\\') && paperId !== '.' && paperId !== '..', 'invalid tree paper ID')
+      requireThat(tree.paperId === paperId && !seenTrees.has(paperId), 'duplicate or mismatched paper tree')
+      const nodes = tree.roots.flatMap(function flatten(node): TocTreeArtifact['roots'] { return [node, ...node.children.flatMap(flatten)] })
+      const pageCount = Math.max(...nodes.map(node => node.endPage)) + 1
+      validateTocTree(tree, pageCount)
+      await mkdir(join(out, 'trees'), { recursive: true })
+      const path = join(out, 'trees', `${paperId}.json`)
+      const file = await open(path, 'wx')
+      try { await file.writeFile(JSON.stringify(tree, null, 2) + '\n'); await file.sync() } finally { await file.close() }
+      seenTrees.add(paperId)
     },
     finish: async summary => {
       validateRunSummary(summary)
