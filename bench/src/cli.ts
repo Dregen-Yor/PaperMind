@@ -33,6 +33,7 @@ export async function main(argv: string[], deps: CliDeps = defaults): Promise<nu
     await verifyManifest(args.manifest); evaluatorHash()
     await mkdir(dirname(resolve(args.out)), { recursive: true })
     let runtime: Awaited<ReturnType<typeof initializeRuntime>>
+    deps.stderr(`[${new Date().toISOString()}] initializing runtime\n`)
     try { runtime = await deps.runtime(process.env, args.methods) }
     catch (error) {
       // No metric identity exists yet: persist a failed launch, not fabricated run scores.
@@ -40,7 +41,7 @@ export async function main(argv: string[], deps: CliDeps = defaults): Promise<nu
       await writeFile(join(args.out, 'launch-error.json'), JSON.stringify({ status: 'failed', stage: 'initialize', error: safeError(error) }) + '\n', { flag: 'wx' })
       throw error
     }
-    const summary = await deps.run(args.manifest, args.methods, args.out, { runtime, now: () => performance.now(), score: scoreOfficial })
+    const summary = await deps.run(args.manifest, args.methods, args.out, { runtime, now: () => performance.now(), score: scoreOfficial, progress: message => deps.stderr(`[${new Date().toISOString()}] ${message}\n`) })
     deps.stdout(renderReport(summary))
     return summary.header.status === 'failed' ? 1 : 0
   } catch (error) { deps.stderr(`${safeError(error)}\n`); return 1 }

@@ -13,7 +13,7 @@ import { deriveEvidence } from './evidence'
 import { evaluatorHash, scoreOfficial } from './scoring'
 import { aggregateRun } from './timing'
 import { safeError } from './errors'
-export interface RunDeps { runtime: Awaited<ReturnType<typeof initializeRuntime>>; now: () => number; score: typeof scoreOfficial }
+export interface RunDeps { runtime: Awaited<ReturnType<typeof initializeRuntime>>; now: () => number; score: typeof scoreOfficial; progress?: (message: string) => void }
 export async function runBenchmark(manifestPath: string, methods: Method[], out: string, deps: RunDeps): Promise<RunSummary> {
   uniqueIds(methods); requireThat(methods.length > 0 && methods.every(m => METHODS.includes(m)), 'invalid methods')
   methods = METHODS.filter(m => methods.includes(m))
@@ -30,6 +30,7 @@ export async function runBenchmark(manifestPath: string, methods: Method[], out:
   await writeJson(join(out, 'manifest.json'), manifest)
   const records: QueryRecord[] = []
   for (const p of manifest.papers) {
+    deps.progress?.(`paper ${p.id}: preparing indexes`)
     const files = JSON.parse(await readFile(p.prepared.path, 'utf8')) as PreparedFiles
     let corpus: PreparedCorpus | undefined; let alignment: AlignmentArtifact | undefined
     if (files.corpus && files.alignment) {
@@ -38,10 +39,12 @@ export async function runBenchmark(manifestPath: string, methods: Method[], out:
     }
     const prepared = new Map<Method, PreparedMethod>(); const failures = new Map<Method, string>()
     if (corpus) for (const method of methods) {
+      deps.progress?.(`paper ${p.id}: index ${method} start`)
       try { prepared.set(method, await prepareMethod(method, corpus, deps.runtime.methodDeps)) }
       catch (error) { failures.set(method, safeError(error)) }
     }
     for (const q of manifest.questions.filter(q => q.paperId === p.id)) for (const method of methods) {
+      deps.progress?.(`query ${records.length + 1}/${manifest.questions.length * methods.length}: ${method} ${q.id} start`)
       const ready = prepared.get(method)
       let record: QueryRecord
       if (ready) {
@@ -56,6 +59,7 @@ export async function runBenchmark(manifestPath: string, methods: Method[], out:
         error: { stage: corpus ? 'index' : 'parse', message: failures.get(method) ?? safeError(p.parseError ?? 'PDF parsing failed') },
       }
       await writer.append(record); records.push(record)
+      deps.progress?.(`query ${records.length}/${manifest.questions.length * methods.length}: ${method} ${record.generationStatus}`)
     }
   }
   const scores = new Map<Method, QualityScores>()
