@@ -8,18 +8,79 @@ export interface PdfTextItem {
   str?: string
   transform?: number[]
   hasEOL?: boolean
+  fontName?: string
 }
 
-/** Rebuild visual text lines from PDF.js items so line-anchored headings survive extraction. */
-export function reconstructTextLines(items: PdfTextItem[]): string {
+export interface PdfTextLine {
+  page: number
+  text: string
+  x: number
+  y: number
+  fontSize: number
+  bold: boolean
+}
+
+type PageTextLine = Omit<PdfTextLine, 'page'>
+
+function finite(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function itemLayout(item: PdfTextItem) {
+  const transform = item.transform ?? []
+  const primary = Math.hypot(finite(transform[2]), finite(transform[3]))
+  const fallback = Math.hypot(finite(transform[0]), finite(transform[1]))
+  return {
+    x: finite(transform[4]),
+    y: finite(transform[5]),
+    fontSize: primary > 0 ? primary : fallback,
+    bold: /bold/i.test(item.fontName ?? ''),
+  }
+}
+
+/** Build layout lines separately so column boundaries never change the legacy page string. */
+function reconstructLayoutLines(items: PdfTextItem[]): PageTextLine[] {
+  const lines: Array<{ y: number; items: Array<{ x: number; text: string; fontSize: number; bold: boolean }> }> = []
+  let current: (typeof lines)[number] | undefined
+  let previousX = 0
+  let previousFontSize = 0
+  const flush = () => { current = undefined }
+  for (const item of items) {
+    const text = item.str?.trim()
+    if (!text) continue
+    const layout = itemLayout(item)
+    const gapLimit = Math.max(80, 4 * Math.max(previousFontSize, layout.fontSize))
+    if (!current || Math.abs(current.y - layout.y) > 2 || layout.x < previousX || layout.x - previousX > gapLimit) {
+      current = { y: layout.y, items: [] }
+      lines.push(current)
+    }
+    current.items.push({ x: layout.x, text, fontSize: layout.fontSize, bold: layout.bold })
+    previousX = layout.x
+    previousFontSize = layout.fontSize
+    if (item.hasEOL) flush()
+  }
+  return lines.map(line => {
+    const sorted = line.items.sort((a, b) => a.x - b.x)
+    return {
+      text: sorted.map(item => item.text).join(' '),
+      x: Math.min(...sorted.map(item => item.x)),
+      y: line.y,
+      fontSize: Math.max(...sorted.map(item => item.fontSize)),
+      bold: sorted.some(item => item.bold),
+    }
+  })
+}
+
+/** Rebuild the legacy page text and expose a separate layout view for TOC inference. */
+export function reconstructTextPage(items: PdfTextItem[]): { text: string; lines: PageTextLine[] } {
   const lines: Array<{ y: number; items: Array<{ x: number; text: string }> }> = []
   let current: { y: number; items: Array<{ x: number; text: string }> } | undefined
   const flush = () => { current = undefined }
   for (const item of items) {
     const text = item.str?.trim()
     if (!text) continue
-    const x = item.transform?.[4] ?? 0
-    const y = item.transform?.[5] ?? 0
+    const x = finite(item.transform?.[4])
+    const y = finite(item.transform?.[5])
     if (!current || Math.abs(current.y - y) > 2) {
       current = { y, items: [] }
       lines.push(current)
@@ -27,9 +88,15 @@ export function reconstructTextLines(items: PdfTextItem[]): string {
     current.items.push({ x, text })
     if (item.hasEOL) flush()
   }
-  return lines
+  const text = lines
     .map(line => line.items.sort((a, b) => a.x - b.x).map(item => item.text).join(' '))
     .join('\n')
+  return { text, lines: reconstructLayoutLines(items) }
+}
+
+/** Rebuild visual text lines from PDF.js items so line-anchored headings survive extraction. */
+export function reconstructTextLines(items: PdfTextItem[]): string {
+  return reconstructTextPage(items).text
 }
 
 export interface PdfPageLike {
@@ -62,6 +129,7 @@ export interface PdfDocumentDeps {
 
 export interface ExtractedPdfDocument {
   pages: string[]
+  layoutLines: PdfTextLine[][]
   /** Empty when the PDF has no usable outline (or when `readOutline: false`). */
   outline: PdfOutlineEntry[]
   /** Present only when outline reading ran; carries the rejection reason and entry count. */
@@ -132,14 +200,17 @@ export async function extractPdfDocument(base64: string, deps: PdfDocumentDeps =
   const doc = await loadDocument(bytes)
   try {
     const pages: string[] = []
+    const layoutLines: PdfTextLine[][] = []
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i)
       const content = await page.getTextContent()
-      pages.push(reconstructTextLines(content.items as PdfTextItem[]))
+      const reconstructed = reconstructTextPage(content.items as PdfTextItem[])
+      pages.push(reconstructed.text)
+      layoutLines.push(reconstructed.lines.map(line => ({ ...line, page: i - 1 })))
     }
-    if (!shouldReadOutline) return { pages, outline: [] }
+    if (!shouldReadOutline) return { pages, layoutLines, outline: [] }
     const { outline, outlineResult } = await readDocumentOutline(doc)
-    return { pages, outline, outlineResult }
+    return { pages, layoutLines, outline, outlineResult }
   } finally {
     // Best-effort teardown: never mask the original success/failure.
     try {

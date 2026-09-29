@@ -61,10 +61,11 @@ export async function prepareDataset(opts: { root: string; split: Split; out: st
     try {
       doc = await extract((await readFile(pdfPath)).toString('base64'))
       requireThat(doc.pages.some(page => page.trim().length > 0), 'PDF has no extractable text')
+      requireThat(Array.isArray(doc.layoutLines) && doc.layoutLines.length === doc.pages.length, 'PDF layout page count mismatch')
     } catch (error) { parseError = error instanceof Error ? error.message : String(error) }
     const files: PreparedFiles = { corpus: null, alignment: null }
     if (doc && !parseError) {
-      files.corpus = await writeJson(join(dir, 'corpus.json'), { paperId: id, pages: doc.pages, outline: doc.outline })
+      files.corpus = await writeJson(join(dir, 'corpus.json'), { paperId: id, pages: doc.pages, outline: doc.outline, layoutLines: doc.layoutLines })
       files.alignment = await writeJson(join(dir, 'alignment.json'), alignCanonical(doc.pages, { full_text: p.full_text, figures_and_tables: p.figures_and_tables }))
     } else files.parseError = parseError
     papers.push({ id, pdf, questionIds: p.qas.map(q => q.question_id), prepared: await writeJson(join(dir, 'paper.json'), files), parseStatus: parseError ? 'failed' : 'completed', ...(parseError ? { parseError } : {}) })

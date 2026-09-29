@@ -1,7 +1,7 @@
 import { it, expect, vi } from 'vitest'
 import * as bm25 from '../../../src/utils/bm25'
 import { prepareMethod } from '../localPdf/methods'
-const corpus = { paperId: 'p', pages: ['This is a complete original paragraph.'], outline: [] }
+const corpus = { paperId: 'p', pages: ['This is a complete original paragraph.'], outline: [], layoutLines: [[]] }
 it('A avoids embedding and R keeps whole text', async () => {
   const embedder = { id: 'test', embedQuery: vi.fn(), embedPassages: vi.fn() }
   const a = await prepareMethod('A', corpus, { countTokens: s => s.length, embedder })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { extractPdfDocument, reconstructTextLines } from '../utils/pdfDocument'
+import { extractPdfDocument, reconstructTextLines, reconstructTextPage } from '../utils/pdfDocument'
 import { extractPages } from '../utils/pageIndex'
 
 // pdfDocument.ts pulls in pdfjs-dist at module scope (worker init + getDocument +
@@ -34,6 +34,31 @@ function load(doc: ReturnType<typeof makeDoc>) {
 }
 
 describe('extractPdfDocument', () => {
+  it('preserves reconstructed text while exposing finite line layout', async () => {
+    const items = [
+      { str: 'body', transform: [12, 0, 0, 12, 20, 700], fontName: 'Regular' },
+      { str: 'text', transform: [12, 0, 0, 12, 55, 700], fontName: 'Regular', hasEOL: true },
+      { str: '2. Methods', transform: [18, 0, 0, 18, 120, 500], fontName: 'Paper-Bold', hasEOL: true },
+      { str: 'left', transform: [10, 0, 0, 10, 10, 300] },
+      { str: 'right', transform: [10, 0, 0, 10, 200, 300], hasEOL: true },
+    ]
+    const doc = makeDoc({ getPage: vi.fn(async () => ({ getTextContent: async () => ({ items }) })) })
+
+    const extracted = await extractPdfDocument(btoa('ignored'), load(doc))
+
+    expect(extracted.pages).toEqual(['body text\n2. Methods\nleft right'])
+    expect(extracted.layoutLines).toEqual([[
+      { page: 0, text: 'body text', x: 20, y: 700, fontSize: 12, bold: false },
+      { page: 0, text: '2. Methods', x: 120, y: 500, fontSize: 18, bold: true },
+      { page: 0, text: 'left', x: 10, y: 300, fontSize: 10, bold: false },
+      { page: 0, text: 'right', x: 200, y: 300, fontSize: 10, bold: false },
+    ]])
+    expect(reconstructTextPage([
+      { str: 'missing transform' },
+      { str: 'bad transform', transform: [NaN, 0, 0, NaN, NaN, NaN], hasEOL: true },
+    ]).lines.every(line => [line.x, line.y, line.fontSize].every(Number.isFinite))).toBe(true)
+  })
+
   it('extracts page text byte-for-byte as reconstructTextLines over the items', async () => {
     const items1 = [
       { str: 'body', transform: [1, 0, 0, 1, 20, 700] },

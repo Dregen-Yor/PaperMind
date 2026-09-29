@@ -4,10 +4,11 @@ import { startPassagePipeline } from '../../../src/utils/passageIndexBuilder'
 import { retrievePassageContext, type OutlineScoringNode } from '../../../src/utils/passageRetrieval'
 import { buildPdfOutlineIndex, type PdfOutlineEntry, type PdfOutlineNode } from '../../../src/utils/pdfOutline'
 import type { Method, ContextTrace } from './types'
+import type { PdfTextLine } from '../../../src/utils/pdfDocument'
 import { hashCanonical, requireThat } from './contract'
 import { materializeTracedContext } from './context'
 export const RETRIEVAL_CONFIG = { minTokens: 120, maxTokens: 350, contextBudget: 4096, rrfK: 60, sectionWeight: 0.5, neighbourFactor: 0.5, skipLimit: 20 }
-export interface PreparedCorpus { paperId: string; pages: string[]; outline: PdfOutlineEntry[] }
+export interface PreparedCorpus { paperId: string; pages: string[]; outline: PdfOutlineEntry[]; layoutLines: PdfTextLine[][] }
 export interface MethodDeps { countTokens: (s: string) => number; embedder?: Embedder }
 export interface PreparedMethod {
   method: Method

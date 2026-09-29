@@ -13,7 +13,7 @@ it('runs PDF questions and recomputes six metrics offline with mock generation',
   await writeFile(join(root, 'qasper-pdfs/p.pdf'), 'synthetic')
   await writeFile(join(root, 'qasper-dev-v0.3.json'), JSON.stringify(goldFixture()))
   const manifest = join(root, 'manifest.json')
-  await prepareDataset({ root, split: 'dev', out: manifest }, { extract: async () => ({ pages: ['paragraph'], outline: [] }) as unknown as ExtractedPdfDocument })
+  await prepareDataset({ root, split: 'dev', out: manifest }, { extract: async () => ({ pages: ['paragraph'], outline: [], layoutLines: [[]] }) as unknown as ExtractedPdfDocument })
   const client = { chatStream: async (_m: unknown, cb: (s:string)=>void) => { cb('Yes'); return { content: 'Yes' } } } as unknown as StreamingLlmClient
   let clock = 0
   const result = await runBenchmark(manifest, ['A', 'R'], join(root, 'run'), { runtime: { client, methodDeps: { countTokens: s => s.length }, identity: headerFixture().identity }, now: () => ++clock, score: scoreOfficial })
