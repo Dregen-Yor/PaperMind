@@ -58,3 +58,6 @@ bench/datasets/smoke/papers/
 bench/minibatch/*
 !bench/minibatch/annotations.json
 !bench/minibatch/README.md
+
+bench/prepared/
+**/__pycache__/
