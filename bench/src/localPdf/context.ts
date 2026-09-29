@@ -2,6 +2,22 @@ import type { Passage } from '../../../src/utils/passages'
 import { sliceSourceRuns, type ContextTrace } from '../../../src/utils/sourceTrace'
 import { CONTEXT_GROUP_SEPARATOR } from '../../../src/utils/contextTrace'
 import { requireThat, uniqueIds } from './contract'
+
+export function graphemePrefixWithinBudget(
+  base: string,
+  candidate: string,
+  countTokens: (text: string) => number,
+  maxTokens: number,
+): number {
+  if (countTokens(base + candidate) <= maxTokens) return candidate.length
+  let take = 0
+  for (const segment of new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(candidate)) {
+    const end = segment.index + segment.segment.length
+    if (countTokens(base + candidate.slice(0, end)) <= maxTokens) take = end
+  }
+  return take
+}
+
 export function materializeTracedContext(passages: Passage[], selectedIds: string[], pages: string[], countTokens: (text: string) => number, maxTokens: number): { text: string; trace: ContextTrace[]; tokenCount: number } {
   uniqueIds(selectedIds)
   requireThat(Number.isInteger(maxTokens) && maxTokens > 0, 'invalid context budget')
@@ -15,16 +31,7 @@ export function materializeTracedContext(passages: Passage[], selectedIds: strin
     if (prefix) trace.push({ passageId: id, contextStart: before, contextEnd: text.length, source: null })
     for (const piece of p.pieces) {
       requireThat(piece.sourceRuns, 'passage lacks source trace; rebuild index')
-      let take = piece.text.length
-      if (countTokens(text + piece.text) > maxTokens) {
-        take = 0
-        // Stop at the first over-budget grapheme; conservative, no BPE monotonicity assumption.
-        for (const segment of new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(piece.text)) {
-          const end = segment.index + segment.segment.length
-          if (countTokens(text + piece.text.slice(0, end)) > maxTokens) break
-          take = end
-        }
-      }
+      const take = graphemePrefixWithinBudget(text, piece.text, countTokens, maxTokens)
       const offset = text.length
       for (const r of sliceSourceRuns(piece.sourceRuns, 0, take)) {
         if (r.source) requireThat(piece.text.slice(r.textStart, r.textEnd) === pages[r.source.page].slice(r.source.start, r.source.end), 'source trace text mismatch')

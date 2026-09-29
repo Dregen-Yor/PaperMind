@@ -21,3 +21,11 @@ it('preserves sentence split provenance and Unicode boundaries', () => {
   const c = materializeTracedContext(p, p.map(x => x.id), pages, s => s.length, 100)
   for (const t of c.trace) if (t.source) expect(c.text.slice(t.contextStart, t.contextEnd)).toBe(pages[t.source.page].slice(t.source.start, t.source.end))
 })
+it('does not assume token counts are monotonic while clipping graphemes', () => {
+  const pages = ['abcde']
+  const passages = buildPassages(pages, s => s.length, { minTokens: 1, maxTokens: 20 })
+  const count = (text: string) => text.length === 2 ? 99 : text.length
+  const c = materializeTracedContext(passages, [passages[0].id], pages, count, 4)
+  expect(c.text).toBe('abcd')
+  expect(c.trace.at(-1)?.source?.end).toBe(4)
+})
