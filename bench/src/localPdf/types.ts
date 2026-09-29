@@ -24,7 +24,7 @@ export interface QueryRecord {
   method: Method; questionId: string; paperId: string
   retrievalStatus: 'completed' | 'failed' | 'not-applicable'
   generationStatus: 'completed' | 'failed' | 'skipped'
-  answer: string; partialAnswer?: string; evidence: string[] | null
+  answer: string; partialAnswer?: string; fallbackReason?: string; evidence: string[] | null
   context: string; trace: ContextTrace[]
   t0: number | null; tContextReady: number | null; tFirstAnswerToken: number | null
   error?: { stage: 'parse' | 'index' | 'retrieve' | 'generate'; message: string }
