@@ -3,7 +3,7 @@ const file = { path: 'fixture', sha256: 'a'.repeat(64) }
 export function manifestFixture(): Manifest {
   return { schema: 'local-pdf-qasper-v1', split: 'dev', subset: true, dataset: file, gold: file,
     papers: [{ id: 'p', pdf: file, prepared: file, questionIds: ['q'], parseStatus: 'completed' }],
-    questions: [{ id: 'q', paperId: 'p', question: 'What?' }], excluded: [], parserVersion: 'test', alignmentVersion: 'canonical-pdf-v1', fingerprint: 'f' }
+    questions: [{ id: 'q', paperId: 'p', question: 'What?' }], excluded: [], parserVersion: 'test', alignmentVersion: 'canonical-pdf-v2', fingerprint: 'f' }
 }
 export function headerFixture(methods: Method[] = ['A']): RunHeader {
   return { schema: 'local-pdf-qasper-v1', runId: 'test', methods, expectedQuestionIds: ['q'], status: 'completed', identity: {

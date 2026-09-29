@@ -69,7 +69,7 @@ export async function prepareDataset(opts: { root: string; split: Split; out: st
     } else files.parseError = parseError
     papers.push({ id, pdf, questionIds: p.qas.map(q => q.question_id), prepared: await writeJson(join(dir, 'paper.json'), files), parseStatus: parseError ? 'failed' : 'completed', ...(parseError ? { parseError } : {}) })
   }
-  const content = { schema: SCHEMA, split: opts.split, subset: opts.limitPapers !== undefined, dataset, gold: await writeJson(join(assets, 'gold.json'), gold), papers, questions, excluded, parserVersion: await parserIdentity(), alignmentVersion: 'canonical-pdf-v1' }
+  const content = { schema: SCHEMA, split: opts.split, subset: opts.limitPapers !== undefined, dataset, gold: await writeJson(join(assets, 'gold.json'), gold), papers, questions, excluded, parserVersion: await parserIdentity(), alignmentVersion: 'canonical-pdf-v2' }
   const m: Manifest = { ...content, fingerprint: hashCanonical(content) }
   validateManifest(m)
   await writeFile(out, JSON.stringify(m, null, 2) + '\n')

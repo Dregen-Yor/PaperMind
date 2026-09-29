@@ -30,3 +30,16 @@ it('groups residual words across normalized whitespace but not explained text', 
   expect(e.unmatched).toHaveLength(2)
   expect(e.unmatched.map(u => u.text)).toEqual(['alpha beta', 'gamma delta'])
 })
+it('does not emit removed line-end hyphens as false-positive evidence', async () => {
+  const pages = ['co-\noperation']
+  const alignment = alignCanonical(pages, { full_text: [{ section_name: '', paragraphs: ['cooperation'] }], figures_and_tables: [] })
+  const e = deriveEvidence('p', pages, { text: pages[0], trace: [
+    { passageId: 'P', contextStart: 0, contextEnd: 3, source: { page: 0, start: 0, end: 3 } },
+    { passageId: 'P', contextStart: 3, contextEnd: 4, source: null },
+    { passageId: 'P', contextStart: 4, contextEnd: pages[0].length, source: { page: 0, start: 4, end: pages[0].length } },
+  ] }, alignment)
+  expect(e.predicted).toEqual(['cooperation'])
+  const gold = goldFixture(); gold.p.full_text[0].paragraphs = ['cooperation']
+  gold.p.qas[0].answers[0].answer.evidence = ['cooperation']
+  expect((await scoreOfficial(gold, [recordFixture('A', 'q', { evidence: e.predicted })], ['q'], 'A')).evidenceF1).toBe(1)
+})

@@ -64,4 +64,4 @@ export interface CanonicalUnit {
   id: string; text: string; kind: 'paragraph' | 'caption'
   status: 'matched' | 'unmapped' | 'ambiguous'; ranges: SourceRange[]
 }
-export interface AlignmentArtifact { version: 'canonical-pdf-v1'; units: CanonicalUnit[] }
+export interface AlignmentArtifact { version: 'canonical-pdf-v2'; units: CanonicalUnit[] }
