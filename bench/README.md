@@ -46,3 +46,9 @@ PDF 文本通过不读取问题/答案标注的 canonical 对齐器映射到全�
 `dataset/`、`bench/prepared/`、`bench/results/`、`bench/cache/` 均是本地产物，不提交真实 PDF、gold、预测或凭据；自定义输出目录也应保持不提交。历史结果和原始小集资料保留，但旧 schema 不再被新 report 接受。
 
 测试：`npm test`、`npm run typecheck`；专用测试 `npx vitest run bench/src/tests/localPdf*.test.ts`。
+
+## 分词性能修复（2026-09-29）
+
+本地 BGE-M3 tokenizer 使用实例级 Unigram 优化：词典前缀搜索最多读取最长词条对应的 Unicode 码点数，避免 Transformers.js 3.x 在每个位置复制整段剩余文本。保留原始 normalizer、候选顺序、分数、未知字符处理和 Viterbi 解码；不修改依赖文件、切段规则或 4096 token 预算。依赖内部接口变化时明确失败，升级后须运行 `localPdfTokenizer.test.ts` 并重新核对真实 tokenizer。
+
+修复前 train mini-batch 的 12 次检索约 17.8–104.8 秒；不调用 API 的修复后重放约 0.3–1.9 秒，12 次上下文与 trace 全等，13 个不同历史上下文的完整 token 序列与原版一致。此处为本地调试证据，并非新的正式速度表。历史结果保持原样；正式 TTFT 仍需新 run，不能把新检索耗时拼接到旧 API 时间戳。
