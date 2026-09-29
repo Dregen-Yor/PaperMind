@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChatLLMFn, ChatMessage, LLMFn } from '../../src/utils/llm'
-import type { TokenSnapshot } from './types'
+export interface TokenSnapshot { totalTokens: number; incompleteRequestCount: number }
 import { parseOllamaNdjson } from './streaming/ollamaNdjson'
 import { parseOpenAiSse } from './streaming/openaiSse'
 
@@ -302,7 +302,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
       const res = await doFetch(`${env.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: env.model, messages, stream: false, ...ollamaOptions() }),
+        body: JSON.stringify({ model: env.model, messages, stream: false, truncate: false, ...ollamaOptions() }),
         signal,
       })
       if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
@@ -360,7 +360,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
       const res = await doFetch(`${env.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: env.model, messages, stream: true, ...ollamaOptions() }),
+        body: JSON.stringify({ model: env.model, messages, stream: true, truncate: false, ...ollamaOptions() }),
         signal,
       })
       if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)

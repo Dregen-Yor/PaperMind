@@ -1,6 +1,0 @@
-{
-  "name": "rag-jaccard", "kind": "traditional-rag",
-  "chunking": { "tokenizer": "bge-m3", "chunkSize": 512, "overlap": 64 },
-  "retrieval": { "algorithm": "jaccard", "topK": 10 },
-  "generationContext": { "topK": 5, "maxTokens": 4096 }
-}

@@ -17,10 +17,13 @@ export function normalizeWithOrigins(pages: string[]): NormalizedText {
     for (const match of text.matchAll(pattern)) {
       const start = match.index!
       out += text.slice(cursor, start) + replacement
-      mapped.push(...origins.slice(cursor, start), ...Array.from({ length: replacement.length }, () => [] as SourceRange[]))
+      for (let i = cursor; i < start; i++) mapped.push(origins[i])
+      for (let i = 0; i < replacement.length; i++) mapped.push([])
       cursor = start + match[0].length
     }
-    out += text.slice(cursor); mapped.push(...origins.slice(cursor)); text = out; origins = mapped
+    out += text.slice(cursor)
+    for (let i = cursor; i < origins.length; i++) mapped.push(origins[i])
+    text = out; origins = mapped
   }
   replace(/(?<=[A-Za-z])-\s*\n\s*(?=[A-Za-z])/g, '')
   replace(/\b(?:BIB|TAB|FIG|SEC|EQ)REF\d+\b/g, ' ')

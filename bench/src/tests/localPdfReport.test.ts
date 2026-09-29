@@ -10,6 +10,7 @@ it('uses nearest rank and no fake zero for empty cohort', () => {
 })
 it('uses common successful IDs but full quality denominator including failures', () => {
   const methods: Method[] = ['A', 'B', 'C', 'R']; const h = headerFixture(methods)
+  h.dataset = { split: 'train', subset: true, papers: 1 }
   const records = methods.map(m => recordFixture(m))
   const scores = new Map<Method, QualityScores>(methods.map(m => [m, { answerF1: 0.5, evidenceF1: m === 'R' ? null : 1, perQuestion: [{ id: 'q', answerF1: 0.5, evidenceF1: m === 'R' ? null : 1 }] }]))
   const good = aggregateRun(h, records, scores)
@@ -19,5 +20,6 @@ it('uses common successful IDs but full quality denominator including failures',
   expect(result.results[0].metrics).toMatchObject({ answerF1: 0.5, ttftP50Ms: null })
   expect(Object.keys(result.results[0].metrics)).toHaveLength(6)
   expect(renderReport(result)).toContain('—')
+  expect(renderReport(result)).toContain('train / development subset; PDFs: 1')
   expect(() => aggregateRun(h, [...records, records[0]], scores)).toThrow(/duplicate/)
 })

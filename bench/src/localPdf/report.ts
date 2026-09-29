@@ -14,6 +14,7 @@ export function renderReport(summary: RunSummary): string {
   const h = summary.header; const ids = summary.results[0]?.speedQuestionIds ?? []
   return [
     '# Local-PDF QASPER benchmark', '',
+    ...(h.dataset ? [`Dataset: ${h.dataset.split} / ${h.dataset.subset ? 'development subset' : 'all available PDFs'}; PDFs: ${h.dataset.papers}.`] : []),
     `Run: ${h.runId} (${h.status}). Manifest: ${h.identity.manifestFingerprint}.`,
     `Quality denominator: ${h.expectedQuestionIds.length}. Speed cohort: ${ids.length}; ${h.methods.length > 1 ? 'paired' : 'unpaired'}; hash ${hashCanonical(ids)}.`,
     `Generation identity: ${h.identity.generationSha256}. Evaluator: ${h.identity.evaluatorSha256}.`,

@@ -12,6 +12,7 @@ it('freezes original IDs, missing PDFs and parse failures without losing questio
   await writeFile(join(root, 'qasper-pdfs/p.pdf'), 'not a PDF')
   const out = join(root, 'manifest.json')
   const m = await prepareDataset({ root, split: 'dev', out }, { extract: async () => { throw new Error('parse failed') } })
+  expect(m.parserVersion).toMatch(/^pdfjs:.*:sources:[a-f0-9]{64}$/)
   expect(m.questions.map(q => q.id)).toEqual(['q'])
   expect(m.papers[0].parseStatus).toBe('failed')
   expect(m.excluded[0].questionIds).toEqual(['missing'])

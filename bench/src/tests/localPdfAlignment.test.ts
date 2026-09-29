@@ -15,3 +15,7 @@ it('keeps original caption strings and ignores annotations', () => {
   const a = alignCanonical(['Figure 1: Test'], { ...source([]), figures_and_tables: [{ file: 'f', caption: 'Figure 1: Test' }] })
   expect(a.units[0].text).toBe('FLOAT SELECTED: Figure 1: Test')
 })
+it('normalizes long PDF corpora without spreading origins onto the call stack', () => {
+  const text = 'word '.repeat(35000)
+  expect(alignCanonical([text], source(['absent'])).units[0].status).toBe('unmapped')
+})

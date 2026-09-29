@@ -1,6 +1,0 @@
-{
-  "name": "rag-bm25", "kind": "traditional-rag",
-  "chunking": { "tokenizer": "bge-m3", "chunkSize": 512, "overlap": 64 },
-  "retrieval": { "algorithm": "bm25", "topK": 10, "k1": 1.2, "b": 0.75 },
-  "generationContext": { "topK": 5, "maxTokens": 4096 }
-}

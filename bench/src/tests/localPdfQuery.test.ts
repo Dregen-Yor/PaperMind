@@ -5,13 +5,13 @@ import { executeQuery } from '../localPdf/query'
 const question = { id: 'q', paperId: 'p', question: 'What?' }
 it('measures retrieval and visible answer from same t0', async () => {
   let now = 100
-  const client = { chatStream: async (_m: unknown, cb: (s: string) => void) => { now = 180; cb(' '); now = 200; cb('Yes'); return { content: 'Yes' } } } as StreamingLlmClient
+  const client = { chatStream: async (_m: unknown, cb: (s: string) => void) => { now = 180; cb(' '); now = 200; cb('Yes'); return { content: 'Yes' } } } as unknown as StreamingLlmClient
   const r = await executeQuery(question, { method: 'A', retrieve: async () => { now = 140; return { text: '', trace: [] } } }, { client, now: () => now, systemPrompt: 'test' })
   expect(r.tContextReady! - r.t0!).toBe(40)
   expect(r.tFirstAnswerToken! - r.t0!).toBe(100)
 })
 it('keeps failed stream out of completed answers and R has no retrieval timing', async () => {
-  const client = { chatStream: async (_m: unknown, cb: (s: string) => void) => { cb('partial'); throw new Error('broken') } } as StreamingLlmClient
+  const client = { chatStream: async (_m: unknown, cb: (s: string) => void) => { cb('partial'); throw new Error('broken') } } as unknown as StreamingLlmClient
   const r = await executeQuery(question, { method: 'R', fullText: 'all' }, { client, now: () => 1, systemPrompt: 'test' })
   expect(r).toMatchObject({ answer: '', partialAnswer: 'partial', generationStatus: 'failed', tContextReady: null, evidence: null })
 })

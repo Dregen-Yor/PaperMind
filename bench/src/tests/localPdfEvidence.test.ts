@@ -21,3 +21,12 @@ it('joins coverage from multiple chunks and deduplicates evidence', () => {
   ] }, a)
   expect(e.predicted).toEqual(['paragraph'])
 })
+it('groups residual words across normalized whitespace but not explained text', () => {
+  const pages = ['alpha beta paragraph gamma delta']
+  const words = [...pages[0].matchAll(/\S+|\s+/g)]
+  const trace = words.map(m => ({ passageId: 'P', contextStart: m.index!, contextEnd: m.index! + m[0].length, source: m[0].trim() ? { page: 0, start: m.index!, end: m.index! + m[0].length } : null }))
+  const e = deriveEvidence('p', pages, { text: pages[0], trace }, alignCanonical(pages, goldFixture().p))
+  expect(e.predicted).toContain('paragraph')
+  expect(e.unmatched).toHaveLength(2)
+  expect(e.unmatched.map(u => u.text)).toEqual(['alpha beta', 'gamma delta'])
+})

@@ -384,7 +384,7 @@ describe('streaming requests', () => {
 
     const init = fetchImpl.mock.calls[0][1]
     expect(fetchImpl.mock.calls[0][0]).toBe('http://localhost:11434/api/chat')
-    expect(JSON.parse(init.body)).toMatchObject({ stream: true })
+    expect(JSON.parse(init.body)).toMatchObject({ stream: true, truncate: false })
     expect(JSON.parse(init.body).options).toBeUndefined()
     expect(init.headers['Authorization']).toBeUndefined()
     expect(visible).toEqual(['ollama answer'])
@@ -454,7 +454,7 @@ describe('streaming requests', () => {
     expect(client.tokenSnapshot()).toEqual({ totalTokens: 0, incompleteRequestCount: 1 })
   })
 
-  it('retries a usage-bearing stream timeout with normalized diagnostics and retained accounting', async () => {
+  it('does not retry a usage-bearing timeout after visible content', async () => {
     const body = [
       'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
       'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\n',
@@ -474,16 +474,12 @@ describe('streaming requests', () => {
     })
 
     await expect(client.chatStream([{ role: 'user', content: 'hello' }], () => {})).rejects.toThrow('LLM 请求超时（1ms）')
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
-    expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({
-      attempt: 1,
-      retryAttempts: 1,
-      error: 'LLM 请求超时（1ms）',
-    }))
-    expect(client.tokenSnapshot()).toEqual({ totalTokens: 10, incompleteRequestCount: 1 })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(onRetry).not.toHaveBeenCalled()
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 10, incompleteRequestCount: 0 })
   })
 
-  it('keeps failed partial content out of the retry result while preserving immediate callbacks', async () => {
+  it('fails partial streams without emitting a second answer', async () => {
     const partial = 'data: {"choices":[{"delta":{"content":"stale"}}]}\n\n'
     const onRetry = vi.fn()
     const visible: string[] = []
@@ -498,20 +494,18 @@ describe('streaming requests', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
-    const result = await client.chatStream([{ role: 'user', content: 'hello' }], delta => {
+    await expect(client.chatStream([{ role: 'user', content: 'hello' }], delta => {
       visible.push(delta)
       if (!marked) {
         marked = true
         ttftMarks++
       }
-    })
-
-    expect(result).toEqual({ content: 'fresh', usage: { inputTokens: 10, outputTokens: 2 } })
-    expect(visible).toEqual(['stale', 'fresh'])
+    })).rejects.toThrow('terminated')
+    expect(visible).toEqual(['stale'])
     expect(ttftMarks).toBe(1)
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
-    expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({ attempt: 1, retryAttempts: 1, delayMs: 0 }))
-    expect(client.tokenSnapshot()).toEqual({ totalTokens: 12, incompleteRequestCount: 1 })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(onRetry).not.toHaveBeenCalled()
+    expect(client.tokenSnapshot()).toEqual({ totalTokens: 0, incompleteRequestCount: 1 })
   })
 
   it('keeps complete stream usage when a later SSE event is malformed', async () => {

@@ -202,6 +202,8 @@ export interface HybridPassageDiagnostics extends OutlinePassageDiagnostics {
 export type PassageRetrievalResult = RetrievalResult & { hybrid: HybridPassageDiagnostics }
 
 export interface PassageRetrievalOptions {
+  /** Prebuilt for callers measuring index-ready query latency. */
+  bm25Scorer?: ReturnType<typeof buildBm25Scorer>
   embedder?: Embedder
   /**
    * 段落 token 计数器。**填充阶段不读这个选项**：预算判定只用索引里建库时写下的
@@ -409,7 +411,7 @@ export async function retrievePassageContext(
   }
   const denseAvailable = queryVector !== undefined && passagesUsable && queryVector.length === vectorDim
 
-  const bm25 = buildBm25Scorer(passages.map(passage => passage.searchText))
+  const bm25 = opts.bm25Scorer ?? buildBm25Scorer(passages.map(passage => passage.searchText))
 
   // 目录先验（方案 C 臂）：只排名次、不裁剪，且打分复用上面这一次查询向量——查询期零额外嵌入。
   // 绑一次本地变量：`outlineNodes` / `outlineAvailable` 都由它派生，下面读 `weight` 时也不用断言。

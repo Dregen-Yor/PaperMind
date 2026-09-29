@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, open, lstat } from 'node:fs/promises'
 import { resolve, dirname, join } from 'node:path'
@@ -6,6 +7,12 @@ import type { FileIdentity, Manifest, RawQasperDataset, Split } from './types'
 import { SCHEMA, hashCanonical, requireThat, validateManifest } from './contract'
 import { readQasper } from './dataset'
 import { alignCanonical } from './alignment'
+async function parserIdentity(): Promise<string> {
+  const require = createRequire(import.meta.url)
+  const version = (JSON.parse(await readFile(require.resolve('pdfjs-dist/package.json'), 'utf8')) as { version: string }).version
+  const sources = await Promise.all(['pdfDocument.ts', 'pdfOutline.ts'].map(name => readFile(require.resolve(`../../../src/utils/${name}`), 'utf8')))
+  return `pdfjs:${version}:sources:${hashCanonical(sources)}`
+}
 export interface PreparedFiles { corpus: FileIdentity | null; alignment: FileIdentity | null; parseError?: string }
 export async function fileIdentity(path: string): Promise<FileIdentity> {
   return { path: resolve(path), sha256: createHash('sha256').update(await readFile(path)).digest('hex') }
@@ -62,7 +69,7 @@ export async function prepareDataset(opts: { root: string; split: Split; out: st
     } else files.parseError = parseError
     papers.push({ id, pdf, questionIds: p.qas.map(q => q.question_id), prepared: await writeJson(join(dir, 'paper.json'), files), parseStatus: parseError ? 'failed' : 'completed', ...(parseError ? { parseError } : {}) })
   }
-  const content = { schema: SCHEMA, split: opts.split, subset: opts.limitPapers !== undefined, dataset, gold: await writeJson(join(assets, 'gold.json'), gold), papers, questions, excluded, parserVersion: 'pdfjs-pdfDocument-v1', alignmentVersion: 'canonical-pdf-v1' }
+  const content = { schema: SCHEMA, split: opts.split, subset: opts.limitPapers !== undefined, dataset, gold: await writeJson(join(assets, 'gold.json'), gold), papers, questions, excluded, parserVersion: await parserIdentity(), alignmentVersion: 'canonical-pdf-v1' }
   const m: Manifest = { ...content, fingerprint: hashCanonical(content) }
   validateManifest(m)
   await writeFile(out, JSON.stringify(m, null, 2) + '\n')

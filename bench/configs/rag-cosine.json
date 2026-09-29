@@ -1,7 +1,0 @@
-{
-  "name": "rag-cosine",
-  "kind": "traditional-rag",
-  "chunking": { "tokenizer": "bge-m3", "chunkSize": 512, "overlap": 64 },
-  "retrieval": { "algorithm": "cosine", "topK": 10, "embedding": { "model": "BAAI/bge-m3", "revision": "main", "queryPrefix": "", "normalize": true, "maxLength": 8192 } },
-  "generationContext": { "topK": 5, "maxTokens": 4096 }
-}

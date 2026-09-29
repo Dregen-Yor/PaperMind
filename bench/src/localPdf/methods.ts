@@ -1,3 +1,4 @@
+import { buildBm25Scorer } from '../../../src/utils/bm25'
 import type { Embedder } from '../../../src/utils/embedder'
 import { startPassagePipeline } from '../../../src/utils/passageIndexBuilder'
 import { retrievePassageContext, type OutlineScoringNode } from '../../../src/utils/passageRetrieval'
@@ -41,8 +42,9 @@ export async function prepareMethod(method: Method, corpus: PreparedCorpus, deps
       } catch { fallbackReason = 'invalid-outline-or-vectors' }
     }
   }
+  const bm25Scorer = buildBm25Scorer(index.passages.map(p => p.searchText))
   return { method, fallbackReason, retrieve: async question => {
-    const result = await retrievePassageContext(index, question, { ...RETRIEVAL_CONFIG, maxTokens: 4096, embedder, ...(outline ? { outline: { nodes: outline, weight: 0.5 } } : {}) })
+    const result = await retrievePassageContext(index, question, { ...RETRIEVAL_CONFIG, maxTokens: 4096, embedder, bm25Scorer, ...(outline ? { outline: { nodes: outline, weight: 0.5 } } : {}) })
     if (dense) requireThat(['bm25+dense', 'bm25+dense+outline'].includes(result.hybrid.retrievalMode), 'dense retrieval failed; refusing lexical fallback')
     return materializeTracedContext(index.passages, result.hybrid.selectedPassageIds, corpus.pages, deps.countTokens, 4096)
   } }

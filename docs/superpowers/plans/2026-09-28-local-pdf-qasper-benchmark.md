@@ -272,3 +272,7 @@ expect(referenceR.evidenceF1).toBeNull()
 ## Execution Handoff
 
 计划完成后先由用户审阅并选择执行方式。建议 **Subagent-driven**：10 个任务中，证据对齐、来源追踪、官方评分和速度集合相互依赖，逐任务独立审查有助于发现“代码可运行但测量口径错误”的问题。也可选 **Native**：本会话顺序执行所有任务，结束后独立整分支审查，成本更低。选择前不开始实施。
+
+## Native 实施记录（2026-09-29）
+
+Task 1–10 已实现。正式 dev 本地 prepare 实测 280 PDF / 1002 题，280 篇解析成功；train 三篇预检为 4 题。独立审查发现并修正 residual 证据分组、BM25 预构建和 Ollama 静默截断三项。长 PDF 的归一化栈溢出经真实 dev 预检发现并补回归测试。真实模型评测未执行；测试与提交记录见 `.superpowers/sdd/2026-09-28-local-pdf-qasper-benchmark/progress.md`。

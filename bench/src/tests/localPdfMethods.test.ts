@@ -1,4 +1,5 @@
 import { it, expect, vi } from 'vitest'
+import * as bm25 from '../../../src/utils/bm25'
 import { prepareMethod } from '../localPdf/methods'
 const corpus = { paperId: 'p', pages: ['This is a complete original paragraph.'], outline: [] }
 it('A avoids embedding and R keeps whole text', async () => {
@@ -19,4 +20,13 @@ it('C missing outline falls back to B and dense failure is explicit', async () =
   await expect(prepareMethod('B', corpus, { countTokens: s => s.length })).rejects.toThrow(/embedder/)
   embedder.embedQuery.mockRejectedValue(new Error('broken'))
   await expect(b.retrieve!('q')).rejects.toThrow(/dense/)
+})
+
+it('builds BM25 before timed queries and reuses it', async () => {
+  const build = vi.spyOn(bm25, 'buildBm25Scorer')
+  const a = await prepareMethod('A', corpus, { countTokens: s => s.length })
+  expect(build).toHaveBeenCalledTimes(1)
+  await a.retrieve!('first'); await a.retrieve!('second')
+  expect(build).toHaveBeenCalledTimes(1)
+  build.mockRestore()
 })

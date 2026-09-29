@@ -31,12 +31,21 @@ export function deriveEvidence(paperId: string, pages: string[], context: { text
   for (const t of context.trace) if (t.source) byPassage.set(t.passageId, [...(byPassage.get(t.passageId) ?? []), ...subtract(t.source, explained)])
   const unmatched: { id: string; passageId: string; ranges: SourceRange[]; text: string }[] = []
   for (const [passageId, ranges] of byPassage) {
+    const groups: SourceRange[][] = []
     for (const range of mergeRanges(ranges)) {
-      const text = pages[range.page].slice(range.start, range.end)
+      const previous = groups.at(-1)?.at(-1)
+      const gap = previous && (previous.page === range.page
+        ? pages[range.page].slice(previous.end, range.start)
+        : previous.page + 1 === range.page ? pages[previous.page].slice(previous.end) + pages[range.page].slice(0, range.start) : null)
+      if (previous && gap !== null && gap !== undefined && /^\s*$/.test(gap)) groups.at(-1)!.push(range)
+      else groups.push([range])
+    }
+    for (const group of groups) {
+      const text = group.map(range => pages[range.page].slice(range.start, range.end)).join(' ')
       if (!text.trim()) continue
-      const id = `UNALIGNED:${paperId}:${hashCanonical({ passageId, range })}`
+      const id = `UNALIGNED:${paperId}:${hashCanonical({ passageId, ranges: group })}`
       requireThat(!alignment.units.some(u => u.text === id), 'unmatched evidence ID collision')
-      unmatched.push({ id, passageId, ranges: [range], text }); predicted.push(id)
+      unmatched.push({ id, passageId, ranges: group, text }); predicted.push(id)
     }
   }
   return { predicted, unmatched }
