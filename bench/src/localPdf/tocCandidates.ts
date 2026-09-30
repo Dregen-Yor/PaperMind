@@ -15,6 +15,8 @@ const CAPTION = /^(figure|fig\.|table|algorithm)\b/i
 const REFERENCE_ENTRY = /^\p{Lu}[\p{L}'-]+(?:\s+et al\.)?\s+\d{4}[. ]/u
 const TOC_HEADING = /^(contents|table of contents)$/i
 const TOC_ENTRY = /^(.*?)\s*(?:\.{2,}|\s{2,})\s*([ivxlcdm]+|\d+)$/i
+const ARXIV_HEADER = /^arxiv:\d/i
+const CODE_MARKER = /(?:<|>|::=|←|%)/u
 
 function normalizeTitle(text: string): string {
   return text.normalize('NFKC').toLocaleLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim()
@@ -41,10 +43,22 @@ export function extractHeadingCandidates(layoutLines: PdfTextLine[][]): TocCandi
     const pages = repeated.get(key) ?? new Set<number>()
     pages.add(line.page); repeated.set(key, pages)
   }
+  const topLevelNumberedPerPage = new Map<number, number>()
+  for (const line of lines) {
+    if (numbering(line.text)?.length !== 1) continue
+    topLevelNumberedPerPage.set(line.page, (topLevelNumberedPerPage.get(line.page) ?? 0) + 1)
+  }
   return lines.flatMap(line => {
     const title = line.text.trim()
     const key = `${normalizeTitle(title)}\0${Math.round(line.y)}`
     if (repeated.get(key)!.size >= 3 || CAPTION.test(title) || REFERENCE_ENTRY.test(title)) return []
+    const numbered = numbering(title)
+    if (ARXIV_HEADER.test(title) || !/\p{L}/u.test(title) || CODE_MARKER.test(title) || numbered?.some(part => part <= 0)) return []
+    if (numbered?.length === 1) {
+      const rest = title.replace(/^\d+\.?\s+/, '')
+      const denseListItem = (topLevelNumberedPerPage.get(line.page) ?? 0) >= 4 && !/^\d+\.\s+\p{Lu}/u.test(title)
+      if (numbered[0] > 20 || /^\p{Ll}/u.test(rest) || denseListItem) return []
+    }
     const words = title.split(/\s+/).length
     const short = title.length <= 100 && words <= 20 && !/[.;:!?。；：！？]$/.test(title)
     const recognized = isHeadingLine(title) !== null
@@ -53,7 +67,7 @@ export function extractHeadingCandidates(layoutLines: PdfTextLine[][]): TocCandi
     return [{
       title,
       page: line.page,
-      numbering: numbering(title),
+      numbering: numbered,
       indent: line.x,
       fontSize: line.fontSize,
       bold: line.bold,

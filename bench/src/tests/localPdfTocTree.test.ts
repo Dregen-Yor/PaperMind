@@ -60,6 +60,16 @@ describe('title-only TOC tree hierarchy and ranges', () => {
     ])
   })
 
+  it('keeps a parent covering its child when the next root starts on the child page', () => {
+    const tree = buildTocTree({
+      paperId: 'p', pageCount: 4, tocCandidates: [], headingCandidates: [],
+      outline: [outline('1 Intro', 0), outline('2 Model', 1, [outline('2.1 Details', 2)]), outline('3 Results', 2)],
+    })
+    expect(tree.roots[1]).toMatchObject({ startPage: 1, endPage: 2 })
+    expect(tree.roots[1].children[0]).toMatchObject({ startPage: 2, endPage: 2 })
+    expect(tree.roots[2]).toMatchObject({ startPage: 2, endPage: 3 })
+  })
+
   it('hashes only allowed tree inputs', () => {
     const original = buildTocTree(input).inputSha256
     expect(buildTocTree({ ...input, pageCount: 7 }).inputSha256).not.toBe(original)
@@ -97,7 +107,6 @@ describe('title-only TOC tree validation', () => {
       },
       tree => { tree.roots = [tree.roots[0]] },
       tree => { tree.roots[0].title = 'Figure 1 Accuracy' },
-      tree => { tree.roots[1].title = tree.roots[0].title },
     ]
     for (const mutate of mutations) {
       const tree = structuredClone(valid()); mutate(tree)

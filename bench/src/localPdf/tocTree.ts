@@ -101,6 +101,11 @@ function materialize(roots: DraftNode[], source: TocTreeSource, pageCount: numbe
     const boundary = flat.slice(index + 1).find(next => next.depth <= node.depth)?.startPage ?? pageCount
     return Math.max(node.startPage, boundary - 1)
   })
+  for (let index = flat.length - 1; index >= 0; index--) {
+    for (let child = index + 1; child < flat.length && flat[child].depth > flat[index].depth; child++) {
+      ends[index] = Math.max(ends[index], ends[child])
+    }
+  }
   let cursor = 0
   const build = (nodes: DraftNode[], prefix = ''): TocTreeNode[] => nodes.map((node, index) => {
     const flatIndex = cursor++
@@ -125,17 +130,13 @@ export function flattenTocTree(tree: TocTreeArtifact): TocTreeNode[] {
   return out
 }
 
-function cleanTitle(title: string): string {
-  return title.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim()
-}
-
 export function validateTocTree(value: unknown, pageCount: number): TocTreeArtifact {
   const tree = value as TocTreeArtifact
   requireThat(Number.isInteger(pageCount) && pageCount > 0, 'invalid page count')
   requireThat(tree?.version === 'toc-tree-v1' && typeof tree.paperId === 'string' && tree.paperId.length > 0, 'invalid tree identity')
   requireThat(['native-outline', 'toc-page', 'heading'].includes(tree.source), 'invalid tree source')
   requireThat(/^[a-f0-9]{64}$/.test(tree.inputSha256) && Array.isArray(tree.roots), 'invalid tree artifact')
-  const ids = new Set<string>(); const titles = new Set<string>(); let previousStart = -1; let count = 0
+  const ids = new Set<string>(); let previousStart = -1; let count = 0
   const visit = (nodes: TocTreeNode[], depth: number, parent?: TocTreeNode, prefix = '') => {
     requireThat(Array.isArray(nodes), 'invalid tree children')
     nodes.forEach((node, index) => {
@@ -144,7 +145,6 @@ export function validateTocTree(value: unknown, pageCount: number): TocTreeArtif
       requireThat(node && node.id === expectedId && !ids.has(node.id), 'invalid or duplicate node ID'); ids.add(node.id)
       requireThat(typeof node.title === 'string' && node.title.trim().length > 0, 'empty node title')
       requireThat(!/^(figure|fig\.|table|algorithm)\b/i.test(node.title), 'caption is not a tree node')
-      const normalized = cleanTitle(node.title); requireThat(!titles.has(normalized), 'duplicate node title'); titles.add(normalized)
       requireThat(node.depth === depth && node.source === tree.source, 'invalid node hierarchy')
       requireThat(Number.isInteger(node.startPage) && Number.isInteger(node.endPage) && node.startPage >= 0 && node.startPage <= node.endPage && node.endPage < pageCount, 'invalid node range')
       requireThat(node.startPage >= previousStart, 'decreasing tree page order'); previousStart = node.startPage

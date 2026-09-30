@@ -39,6 +39,24 @@ describe('TOC heading candidates', () => {
     ])
     expect(extractHeadingCandidates(layout)).toEqual([])
   })
+
+  it('rejects dense algorithm lines, numeric/code artifacts, arXiv headers, and symbol-only lines', () => {
+    const layout = [
+      [line(0, '1. Introduction'), line(0, 'arXiv:1601.00901v1 [cs.AI] 5 Jan 2016', 20, 780, 20)],
+      [line(1, '2. Methods')],
+      [
+        line(2, '1 Parse( Phrase p, Non-terminal n'),
+        line(2, '3 foreach rule r of grammar do'),
+        line(2, '4 if n = left side of r then'),
+        line(2, '7 foreach term list of ambiguous lists do'),
+      ],
+      [line(3, '101 < LifeRole > ::= born in < Location > none'), line(3, '0.16 ms'), line(3, '∑', 20, 600, 15)],
+      [line(4, '2.1 Detailed model'), line(4, 'References')],
+    ]
+    expect(extractHeadingCandidates(layout).map(item => item.title)).toEqual([
+      '1. Introduction', '2. Methods', '2.1 Detailed model', 'References',
+    ])
+  })
 })
 
 describe('verified TOC-page candidates', () => {
