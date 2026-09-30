@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PdfTextLine } from '../../../src/utils/pdfDocument'
 import { extractHeadingCandidates, extractVerifiedTocCandidates } from '../localPdf/tocCandidates'
+import { buildTocTree, flattenTocTree } from '../localPdf/tocTree'
 
 function line(page: number, text: string, x = 20, y = 700, fontSize = 10, bold = false): PdfTextLine {
   return { page, text, x, y, fontSize, bold }
@@ -86,5 +87,23 @@ describe('verified TOC-page candidates', () => {
   it('rejects conflicting offsets and fewer than two verified entries', () => {
     expect(extractVerifiedTocCandidates([tocPage], [{ ...headings[0] }])).toEqual([])
     expect(extractVerifiedTocCandidates([tocPage], [headings[0], { ...headings[1], page: 8 }])).toEqual([])
+  })
+
+  it('does not leak rejected TOC-page entries back into heading fallback', () => {
+    const inconsistent = [
+      line(0, 'Contents', 20, 780, 18, true),
+      line(0, '1 Introduction ........ 1', 20, 700),
+      line(0, '2 Methods ........ 2', 20, 680),
+    ]
+    const body = [
+      [line(1, '1 Introduction', 20, 700, 14, true)],
+      [],
+      [line(3, '2 Methods', 20, 700, 14, true)],
+    ]
+    const layout = [inconsistent, ...body]
+    const headings = extractHeadingCandidates(layout)
+    expect(extractVerifiedTocCandidates(layout, headings)).toEqual([])
+    const tree = buildTocTree({ paperId: 'p', pageCount: 4, outline: [], tocCandidates: [], headingCandidates: headings })
+    expect(flattenTocTree(tree).map(node => node.title)).toEqual(['1 Introduction', '2 Methods'])
   })
 })

@@ -57,6 +57,13 @@ describe('extractPdfDocument', () => {
       { str: 'missing transform' },
       { str: 'bad transform', transform: [NaN, 0, 0, NaN, NaN, NaN], hasEOL: true },
     ]).lines.every(line => [line.x, line.y, line.fontSize].every(Number.isFinite))).toBe(true)
+    const malformed = [
+      { str: 'before', transform: [1, 0, 0, 1, 10, 700] },
+      { str: 'bad', transform: [1, 0, 0, 1, Number.NaN, Number.NaN] },
+      { str: 'after', transform: [1, 0, 0, 1, 30, 700] },
+    ]
+    expect(reconstructTextPage(malformed).text).toBe(reconstructTextLines(malformed))
+    expect(reconstructTextPage(malformed).text).toBe('before bad after')
   })
 
   it('extracts page text byte-for-byte as reconstructTextLines over the items', async () => {

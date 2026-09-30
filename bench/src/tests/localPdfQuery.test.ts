@@ -2,6 +2,7 @@ import { it, expect, vi } from 'vitest'
 import type { StreamingLlmClient } from '../llmClient'
 import { createLlmClient } from '../llmClient'
 import { executeQuery } from '../localPdf/query'
+import { TocRoutingError } from '../localPdf/tocRouting'
 const question = { id: 'q', paperId: 'p', question: 'What?' }
 it('measures retrieval and visible answer from same t0', async () => {
   let now = 100
@@ -49,4 +50,17 @@ it('skips generation when D retrieval fails and does not fabricate evidence', as
   expect(r).toMatchObject({ retrievalStatus: 'failed', generationStatus: 'skipped', evidence: null, error: { stage: 'retrieve' } })
   expect('routing' in r).toBe(false)
   expect(client.chatStream).not.toHaveBeenCalled()
+})
+
+it('persists failed D routing attempts and rejection reasons', async () => {
+  const client = { chatStream: vi.fn() } as unknown as StreamingLlmClient
+  const diagnostic = {
+    rawAttempts: ['invalid'], rejectionReasons: ['invalid routing JSON'], reasoning: '',
+    requestedNodeIds: [], selectedNodeIds: [], selectedRanges: [],
+  }
+  const r = await executeQuery(question, {
+    method: 'D', retrieve: async () => { throw new TocRoutingError(diagnostic) },
+  }, { client, now: () => 1, systemPrompt: 'test' })
+  expect(r.routing).toEqual(diagnostic)
+  expect(r).toMatchObject({ retrievalStatus: 'failed', generationStatus: 'skipped', error: { stage: 'retrieve' } })
 })

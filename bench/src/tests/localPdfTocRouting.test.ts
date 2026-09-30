@@ -81,9 +81,28 @@ describe('TOC routing retries and node resolution', () => {
 
   it('rejects after two invalid logical calls and never substitutes a node', async () => {
     const complete = vi.fn(async () => 'invalid')
-    await expect(routeTocQuestion('q', tree, complete)).rejects.toThrow(/two invalid/i)
+    const error = await routeTocQuestion('q', tree, complete).catch(value => value)
+    expect(error).toMatchObject({
+      message: expect.stringMatching(/two invalid/i),
+      diagnostic: {
+        rawAttempts: ['invalid', 'invalid'],
+        rejectionReasons: ['invalid routing JSON', 'invalid routing JSON'],
+        requestedNodeIds: [], selectedNodeIds: [], selectedRanges: [],
+      },
+    })
     expect(complete).toHaveBeenCalledTimes(2)
     expect(resolveTocNodeIds(['unknown'], tree)).toEqual([])
+  })
+
+  it('retains prior invalid output when the second logical call fails in transport', async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce('{"reasoning":"bad","node_ids":["unknown"]}')
+      .mockRejectedValueOnce(new Error('transport unavailable'))
+    const error = await routeTocQuestion('q', tree, complete).catch(value => value)
+    expect(error.diagnostic).toMatchObject({
+      rawAttempts: ['{"reasoning":"bad","node_ids":["unknown"]}'],
+      rejectionReasons: ['routing response contains unknown node ID', 'transport unavailable'],
+    })
   })
 })
 
@@ -111,5 +130,14 @@ describe('TOC page-range materialization', () => {
     expect(result.text).toBe('a'.repeat(4094))
     const source = result.trace.at(-1)!.source!
     expect(source).toEqual({ page: 0, start: 0, end: 4094 })
+  })
+
+  it('continues across empty pages and later selected ranges without stray separators', () => {
+    const result = materializePageRanges(['before', '', 'after', '', 'later'], [
+      { nodeId: 'n0', startPage: 0, endPage: 2 },
+      { nodeId: 'n1', startPage: 3, endPage: 4 },
+    ], text => text.length, 100)
+    expect(result.text).toBe('before\n\nafter\n\n---\n\nlater')
+    expect(result.trace.filter(item => item.source).map(item => item.source!.page)).toEqual([0, 2, 4])
   })
 })

@@ -51,7 +51,8 @@ export function extractHeadingCandidates(layoutLines: PdfTextLine[][]): TocCandi
   return lines.flatMap(line => {
     const title = line.text.trim()
     const key = `${normalizeTitle(title)}\0${Math.round(line.y)}`
-    if (repeated.get(key)!.size >= 3 || CAPTION.test(title) || REFERENCE_ENTRY.test(title)) return []
+    if (repeated.get(key)!.size >= 3 || CAPTION.test(title) || REFERENCE_ENTRY.test(title)
+      || TOC_HEADING.test(title) || TOC_ENTRY.test(title)) return []
     const numbered = numbering(title)
     if (ARXIV_HEADER.test(title) || !/\p{L}/u.test(title) || CODE_MARKER.test(title) || numbered?.some(part => part <= 0)) return []
     if (numbered?.length === 1) {

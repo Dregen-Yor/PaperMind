@@ -45,6 +45,7 @@ interface DraftNode {
   title: string
   depth: number
   startPage: number
+  numbering?: number[] | null
   children: DraftNode[]
 }
 
@@ -81,9 +82,16 @@ function candidateDraft(candidates: TocCandidate[]): DraftNode[] {
   const roots: DraftNode[] = []
   const stack: DraftNode[] = []
   for (const candidate of candidates) {
-    let depth = candidate.numbering ? Math.max(0, candidate.numbering.length - 1) : visualDepth(candidate, fontSizes, indents)
+    let depth: number
+    if (candidate.numbering?.length === 1) depth = 0
+    else if (candidate.numbering) {
+      const prefix = candidate.numbering.slice(0, -1)
+      const parentDepth = stack.findLastIndex(node => node.numbering?.length === prefix.length
+        && node.numbering.every((part, index) => part === prefix[index]))
+      depth = parentDepth < 0 ? 0 : parentDepth + 1
+    } else depth = visualDepth(candidate, fontSizes, indents)
     depth = Math.min(depth, stack.length)
-    const node: DraftNode = { title: candidate.title.trim(), depth, startPage: candidate.page, children: [] }
+    const node: DraftNode = { title: candidate.title.trim(), depth, startPage: candidate.page, numbering: candidate.numbering, children: [] }
     if (depth === 0) roots.push(node)
     else stack[depth - 1].children.push(node)
     stack.length = depth

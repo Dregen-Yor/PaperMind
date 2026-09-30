@@ -3,6 +3,7 @@ import type { StreamingLlmClient } from '../llmClient'
 import type { FrozenQuestion, QueryRecord } from './types'
 import type { PreparedMethod } from './methods'
 import { safeError } from './errors'
+import { TocRoutingError } from './tocRouting'
 export async function executeQuery(question: FrozenQuestion, prepared: PreparedMethod, deps: { client: StreamingLlmClient; now: () => number; systemPrompt: string }): Promise<QueryRecord> {
   const r: QueryRecord = {
     method: prepared.method, questionId: question.id, paperId: question.paperId,
@@ -16,7 +17,10 @@ export async function executeQuery(question: FrozenQuestion, prepared: PreparedM
       r.context = context.text; r.trace = context.trace
       if (context.routing) r.routing = context.routing
       r.tContextReady = deps.now(); r.retrievalStatus = 'completed'
-    } catch (error) { r.error = { stage: 'retrieve', message: safeError(error) }; return r }
+    } catch (error) {
+      if (error instanceof TocRoutingError) r.routing = error.diagnostic
+      r.error = { stage: 'retrieve', message: safeError(error) }; return r
+    }
   } else r.context = prepared.fullText!
   let partial = ''
   try {

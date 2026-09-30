@@ -79,8 +79,10 @@ export function reconstructTextPage(items: PdfTextItem[]): { text: string; lines
   for (const item of items) {
     const text = item.str?.trim()
     if (!text) continue
-    const x = finite(item.transform?.[4])
-    const y = finite(item.transform?.[5])
+    // Preserve the legacy page-string grouping exactly; finite normalization belongs only
+    // to the separate layout view consumed by the benchmark tree builder.
+    const x = item.transform?.[4] ?? 0
+    const y = item.transform?.[5] ?? 0
     if (!current || Math.abs(current.y - y) > 2) {
       current = { y, items: [] }
       lines.push(current)

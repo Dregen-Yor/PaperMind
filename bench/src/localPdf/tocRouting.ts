@@ -18,10 +18,22 @@ export const TOC_ROUTING_CONFIG_SHA256 = hashCanonical({
 
 export interface TocRoutingDiagnostic {
   rawAttempts: string[]
+  rejectionReasons?: string[]
   reasoning: string
   requestedNodeIds: string[]
   selectedNodeIds: string[]
   selectedRanges: Array<{ nodeId: string; startPage: number; endPage: number }>
+}
+
+export class TocRoutingError extends Error {
+  constructor(readonly diagnostic: TocRoutingDiagnostic) {
+    super('TOC routing failed after two invalid logical attempts')
+    this.name = 'TocRoutingError'
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : 'unknown routing failure'
 }
 
 function renderNode(node: TocTreeNode): string[] {
@@ -79,9 +91,12 @@ export async function routeTocQuestion(
   complete: (prompt: string) => Promise<string>,
 ): Promise<TocRoutingDiagnostic> {
   const rawAttempts: string[] = []
+  const rejectionReasons: string[] = []
   const prompt = buildTocRoutingPrompt(question, tree)
   for (let attempt = 0; attempt < TOC_ROUTING_CONFIG.logicalAttempts; attempt++) {
-    const raw = await complete(prompt)
+    let raw: string
+    try { raw = await complete(prompt) }
+    catch (error) { rejectionReasons.push(errorMessage(error)); continue }
     rawAttempts.push(raw)
     try {
       const parsed = parseTocRoutingResponse(raw, tree)
@@ -98,11 +113,19 @@ export async function routeTocQuestion(
           return { nodeId, startPage: node.startPage, endPage: node.endPage }
         }),
       }
-    } catch {
+    } catch (error) {
+      rejectionReasons.push(errorMessage(error))
       // A malformed logical response consumes one of the two explicit attempts.
     }
   }
-  throw new Error('TOC routing failed after two invalid logical attempts')
+  throw new TocRoutingError({
+    rawAttempts,
+    rejectionReasons,
+    reasoning: '',
+    requestedNodeIds: [],
+    selectedNodeIds: [],
+    selectedRanges: [],
+  })
 }
 
 export function materializePageRanges(
@@ -118,6 +141,7 @@ export function materializePageRanges(
   let emittedGroups = 0
 
   const append = (raw: string, passageId: string, source: ContextTrace['source']): boolean => {
+    if (!raw.length) return true
     const take = graphemePrefixWithinBudget(text, raw, countTokens, maxTokens)
     if (take === 0) return false
     const contextStart = text.length
@@ -140,13 +164,15 @@ export function materializePageRanges(
       if (!seenPages.has(page)) selectedPages.push(page)
     }
     if (!selectedPages.length) continue
+    selectedPages.forEach(page => seenPages.add(page))
+    const contentPages = selectedPages.filter(page => pages[page].length > 0)
+    if (!contentPages.length) continue
     const groupPrefix = emittedGroups > 0 ? CONTEXT_GROUP_SEPARATOR : ''
     if (groupPrefix && !append(groupPrefix, range.nodeId, null)) break
-    for (let index = 0; index < selectedPages.length; index++) {
-      const page = selectedPages[index]
+    for (let index = 0; index < contentPages.length; index++) {
+      const page = contentPages[index]
       const pagePrefix = index > 0 ? '\n\n' : ''
       if (pagePrefix && !append(pagePrefix, range.nodeId, null)) return { text, trace, tokenCount: countTokens(text) }
-      seenPages.add(page)
       if (!append(pages[page], range.nodeId, { page, start: 0, end: pages[page].length })) {
         return { text, trace, tokenCount: countTokens(text) }
       }

@@ -70,6 +70,19 @@ describe('title-only TOC tree hierarchy and ranges', () => {
     expect(tree.roots[2]).toMatchObject({ startPage: 2, endPage: 3 })
   })
 
+  it('promotes a numbered child when its required numbered parent is absent', () => {
+    const tree = buildTocTree({
+      paperId: 'p', pageCount: 4, outline: [], tocCandidates: [],
+      headingCandidates: [
+        candidate('1 Introduction', 0, [1]),
+        candidate('2.1 Orphan model', 1, [2, 1]),
+        candidate('3 Results', 2, [3]),
+      ],
+    })
+    expect(tree.roots.map(node => node.title)).toEqual(['1 Introduction', '2.1 Orphan model', '3 Results'])
+    expect(tree.roots.every(node => node.depth === 0)).toBe(true)
+  })
+
   it('hashes only allowed tree inputs', () => {
     const original = buildTocTree(input).inputSha256
     expect(buildTocTree({ ...input, pageCount: 7 }).inputSha256).not.toBe(original)

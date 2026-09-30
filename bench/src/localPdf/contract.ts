@@ -51,6 +51,14 @@ function validateRouting(value: QueryRecord['routing']): void {
       && Number.isInteger(range.startPage) && Number.isInteger(range.endPage)
       && range.startPage >= 0 && range.startPage <= range.endPage), 'invalid routing ranges')
 }
+function validateRoutingFailure(value: QueryRecord['routing']): void {
+  requireThat(value && Array.isArray(value.rawAttempts) && value.rawAttempts.length <= 2
+    && value.rawAttempts.every(raw => typeof raw === 'string'), 'invalid failed routing attempts')
+  requireThat(Array.isArray(value.rejectionReasons) && value.rejectionReasons.length >= 1 && value.rejectionReasons.length <= 2
+    && value.rejectionReasons.every(reason => typeof reason === 'string' && reason.length > 0), 'invalid routing rejection reasons')
+  requireThat(value.reasoning === '' && value.requestedNodeIds.length === 0
+    && value.selectedNodeIds.length === 0 && value.selectedRanges.length === 0, 'failed routing must not fabricate selections')
+}
 export function validateQueryRecord(value: unknown): QueryRecord {
   const r = value as QueryRecord
   requireThat(r && METHODS.includes(r.method) && typeof r.questionId === 'string' && typeof r.paperId === 'string', 'invalid record identity')
@@ -60,6 +68,7 @@ export function validateQueryRecord(value: unknown): QueryRecord {
   for (const t of [r.t0, r.tContextReady, r.tFirstAnswerToken]) requireThat(t === null || Number.isFinite(t) && t >= 0, 'invalid time')
   if (r.method === 'R') requireThat(r.evidence === null && r.tContextReady === null && r.retrievalStatus === 'not-applicable', 'R retrieval must be null')
   if (r.method === 'D' && r.retrievalStatus === 'completed') validateRouting(r.routing)
+  if (r.method === 'D' && r.retrievalStatus === 'failed' && r.routing !== undefined) validateRoutingFailure(r.routing)
   if (r.method !== 'D') requireThat(r.routing === undefined, 'routing diagnostics are D-only')
   if (r.generationStatus !== 'completed') requireThat(r.answer === '', 'failed answer must be empty')
   return r
