@@ -7,8 +7,10 @@
 需要项目 Node.js 依赖，以及 Python 3（只用标准库；可用 `BENCH_PYTHON` 指定可执行文件）。从仓库根目录运行：
 
 ```bash
-npm run bench -- prepare --split train --dataset-root dataset --limit-papers 3 --out bench/prepared/train-3.json
+npm run bench -- prepare --split train --dataset-root dataset --limit-papers 3 --out bench/prepared/train-3-toc-tree-v1.json
 npm run bench -- prepare --split dev --dataset-root dataset --out bench/prepared/dev.json
+# 冻结的 60 篇 / 179 题来源；prepare 后必须核对 papers=60、questions=179、subset=true
+npm run bench -- prepare --split dev --dataset-root bench/prepared/qasper-60-179-source --limit-papers 60 --out bench/prepared/qasper-60-179-toc-tree-v1.json
 
 # 配置同一回答模型；密钥只通过环境变量提供
 export BENCH_LLM_PROVIDER=openai
@@ -16,11 +18,11 @@ export BENCH_LLM_MODEL=your-model
 export BENCH_LLM_BASE_URL=https://your-endpoint.example/v1
 # BENCH_LLM_API_KEY 由本机安全环境注入
 
-npm run bench -- run --manifest bench/prepared/dev.json --methods A,B,C,R --out bench/results/pdf-dev-001
+npm run bench -- run --manifest bench/prepared/dev.json --methods A,B,C,D,R --out bench/results/pdf-dev-001
 npm run bench -- report --run bench/results/pdf-dev-001
 ```
 
-输出必须是新路径，不能覆盖既有 manifest 或 run。正式四组共 4,008 次逻辑回答请求，默认最多额外重试 3 次；先用 train 小集验证。`--methods A` 等单臂运行可以用于调试，速度标为未配对。report 不请求模型，可在无 API key 的环境重算；必须保留 run 内的 gold、预测和固定 evaluator。
+输出必须是新路径，不能覆盖既有 manifest 或 run；先用 train 小集验证。每道 D 题在回答调用之外增加一次目录路由调用，路由格式非法时再调用一次，最多两次；底层 HTTP 重试仍由统一 client 处理。`--methods A` 等单臂运行可以用于调试，速度标为未配对。report 不请求模型，可在无 API key 的环境重算；必须保留 run 内的 gold、预测和固定 evaluator。60 篇 / 179 题 manifest 的数量或 `subset: true` 不符合预期时，必须在任何 API 请求之前停止。
 
 回答配置沿用 `BENCH_QA_REQUEST_TIMEOUT_MS`（默认 120000）、`BENCH_QA_RETRY_ATTEMPTS`（默认 3）、`BENCH_QA_TOP_P` 和 `BENCH_QA_THINKING`（enabled/disabled）；输出上限 4096、temperature=0。所有臂共享配置。Ollama 不接受显式 thinking 参数，请使用支持 `truncate: false` 的服务版本；请求明确禁止静默截断。本地模型 endpoint 必须设置 `BENCH_EXECUTION_BACKEND`。
 
@@ -28,7 +30,11 @@ npm run bench -- report --run bench/results/pdf-dev-001
 
 ## 方法与六列指标
 
-A 是 BM25；B 是 BM25 + passage 向量；C 增加 PDF 原生目录先验，目录缺失/非法时回落 B 并记录原因。R 全文直投单列参考。A/B/C 共用 120/350 token 切段、4096 token 上下文预算。
+A 是 BM25；B 是 BM25 + passage 向量；C 增加 PDF 原生目录先验，目录缺失/非法时回落 B 并记录原因。D 是 PageIndex-style 目录树路由对照组，R 是全文直投单列参考。A/B/C 共用 120/350 token 切段、4096 token 上下文预算。
+
+D 的树按“有效 PDF 原生目录 → 经正文标题核验的目录页 → 正文标题”选取单一来源；只有标题、层级和页范围，不含正文、摘要、问题、答案或 gold。路由 prompt 也只含问题和这些元数据，严格返回 1–3 个节点 ID；最多两次逻辑尝试，失败后整题按 retrieval failure 记录，不回落 A/B/C/R。父子节点同时命中时保留更具体节点，重叠页只物化一次；从首个所选节点开头按相关性顺序填充，使用 grapheme 安全的 4096-token 前缀裁剪。
+
+这里的 “PageIndex-style” 只表示“标题/页码树 + LLM 节点路由 + 原页范围物化”的实验形态，不声称复现 PageIndex 的专有实现或摘要树。每篇成功的 D 树保存在 run 的 `trees/<paperId>.json`，每题原始路由尝试、reasoning、节点和页范围保存在 `records.jsonl` 的 `routing` 字段中。
 
 | 质量 | 速度（ms） |
 |---|---|
@@ -39,7 +45,7 @@ F1 使用 `bench/vendor/qasper/` 固定版本的官方 evaluator，范围 0–1�
 
 PDF 文本通过不读取问题/答案标注的 canonical 对齐器映射到全部原文段落/caption。只有最终上下文完整覆盖的单元才导出官方原始字符串；未对齐正文保留为不匹配项。因此分数包含 PDF 解析/对齐误差，不能直接等同官方 leaderboard 的 JSON 全文输入结果。逐题 trace、原始回答和错误保存在 records.jsonl。
 
-索引/模型已就绪后，retrieval latency 从收到问题到预算内上下文准备完成；TTFT 从同一起点到首个非空白可见回答 token（不含 reasoning 帧）。单题串行、回答/查询结果客户端缓存关闭，provider 缓存不保证可控。四组速度只用共同完整成功的问题，最近秩法 P50/P95；质量仍用全部冻结题。没有速度样本显示 `—`。R 的 EvidenceF1 和 retrieval latency 均不适用，全文超输入上限如实失败。
+索引/模型已就绪后，retrieval latency 从收到问题到预算内上下文准备完成；D 的一至两次路由调用和页范围物化全部计入该区间。TTFT 从同一起点到回答模型首个非空白可见 token（不含 reasoning 帧）。单题串行、回答/查询结果客户端缓存关闭，provider 缓存不保证可控。五组速度只用共同完整成功的问题，最近秩法 P50/P95；质量仍用全部冻结题。没有速度样本显示 `—`。R 的 EvidenceF1 和 retrieval latency 均不适用，全文超输入上限如实失败。
 
 初始化失败只写 launch-error.json，不能伪造指标。中断 run 标 incomplete；不拼接不同 run 的速度。断裂 JSONL 报损坏，不自动忽略尾部。全部生成失败退出非零。输入 bytes/hash 改变必须重新 prepare。
 
