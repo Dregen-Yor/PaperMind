@@ -10,12 +10,14 @@ export function graphemePrefixWithinBudget(
   maxTokens: number,
 ): number {
   if (countTokens(base + candidate) <= maxTokens) return candidate.length
-  let take = 0
-  for (const segment of new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(candidate)) {
-    const end = segment.index + segment.segment.length
-    if (countTokens(base + candidate.slice(0, end)) <= maxTokens) take = end
+  // Token counts are not monotonic. Descending search preserves the longest
+  // legal prefix without rechecking every shorter prefix after finding it.
+  const ends = Array.from(new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(candidate),
+    segment => segment.index + segment.segment.length)
+  for (let i = ends.length - 2; i >= 0; i--) {
+    if (countTokens(base + candidate.slice(0, ends[i])) <= maxTokens) return ends[i]
   }
-  return take
+  return 0
 }
 
 export function materializeTracedContext(passages: Passage[], selectedIds: string[], pages: string[], countTokens: (text: string) => number, maxTokens: number): { text: string; trace: ContextTrace[]; tokenCount: number } {

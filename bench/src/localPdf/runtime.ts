@@ -32,7 +32,7 @@ export async function initializeRuntime(env: Record<string, string | undefined>,
   const files: FileIdentity[] = []
   if (methods.some(m => m !== 'R')) {
     const tokenizer = await createBgeM3Tokenizer(cacheDir)
-    deps.countTokens = text => tokenizer.tokenize(text).length
+    deps.countTokens = tokenizer.countTokens
     deps.countTokens('Benchmark warmup.')
     const tokenFiles = await modelFiles(join(cacheDir, 'BAAI/bge-m3'))
     requireThat(tokenFiles.some(f => f.path.endsWith('tokenizer.json')), 'tokenizer files missing from cache')
