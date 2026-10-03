@@ -295,7 +295,7 @@ describe('traditional RAG runner', () => {
     expect(streamAnswer).toHaveBeenCalledWith([
       {
         role: 'system',
-        content: `system\n\nanswer in English\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\nevidence`,
+        content: `system\n\nanswer in English\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n参考内容：\nevidence\n\n${GROUNDING_INSTRUCTION}`,
       },
       { role: 'user', content: 'question?' },
     ], expect.any(Function))

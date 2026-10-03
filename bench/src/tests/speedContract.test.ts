@@ -32,7 +32,7 @@ describe('speed contract identities', () => {
       messages: [
         {
           role: 'system',
-          content: `system\n\nanswer in English\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\n__PAPERMIND_DYNAMIC_CONTEXT__`,
+          content: `system\n\nanswer in English\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n参考内容：\n__PAPERMIND_DYNAMIC_CONTEXT__\n\n${GROUNDING_INSTRUCTION}`,
         },
         { role: 'user', content: '__PAPERMIND_DYNAMIC_QUESTION__' },
       ],

@@ -12,8 +12,10 @@ const { buildAnswerMessages, MATH_FORMAT_INSTRUCTION } =
 const { GROUNDING_INSTRUCTION } = await import('../../../src/utils/answerMessages')
 const EXPECTED_MATH_FORMAT_INSTRUCTION =
   '数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。'
-const EXPECTED_GROUNDING_INSTRUCTION =
-  '涉及论文事实时，只依据参考内容作答；区分原文明确陈述与推断，不编造数据、方法或结论。先直接回答问题，再给出必要的证据与限定条件；结论必须与证据一致，并准确对应问题中的对象、范围和比较条件。参考内容不足以确定答案时，明确说明无法从当前参考内容确定；不要把“未提及”当作否定事实。按问题需要展开，避免重复问题或加入无关背景；用户要求详细解释时保留充分的论证。'
+const EXPECTED_GROUNDING_INSTRUCTION = `Answer the user's question using the reference content above.
+- Give the smallest complete answer. For a fact, name, number, list, or yes/no question, provide the requested information and only qualifications needed for correctness. Do not add background, repeat the question, or quote passages unless requested. For explanations, comparisons, derivations, or explicit requests for detail, provide the necessary reasoning.
+- Check the question's scope and all relevant evidence before stating the conclusion. A counterexample rules out an unqualified "all", "only", or "best" claim. The opening answer and its qualifications must agree.
+- State paper-specific claims only when supported. If the available text cannot establish the answer, say that it cannot be determined from the provided content. Missing evidence is not evidence for "no"; do not fill gaps with general knowledge.`
 
 describe('answer messages benchmark contract', () => {
   it('pins the exact production math-format instruction bytes', () => {
@@ -24,11 +26,11 @@ describe('answer messages benchmark contract', () => {
     expect(GROUNDING_INSTRUCTION).toBe(EXPECTED_GROUNDING_INSTRUCTION)
   })
 
-  it('uses the production builder for the exact final-answer prompt bytes', () => {
+  it('places the adaptive-detail instruction after reference content in the exact production prompt', () => {
     expect(buildAnswerMessages('evidence', 'question', [], 'system')).toEqual([
       {
         role: 'system',
-        content: `system\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n${EXPECTED_GROUNDING_INSTRUCTION}\n\n参考内容：\nevidence`,
+        content: `system\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\nevidence\n\n${EXPECTED_GROUNDING_INSTRUCTION}`,
       },
       { role: 'user', content: 'question' },
     ])
@@ -56,7 +58,7 @@ describe('answer messages benchmark contract', () => {
         {
           role: 'system',
           content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}`
-            + (context ? `\n\n${EXPECTED_GROUNDING_INSTRUCTION}\n\n参考内容：\n${context}` : ''),
+            + (context ? `\n\n参考内容：\n${context}\n\n${EXPECTED_GROUNDING_INSTRUCTION}` : ''),
         },
         ...originalHistory.slice(-19),
         { role: 'user', content: query },

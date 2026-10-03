@@ -1073,7 +1073,7 @@ describe('runFullContextQaTask — 生成上限基线', () => {
     expect(fullContextClient.chat).toHaveBeenCalledWith([
       {
         role: 'system',
-        content: `${baseSystemPrompt}\n\n${languageInstruction}\n\n${MATH_FORMAT_INSTRUCTION}\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\n${paper}`,
+        content: `${baseSystemPrompt}\n\n${languageInstruction}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${paper}\n\n${GROUNDING_INSTRUCTION}`,
       },
       { role: 'user', content: sample.questions[0].question },
     ])
@@ -1140,7 +1140,7 @@ describe('runFullContextQaTask — 生成上限基线', () => {
       },
     })
 
-    const expectedSystem = `${DEFAULT_SYSTEM_PROMPT}\n\n${MATH_FORMAT_INSTRUCTION}\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\n${speedSample.pages.join('\n\n')}`
+    const expectedSystem = `${DEFAULT_SYSTEM_PROMPT}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${speedSample.pages.join('\n\n')}\n\n${GROUNDING_INSTRUCTION}`
     expect(streamAnswer).toHaveBeenCalledTimes(2)
     expect(vi.mocked(streamAnswer).mock.calls[0][0]).toEqual([
       { role: 'system', content: expectedSystem },

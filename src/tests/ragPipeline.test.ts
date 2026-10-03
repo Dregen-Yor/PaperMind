@@ -68,7 +68,7 @@ describe('buildAnswerMessages', () => {
     expect(buildAnswerMessages(context, 'What is it?', [], systemPrompt)).toEqual([
       {
         role: 'system',
-        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\n${context}`,
+        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${context}\n\n${GROUNDING_INSTRUCTION}`,
       },
       { role: 'user', content: 'What is it?' },
     ])
