@@ -673,6 +673,24 @@ describe('retrieveRagContext 的段落路径', () => {
     expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
   })
 
+  it.each([0, 0.25])('forwards explicit headingWeight %s to passage retrieval', async headingWeight => {
+    const module = await import('../utils/passageRetrieval')
+    const original = module.retrievePassageContext
+    const forwarded: Array<number | undefined> = []
+    const spy = vi.spyOn(module, 'retrievePassageContext').mockImplementation(async (index, query, opts) => {
+      forwarded.push(opts?.headingWeight)
+      return original(index, query, opts)
+    })
+    try {
+      const llm = vi.fn()
+      await retrieveRagContext([densePaper()], 'Europarl', [], llm, {}, { passage: { headingWeight } })
+      expect(forwarded).toEqual([headingWeight])
+      expect(llm).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('转发 sectionWeight：卡片先验的权重真的改变融合选段（R42）', async () => {
     // 手工索引：4 段各 40 token、预算 45 → 只有融合第一名放得下，选段结果就是融合名次的直接读数。
     // 两路名次故意错开：BM25（查询 'alpha'）为 P02 > P01 > P03 > P04（只有 P02 命中该词），

@@ -461,7 +461,7 @@ describe('retrievePassageContext（模式判定与组装）', () => {
   })
 
   it('默认旋钮就是设计文档冻结值', () => {
-    expect(DEFAULT_HYBRID_OPTIONS).toEqual({ maxTokens: 4096, rrfK: 60, sectionWeight: 0.5, neighbourFactor: 0.5, skipLimit: 20 })
+    expect(DEFAULT_HYBRID_OPTIONS).toEqual({ maxTokens: 4096, rrfK: 60, sectionWeight: 0.5, headingWeight: 0, neighbourFactor: 0.5, skipLimit: 20 })
   })
 })
 

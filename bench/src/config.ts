@@ -195,6 +195,7 @@ function validateHybridKnobs(config: PaperMindConfig, path: string): void {
   require('maxInputChars', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
   require('rrfK', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
   require('sectionWeight', v => typeof v === 'number' && v >= 0 && v <= 1, '必须在 [0, 1]')
+  if (config.headingWeight !== undefined && !nonNegative(config.headingWeight)) fail(path, 'passage.headingWeight', '必须为有限非负数')
   require('neighbourFactor', v => typeof v === 'number' && v >= 0 && v <= 1, '必须在 [0, 1]')
   require('skipLimit', v => typeof v === 'number' && Number.isInteger(v) && v > 0, '必须存在且为正整数')
 }
@@ -225,7 +226,7 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
   const allowed = new Set([
     'topK', 'minScore', 'chunkPages', 'minSectionPages', 'maxSectionPages', 'maxContextChars', 'forceFixedChunk', 'enableRewrite',
     // 段落混合检索旋钮（方案 §7）：与其它参数一样显式列出，拼错的键不能静默失效
-    'minTokens', 'maxTokens', 'maxInputChars', 'rrfK', 'sectionWeight', 'neighbourFactor', 'skipLimit',
+    'minTokens', 'maxTokens', 'maxInputChars', 'rrfK', 'sectionWeight', 'headingWeight', 'neighbourFactor', 'skipLimit',
   ])
   for (const [key, values] of Object.entries(matrix)) {
     if (!allowed.has(key)) fail(path, `matrix.${key}`, '不是支持的 PaperMind 参数')
@@ -239,11 +240,12 @@ export function validatePaperMind(raw: Record<string, unknown>, path: string): C
   // 原样展开成若干条平铺臂，名字却还叫 papermind-hybrid——量出来的数字标着混合检索，
   // 实际一条 passage 参数都没下发。只在「恰好一边有」时报错：两者都缺席是合法的纯平铺配置
   // （`bench/configs/default.json`），两者都在则交给下面的 `validateHybridKnobs` 逐项校验。
-  const hasKnob = PASSAGE_KNOB_KEYS.some(key => matrix[key] !== undefined)
+  const passageKnobs = [...PASSAGE_KNOB_KEYS, 'headingWeight'] as const
+  const hasKnob = passageKnobs.some(key => matrix[key] !== undefined)
   const hasPassage = raw.passage !== undefined
   if (hasKnob !== hasPassage) {
     fail(path, 'passage', hasKnob
-      ? `段落旋钮 ${PASSAGE_KNOB_KEYS.filter(key => matrix[key] !== undefined).join('/')} 缺少配套的 passage 块：嵌入器不可消融，两者必须同时出现（否则会以混合检索之名跑平铺管道）`
+      ? `段落旋钮 ${passageKnobs.filter(key => matrix[key] !== undefined).join('/')} 缺少配套的 passage 块：嵌入器不可消融，两者必须同时出现（否则会以混合检索之名跑平铺管道）`
       : `缺少段落混合检索的七项旋钮 ${PASSAGE_KNOB_KEYS.join('/')}：passage 块必须与它们同时出现`)
   }
   const file: ConfigFile = raw.kind === 'semantic-tree'

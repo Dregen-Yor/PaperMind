@@ -42,21 +42,31 @@ Files: create `scripts/benchmark-passage-retrieval.ts` and `docs/testing/retriev
 - [x] Compare the full passage retrieval output against source from `1649433` using deterministic synthetic fixtures. Cover absent/present cards and vectors, mismatch/failure, tied scores, budgets, passage pieces and page provenance. For multi-paper RAG, compare stable output excluding wall-clock timings. Keep baseline source in a temporary directory rather than duplicating it in the repository.
 - [x] Add a repeatable local microbenchmark that loads baseline modules from a specified Git revision, warms both implementations, checks exact outputs and reports first-use preparation plus retrieval cost and warm P50/P95 on a fixed corpus/query sequence. Include parsed cache and request embedding behavioral results in documentation. Synthetic timing is engineering evidence only; private cache internals are not exported for instrumentation.
 - [x] Run `npm test`, `npm run typecheck`, `git diff --check`, and `CSC_IDENTITY_AUTO_DISCOVERY=false npm run build -- --dir`. Inspect the Electron app with isolated user data.
-- [ ] Record actual results and limitations, then commit/push the stage-one changes.
+- [x] Record actual results and limitations, then commit/push the stage-one changes.
+
+Stage one was committed and pushed as `fff50cc` after 1357 tests, typecheck, build and isolated Electron smoke passed.
 
 ## Task 4: Add the experimental heading prior with full benchmark wiring
 
 Files: `src/utils/passageRetrieval.ts`, `src/utils/ragPipeline.ts`, `bench/src/types.ts`, `bench/src/config.ts`, `bench/src/cli.ts`, `bench/src/runner/passageIndexHook.ts`, `bench/src/runner/qa.ts`, relevant passage tests; create `bench/configs/papermind-hybrid-heading.json`.
 
-- [ ] Add failing tests for explicit zero/default equivalence, no-title-hit equivalence, positive title influence, non-hit passage eligibility and unchanged raw evidence/page provenance. Add config validation and CLI/runner propagation tests.
-- [ ] Prepare contiguous subsection title ranges from existing passages. Score titles using BM25 and inherit positive-hit ranks into an independent weighted RRF list. Omit the entire signal when no title has a positive score. Never insert titles/cards into fact context or hard-filter other evidence.
-- [ ] Add optional `headingWeight` with production default zero. Preserve the seven required historical passage knobs; the new knob is optional, finite and nonnegative. Flow through config validation, matrix expansion, CLI, runner and RAG dependencies. Ensure actual config values appear in benchmark result metadata.
-- [ ] Add a separate matrix at heading weights `[0, 0.25, 0.5]`, fixed section weight `0.5` and the existing pinned small embedder parameters. Do not modify historical configurations.
-- [ ] Run focused passage, config, CLI and runner tests red then green. Obtain spec review then code quality review and address findings.
+- [x] Add failing tests for explicit zero/default equivalence, no-title-hit equivalence, positive title influence, non-hit passage eligibility and unchanged raw evidence/page provenance. Add config validation and CLI/runner propagation tests.
+- [x] Prepare contiguous subsection title ranges from existing passages. Score titles using BM25 and inherit positive-hit ranks into an independent weighted RRF list. Omit the entire signal when no title has a positive score. Never insert titles/cards into fact context or hard-filter other evidence.
+- [x] Add optional `headingWeight` with production default zero. Preserve the seven required historical passage knobs; the new knob is optional, finite and nonnegative. Flow through config validation, matrix expansion, CLI, runner and RAG dependencies. Ensure actual config values appear in benchmark result metadata.
+- [x] Add a separate matrix at heading weights `[0, 0.25, 0.5]`, fixed section weight `0.5` and the existing pinned small embedder parameters. Do not modify historical configurations.
+- [x] Run focused passage, config, CLI and runner tests red then green. Obtain spec review then code quality review and address findings.
+
+Task 4: initial RED covered retrieval/config, RAG/QA forwarding and CLI weights. The final focused integration run passed 139 tests; independent spec and code-quality reviews each reran 117 tests and found no remaining issues.
 
 ## Task 5: Final checks, documentation and delivery
 
-- [ ] Re-run full tests, typecheck, whitespace checks and application build after heading integration. Re-run the equivalence/microbenchmark with heading weight zero and add experimental heading timing separately.
-- [ ] Update documentation with usage, default-off behavior, exact timing results and the missing frozen 60-paper/179-question dataset/model configuration. Do not report new AnswerF1, EvidenceF1, TTFT or Q quality results without that evaluation.
-- [ ] Obtain final independent review of the complete diff.
+- [x] Re-run full tests, typecheck, whitespace checks and application build after heading integration. Re-run the equivalence/microbenchmark with heading weight zero and add experimental heading timing separately.
+- [x] Update documentation with usage, default-off behavior, exact timing results and available dataset/missing answering-model configuration. Do not report new AnswerF1, EvidenceF1, TTFT or Q quality results without that evaluation.
+- [x] Obtain final independent review of the complete diff.
 - [ ] Commit the heading experiment independently. Fetch before integration, preserve remote content for conflicts, fast-forward/merge into main as appropriate, push and verify main equals origin/main with a clean working tree. Keep the pre-sync stash as a recoverable backup.
+
+Verification extension (2026-10-04): the repository's public QASPER fetch script successfully produced the expected 60 papers / 179 questions in the ignored dataset path. Run a separate lexical-only heading ablation through the shared retrieval/materializer with the frozen BGE-M3 tokenizer and 4096 budget. Record the dataset/code fingerprints and page-level evidence metrics. This does not replace the full dense/card/answer-model evaluation or justify enabling the default.
+
+Final independent review (2026-10-04): the complete baseline-to-working-tree diff, measurement helpers and documentation were ready with no findings. The measured source fingerprint matched the files under review.
+
+Final checks (2026-10-04): 101 files / 1379 Vitest tests and 18 branding checks passed (one unavailable Linux validator skipped); typecheck, whitespace checks and macOS arm64 app build passed. Isolated Electron offline navigation passed for library/chat/settings with zero renderer errors. The microbenchmark passed 450 full-result comparisons; real lexical heading ablation covered all 179 questions and the fixed 122-question evidence cohort. Full answer quality and TTFT still require the answering-model configuration.

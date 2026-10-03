@@ -39,6 +39,58 @@ On 2026-10-04, `npm test` passed 99 files / 1357 Vitest tests and 18 branding ch
 
 ## Evaluation boundary
 
-The historical numbers in `prompt.md` come from different runs. They are background evidence for the design, not new measurements of this implementation. The frozen 60-paper/179-question QASPER slice and its answering-model configuration are not included in this checkout. A real comparison must reuse that slice, answer model, generation settings and prompts, the frozen 4096-token materializer and the common successful-question set for timing. Report AnswerF1, evidence metrics, retrieval P50/P95, TTFT, failure counts and index/model cold-start cost together.
+The historical numbers in `prompt.md` come from different runs. They are background evidence for the design, not new measurements of this implementation. On 2026-10-04, the repository's public fetch script downloaded the expected 60-paper/179-question QASPER slice into the ignored dataset path. The existing answering-model configuration is still unavailable. A full comparison must reuse that slice, answer model, generation settings and prompts, the frozen 4096-token materializer and the common successful-question set for timing. Report AnswerF1, evidence metrics, retrieval P50/P95, TTFT, failure counts and index/model cold-start cost together.
 
 Heading priors remain disabled by default until that controlled evaluation supports changing the default. Synthetic title-hit tests establish configurable behavior and provenance preservation; they do not establish answer-quality improvement.
+
+## Final engineering comparison
+
+After heading integration, the same 600-passage/120-query command passed **450 full-result equivalence cases** against `1649433`, including explicit zero weight versus omitted weight. On the same host/date, it measured:
+
+| Mode | Baseline warm P50 / P95 (ms) | Final warm P50 / P95 (ms) | Baseline / final first query (ms) |
+| --- | ---: | ---: | ---: |
+| BM25 | 110.366 / 117.061 | 0.425 / 0.543 | 118.558 / 110.791 |
+| Card lexical fallback | 111.500 / 120.711 | 1.351 / 2.487 | 112.934 / 127.021 |
+| Passage dense | 110.785 / 118.072 | 0.638 / 0.781 | 187.117 / 110.568 |
+| Full fusion | 111.536 / 117.976 | 0.719 / 0.976 | 112.300 / 110.400 |
+
+Repeated parsing measured P50/P95 3.135375 / 3.666458 ms, versus 0.000250 / 0.000375 ms for the same in-process string cache lookup. The stage-one scope and limitations above apply unchanged.
+
+The separate synthetic full-fusion heading arms measured first-query / warm P50 / warm P95 at weight 0: 110.914 / 0.747 / 0.954 ms; weight 0.25: 114.822 / 0.759 / 0.860 ms; weight 0.5: 110.831 / 0.723 / 0.824 ms. These sequential microbenchmarks demonstrate low local scoring overhead, not end-to-end model latency or a reliable advantage for a particular positive weight.
+
+The final `npm test` run passed 101 files / 1379 Vitest tests and 18 branding checks, with the same unavailable Linux desktop validator skipped. `npm run typecheck` and `git diff --check` passed. The macOS arm64 app directory build passed again, followed by isolated Electron offline smoke checks for library, chat and settings: all images loaded, zero renderer errors. The final independent review found no issues.
+
+## Heading experiment
+
+`headingWeight` is optional and defaults to zero. Positive weights add a sparse BM25 subsection-title RRF signal; they do not filter other passages or insert headings into fact context. Zero weight and queries without a positive heading hit preserve the preceding implementation's results. Historical benchmark configurations are unchanged.
+
+The separate `papermind-hybrid-heading` configuration compares weights `0`, `0.25` and `0.5`, holding section weight at `0.5` and the existing small embedder identity/settings fixed. With the same answering-model environment configured privately, run:
+
+```sh
+npm run bench -- --task qa --dataset qasper --config papermind-hybrid-heading --speed
+```
+
+The speed mode disables answer-cache reuse and runs with concurrency one. The selected weight is forwarded through the CLI, runner and shared RAG pipeline and recorded in each experiment's config metadata. This command was not run with an answering model in this verification.
+
+For the separate retrieval-only lexical ablation:
+
+```sh
+QASPER_LIMIT=60 node --import tsx bench/datasets/qasper/fetch.ts
+node --import tsx scripts/evaluate-heading-retrieval.ts
+```
+
+The helper uses all 179 questions, real passage segmentation at 120–350 tokens, the shared product RAG pipeline and the frozen BGE-M3 tokenizer/materializer at 4096 tokens. Evidence metrics use the fixed 122-question eligible cohort and final materialized page order. There are no dense vectors, structure cards or generated answers. The helper aborts rather than recording failed questions as zero-valued results.
+
+Measured on 2026-10-04 with Node `v24.19.0`, macOS arm64:
+
+| Heading weight | Evidence recall | Evidence hit rate | Context precision | Context-page MRR | Retrieval + materialization P50 / P95 (ms) | Changed selections / 179 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.989754 | 0.991803 | 0.197089 | 0.409170 | 206.889 / 308.299 | 0 |
+| 0.25 | 0.989754 | 0.991803 | 0.197872 | 0.410819 | 208.966 / 312.611 | 6 |
+| 0.5 | 0.989754 | 0.991803 | 0.197944 | 0.411082 | 206.295 / 311.390 | 6 |
+
+No eligible question's recall improved or worsened, and no context exceeded the budget or required truncation. Tokenizer loading took 6198.711 ms; segmentation and three warm retrieval/materialization calls per paper took 79849.655 ms in total. These preparation costs are reported separately from the measured query percentiles. The arms run sequentially on one host, so the small latency differences do not establish a speed gain.
+
+Dataset fingerprint: `ad7851b9c08b693f133396eff17df0bad055084c9fcefa81d31d8ebe93f1c83d`. Eligible-question IDs hash: `736a84c84883c8ea530714a1989339166e240aa189850d741b37bcc037e5e9fe`. Retrieval/helper source fingerprint: `8278932d0d494d2144e3a73ba9efcd4b6710d3d45277d6f14c98c53366b293f1`. The run used uncommitted heading changes on base `fff50cc`; the fingerprint identifies the measured source. Tokenizer revision is `main`, matching the frozen evaluation contract.
+
+This real-data lexical comparison showed unchanged evidence recall and small page-order/precision changes. It does not establish improvement for the full dense/card method or answer quality. AnswerF1, EvidenceF1, TTFT and Q scores remain unmeasured, and heading priors remain off by default.

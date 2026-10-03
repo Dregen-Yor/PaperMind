@@ -105,8 +105,11 @@ async function main() {
       for (const query of queries) {
         for (const maxTokens of [0, 80, 300, 4096, 1_000_000]) {
           const options = { ...variant.options, maxTokens }
-          deepStrictEqual(await retrievePassageContext(variant.index, query, options), await baseline.retrievePassageContext(variant.index, query, options))
-          equivalenceCases++
+          const current = await retrievePassageContext(variant.index, query, options)
+          deepStrictEqual(current, await baseline.retrievePassageContext(variant.index, query, options))
+          const disabledHeading = { ...options, headingWeight: 0 }
+          deepStrictEqual(await retrievePassageContext(variant.index, query, disabledHeading), current)
+          equivalenceCases += 2
         }
       }
     }
@@ -156,23 +159,28 @@ async function main() {
       deepStrictEqual(await retrieveRagContext([paper, paper], queries[0], [], llm, {}, dependencies), await baselineRag.retrieveRagContext([paper, paper], queries[0], [], llm, {}, dependencies))
       equivalenceCases++
     }
+    const measure = async (retrieve: typeof retrievePassageContext, input: PassageIndex, options: Parameters<typeof retrievePassageContext>[2]) => {
+      const fresh = { ...input, passages: [...input.passages] }
+      const started = performance.now()
+      await retrieve(fresh, queries[0], options)
+      const firstQueryMs = Number((performance.now() - started).toFixed(3))
+      for (let i = 0; i < 16; i++) await retrieve(fresh, queries[i % queries.length], options)
+      const samples = []
+      for (let i = 0; i < iterations; i++) {
+        const start = performance.now()
+        await retrieve(fresh, queries[i % queries.length], options)
+        samples.push(performance.now() - start)
+      }
+      return { firstQueryMs, warmP50Ms: percentile(samples, 0.5), warmP95Ms: percentile(samples, 0.95) }
+    }
     const timings = []
     for (const variant of variants.slice(0, 4)) {
-      const measure = async (retrieve: typeof retrievePassageContext) => {
-        const fresh = { ...variant.index, passages: [...variant.index.passages] }
-        const started = performance.now()
-        await retrieve(fresh, queries[0], variant.options)
-        const firstQueryMs = Number((performance.now() - started).toFixed(3))
-        for (let i = 0; i < 16; i++) await retrieve(fresh, queries[i % queries.length], variant.options)
-        const samples = []
-        for (let i = 0; i < iterations; i++) {
-          const start = performance.now()
-          await retrieve(fresh, queries[i % queries.length], variant.options)
-          samples.push(performance.now() - start)
-        }
-        return { firstQueryMs, warmP50Ms: percentile(samples, 0.5), warmP95Ms: percentile(samples, 0.95) }
-      }
-      timings.push({ mode: variant.name, baseline: await measure(baseline.retrievePassageContext), optimized: await measure(retrievePassageContext) })
+      timings.push({ mode: variant.name, baseline: await measure(baseline.retrievePassageContext, variant.index, variant.options), optimized: await measure(retrievePassageContext, variant.index, variant.options) })
+    }
+    const headingTimings = []
+    for (const headingWeight of [0, 0.25, 0.5]) {
+      const options = { embedder, headingWeight }
+      headingTimings.push({ headingWeight, ...await measure(retrievePassageContext, index, options) })
     }
     const record = { indexJson: JSON.stringify(serializePassageIndex(index)), pagesJson: JSON.stringify(index.passages.map(passage => passage.text)) }
     const cache = createParsedPaperCache()
@@ -192,7 +200,7 @@ async function main() {
       }
       parsedRecordTimings.push({ mode: name, warmP50Ms: percentile(samples, 0.5, 6), warmP95Ms: percentile(samples, 0.95, 6) })
     }
-    console.log(JSON.stringify({ baselineSha, node: process.version, platform: `${process.platform}-${process.arch}`, passageCount, iterations, equivalenceCases, timings, parsedRecordTimings, scope: 'synthetic CPU retrieval and record parsing; deterministic 4-dimensional fake embeddings; no answer generation, inference, database IPC or network latency' }, null, 2))
+    console.log(JSON.stringify({ baselineSha, node: process.version, platform: `${process.platform}-${process.arch}`, passageCount, iterations, equivalenceCases, timings, headingTimings, parsedRecordTimings, scope: 'synthetic CPU retrieval and record parsing; deterministic 4-dimensional fake embeddings; no answer generation, inference, database IPC or network latency' }, null, 2))
   } finally {
     await rm(temporary, { recursive: true, force: true })
   }

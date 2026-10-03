@@ -23,6 +23,7 @@ export interface HybridKnobs {
   maxInputChars: number
   rrfK: number
   sectionWeight: number
+  headingWeight?: number
   neighbourFactor: number
   skipLimit: number
 }

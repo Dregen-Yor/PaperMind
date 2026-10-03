@@ -41,8 +41,11 @@ export interface FusePassageCandidatesArgs {
   dense?: ((query: string) => RankedItem[]) | undefined
   /** 卡片先验路（向量或词法）；卡片不可用时为 undefined */
   card?: ((query: string) => RankedItem[]) | undefined
+  /** 标题导航先验：仅包含标题正命中的段落 */
+  heading?: ((query: string) => RankedItem[]) | undefined
   rrfK: number
   sectionWeight: number
+  headingWeight?: number
   /** 占位参数：调用方已决定各路的可用性，这里只做融合 */
   queryVector?: Float32Array
   passagesCannotUseVectors: boolean
@@ -90,7 +93,7 @@ export function inheritCardRanks(
   })
 }
 
-/** 三路（可少路）加权 RRF，返回按分数降序、同分按 order 升序的候选。 */
+/** 加权 RRF，返回按分数降序、同分按 order 升序的候选。 */
 export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageCandidate[] {
   const lists: RankedItem[][] = [args.bm25(args.query)]
   const weights: number[] = [1]
@@ -101,6 +104,13 @@ export function fusePassageCandidates(args: FusePassageCandidatesArgs): PassageC
   if (args.card) {
     lists.push(args.card(args.query))
     weights.push(args.sectionWeight)
+  }
+  if (args.heading && (args.headingWeight ?? 0) > 0) {
+    const hits = args.heading(args.query)
+    if (hits.length > 0) {
+      lists.push(hits)
+      weights.push(args.headingWeight!)
+    }
   }
   const fused = reciprocalRankFusion(lists, args.rrfK, weights)
   const candidates = fused.map(item => ({
@@ -135,14 +145,17 @@ export interface PassageRetrievalOptions {
   maxTokens?: number
   rrfK?: number
   sectionWeight?: number
+  /** 实验性标题导航先验；默认关闭，标题不进入事实上下文 */
+  headingWeight?: number
   neighbourFactor?: number
   skipLimit?: number
 }
 
-export const DEFAULT_HYBRID_OPTIONS: Required<Pick<PassageRetrievalOptions, 'maxTokens' | 'rrfK' | 'sectionWeight' | 'neighbourFactor' | 'skipLimit'>> = {
+export const DEFAULT_HYBRID_OPTIONS: Required<Pick<PassageRetrievalOptions, 'maxTokens' | 'rrfK' | 'sectionWeight' | 'headingWeight' | 'neighbourFactor' | 'skipLimit'>> = {
   maxTokens: 4096,
   rrfK: 60,
   sectionWeight: 0.5,
+  headingWeight: 0,
   neighbourFactor: 0.5,
   skipLimit: 20,
 }
@@ -233,16 +246,23 @@ export function fillPassageBudget(args: FillPassageBudgetArgs): FillPassageBudge
   }
 }
 
+interface HeadingRange {
+  title: string
+  startOrder: number
+  endOrder: number
+}
+
 interface PassageRetrievalArtifacts {
   stage: PassageIndex['stage']
   passageConfigHash: string
   structureHash: string | undefined
   passages: PassageIndex['passages']
   cards: PassageIndex['cards']
-  passageInputs: Array<Pick<Passage, 'id' | 'order' | 'searchText'>>
+  passageInputs: Array<Pick<Passage, 'id' | 'order' | 'searchText' | 'subsection'>>
   cardInputs: Array<{ startId: string; endId: string; title: string; summary: string; keyTerms: string[] }>
   passageBm25: ReturnType<typeof buildBm25Scorer>
   cardBm25?: ReturnType<typeof buildBm25Scorer>
+  headings?: { ranges: HeadingRange[]; bm25: ReturnType<typeof buildBm25Scorer> }
   cardByPassage: Map<number, number>
   titlesByOrder: Map<number, string>
 }
@@ -265,6 +285,7 @@ function artifactsMatch(index: PassageIndex, inputs: RetrievalInputs, cached: Pa
   if (!cached.passageInputs.every((input, position) => {
     const passage = inputs.passages[position]
     return passage.id === input.id && passage.order === input.order && passage.searchText === input.searchText
+      && passage.subsection === input.subsection
   })) return false
   return cached.cardInputs.every((input, position) => {
     const card = inputs.cards![position]
@@ -280,7 +301,7 @@ function getRetrievalArtifacts(index: PassageIndex, inputs: RetrievalInputs = in
   const cached = retrievalArtifacts.get(index)
   if (cached && artifactsMatch(index, inputs, cached)) return cached
 
-  const passageInputs = inputs.passages.map(({ id, order, searchText }) => ({ id, order, searchText }))
+  const passageInputs = inputs.passages.map(({ id, order, searchText, subsection }) => ({ id, order, searchText, subsection }))
   const cardInputs = (inputs.cards ?? []).map(card => {
     const range = card.range
     return { startId: range[0], endId: range[1], title: card.title, summary: card.summary, keyTerms: [...card.keyTerms] }
@@ -313,6 +334,31 @@ function getRetrievalArtifacts(index: PassageIndex, inputs: RetrievalInputs = in
   return artifacts
 }
 
+/** 相同标题的连续段落共享名次；分隔后重复的标题各自保留范围。 */
+function headingRanks(artifacts: PassageRetrievalArtifacts, query: string): RankedItem[] {
+  if (!artifacts.headings) {
+    const ranges: HeadingRange[] = []
+    for (const passage of artifacts.passageInputs) {
+      const title = passage.subsection.trim()
+      if (!title) continue
+      const previous = ranges.at(-1)
+      if (previous && previous.title === title && previous.endOrder + 1 === passage.order) previous.endOrder = passage.order
+      else ranges.push({ title, startOrder: passage.order, endOrder: passage.order })
+    }
+    artifacts.headings = { ranges, bm25: buildBm25Scorer(ranges.map(range => range.title)) }
+  }
+  const { ranges, bm25 } = artifacts.headings
+  const positive = bm25(query).filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.id - b.id)
+  return positive.flatMap((hit, position) => {
+    const range = ranges[hit.id]
+    const inherited: RankedItem[] = []
+    for (let order = range.startOrder; order <= range.endOrder; order++) {
+      inherited.push({ id: order, score: hit.score, rank: position + 1 })
+    }
+    return inherited
+  })
+}
+
 function emptyResult(mode: RetrievalMode): PassageRetrievalResult {
   return {
     context: '',
@@ -338,6 +384,8 @@ export async function retrievePassageContext(
   const maxTokens = opts.maxTokens ?? DEFAULT_HYBRID_OPTIONS.maxTokens
   const rrfK = opts.rrfK ?? DEFAULT_HYBRID_OPTIONS.rrfK
   const sectionWeight = opts.sectionWeight ?? DEFAULT_HYBRID_OPTIONS.sectionWeight
+  const headingWeight = opts.headingWeight ?? DEFAULT_HYBRID_OPTIONS.headingWeight
+  if (!Number.isFinite(headingWeight) || headingWeight < 0) throw new Error('headingWeight 必须为有限非负数')
   const neighbourFactor = opts.neighbourFactor ?? DEFAULT_HYBRID_OPTIONS.neighbourFactor
   const skipLimit = opts.skipLimit ?? DEFAULT_HYBRID_OPTIONS.skipLimit
   // `opts.countTokens` 在这里**故意不读**（填充只用索引里落盘的计数），别再引入一个本地计数器
@@ -424,6 +472,7 @@ export async function retrievePassageContext(
     bm25: text => rankWithTiedZeros(bm25(text)),
     ...(dense ? { dense } : {}),
     ...(card ? { card } : {}),
+    ...(headingWeight > 0 ? { heading: (text: string) => headingRanks(artifacts, text), headingWeight } : {}),
     rrfK,
     sectionWeight,
     passagesCannotUseVectors: !denseAvailable,

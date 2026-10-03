@@ -107,7 +107,7 @@ export interface PipelineTiming {
 /**
  * 注入式依赖：`now` 供单测注入单调时钟（返回预设序列而非真实 sleep）；生产默认 Date.now。
  * `materialize` 供 benchmark 注入受控 token 预算（§5）；生产不注入时上下文沿用字符预算。
- * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器、预算与四个融合旋钮），
+ * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器、预算与融合旋钮），
  * 只对带 `passageIndex` 的论文生效；全部缺席时段落路径按词法模式工作、不碰模型。
  */
 export interface RagPipelineDeps {
@@ -127,6 +127,8 @@ export interface RagPipelineDeps {
     maxTokens?: number
     rrfK?: number
     sectionWeight?: number
+    /** 可选实验性标题导航先验；缺席时关闭 */
+    headingWeight?: number
     neighbourFactor?: number
     skipLimit?: number
   }
@@ -277,6 +279,7 @@ export async function retrieveRagContext(
             ...(deps.passage?.maxTokens !== undefined ? { maxTokens: deps.passage.maxTokens } : {}),
             ...(deps.passage?.rrfK !== undefined ? { rrfK: deps.passage.rrfK } : {}),
             ...(deps.passage?.sectionWeight !== undefined ? { sectionWeight: deps.passage.sectionWeight } : {}),
+            ...(deps.passage?.headingWeight !== undefined ? { headingWeight: deps.passage.headingWeight } : {}),
             ...(deps.passage?.neighbourFactor !== undefined ? { neighbourFactor: deps.passage.neighbourFactor } : {}),
             ...(deps.passage?.skipLimit !== undefined ? { skipLimit: deps.passage.skipLimit } : {}),
           })
