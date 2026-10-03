@@ -10,7 +10,8 @@ import type { LLMFn } from './llm'
 import type { Passage } from './passages'
 import { DEFAULT_MAX_INPUT_CHARS, isGenericSectionLabel } from './semanticTree'
 
-export const STRUCTURE_CARD_PROMPT_VERSION = 'v1'
+// This identity versions the output-processing contract as well as the prompt text.
+export const STRUCTURE_CARD_PROMPT_VERSION = 'v2'
 export const MIN_STRUCTURE_CARDS = 3
 export const MAX_STRUCTURE_CARDS = 10
 export const MIN_KEY_TERMS = 1
@@ -102,6 +103,38 @@ export function parseStructureCards(raw: string): unknown {
   } catch {
     throw new StructureCardError('invalid-json', '模型输出的 JSON 无法解析')
   }
+}
+
+/** Normalize only the two known output-shape variations; all semantic checks remain strict. */
+export function normalizeStructureCardResponse(value: unknown): unknown {
+  if (!isPlainObject(value)) return value
+
+  let normalized: Record<string, unknown> = value
+  let changed = false
+  if (!Object.prototype.hasOwnProperty.call(value, 'sections')
+    && isPlainObject(value.paper)
+    && Array.isArray(value.paper.sections)) {
+    normalized = { ...normalized, sections: value.paper.sections }
+    changed = true
+  }
+
+  if (!Array.isArray(normalized.sections)) return changed ? normalized : value
+
+  const sections = normalized.sections
+  let copiedSections: unknown[] | undefined
+  for (let index = 0; index < sections.length; index++) {
+    const section = sections[index]
+    if (!isPlainObject(section)) continue
+    const keyTerms = section.keyTerms
+    if (!Array.isArray(keyTerms)
+      || keyTerms.length <= MAX_KEY_TERMS
+      || !keyTerms.every(term => typeof term === 'string' && term.trim())) continue
+
+    copiedSections ??= sections.slice()
+    copiedSections[index] = { ...section, keyTerms: keyTerms.slice(0, MAX_KEY_TERMS) }
+  }
+  if (!copiedSections) return changed ? normalized : value
+  return { ...normalized, sections: copiedSections }
 }
 
 class StructureCardValidationFailure extends Error {
@@ -244,7 +277,7 @@ export interface StructureCardBuildOptions {
   now?: () => number
 }
 
-/** 建卡片：恰好一次调用；失败抛 `StructureCardError`（带已发生成本），不重试不修补。 */
+/** 建卡片：恰好一次调用；只规范化已知输出形状，不修复语义结构且不重试。 */
 export async function buildStructureCards(
   passages: Passage[],
   llm: LLMFn,
@@ -281,7 +314,7 @@ export async function buildStructureCards(
     throw error
   }
 
-  const validation = validateStructureCards(parsed, passages)
+  const validation = validateStructureCards(normalizeStructureCardResponse(parsed), passages)
   if (!validation.ok || !validation.cards) {
     throw new StructureCardError(validation.failure ?? 'invalid-structure', validation.message ?? '结构卡片校验失败', cost)
   }
