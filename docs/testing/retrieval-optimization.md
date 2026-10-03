@@ -94,3 +94,17 @@ No eligible question's recall improved or worsened, and no context exceeded the 
 Dataset fingerprint: `ad7851b9c08b693f133396eff17df0bad055084c9fcefa81d31d8ebe93f1c83d`. Eligible-question IDs hash: `736a84c84883c8ea530714a1989339166e240aa189850d741b37bcc037e5e9fe`. Retrieval/helper source fingerprint: `8278932d0d494d2144e3a73ba9efcd4b6710d3d45277d6f14c98c53366b293f1`. The run used uncommitted heading changes on base `fff50cc`; the fingerprint identifies the measured source. Tokenizer revision is `main`, matching the frozen evaluation contract.
 
 This real-data lexical comparison showed unchanged evidence recall and small page-order/precision changes. It does not establish improvement for the full dense/card method or answer quality. AnswerF1, EvidenceF1, TTFT and Q scores remain unmeasured, and heading priors remain off by default.
+
+## Follow-up: exact-tokenizer materialization
+
+Profiling eight papers / 20 questions found that tokenization accounted for 4104.329 of 4121.112 ms of materialization, with 863.521 ms spent on repeated inputs in the same call. The materializer now reuses the first piece's guard tokens for emission and reuses separator tokens within the call. It retains no cross-request token or answer cache.
+
+```sh
+node --import tsx scripts/benchmark-context-materialization.ts --baseline-ref 5331fc6
+```
+
+The helper compares the baseline/current complete `{text, pageOrder, tokenCount, truncated}` outputs on all 179 questions at budgets 1, 64, 256 and 4096. All **716 comparisons passed**. It alternates baseline/current timing order, uses the actual frozen BGE-M3 tokenizer, and reports shared index preparation separately. With the same dataset fingerprint and 122-question evidence cohort above, all final evidence metrics were identical.
+
+On 2026-10-04, Node `v24.19.0`, macOS arm64, 4096-budget materialization P50/P95 fell from **214.157 / 329.433 ms** to **172.500 / 233.167 ms**. Tokenizer calls across 179 measured questions fell from **6713 to 4320**. Tokenizer loading took 650.933 ms; shared passage segmentation and lexical-statistics preparation took 47119.552 ms. The run used uncommitted changes on `5331fc6` with source/helper fingerprint `360aebeabe2f1cea4ccc602d1e9da59d73ac14fd1431c26f0b2f0669d0d6a943`.
+
+This is a controlled exact-tokenizer context-processing improvement. The desktop currently uses estimated token counts, so these measurements do not establish the same reduction in desktop response latency. The user's accuracy objective remains separate: baseline/candidate answer quality must now be measured using the user-supplied DeepSeek endpoint and an identical generation protocol. No answer-quality gain is claimed for this result-preserving change.
