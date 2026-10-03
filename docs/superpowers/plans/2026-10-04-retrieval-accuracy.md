@@ -33,7 +33,7 @@ Task 1 verification: expected red build-level failures were observed; 44 focused
 
 - [x] Run required full tests/typecheck/build and independent complete review after final code changes.
 - [x] Record which changes are justified by real accuracy and speed evidence. Keep any unverified ranking/prompt changes experimental, rather than claiming success from tests alone.
-- [ ] Commit, fetch remote, apply the established remote-priority conflict policy, push, and verify clean/equal local and remote main. Preserve the pre-sync stash.
+- [x] Commit, fetch remote, apply the established remote-priority conflict policy, push, and verify clean/equal local and remote main. Preserve the pre-sync stash.
 
 ## Follow-up hypothesis: grounded, question-focused answers
 
@@ -63,3 +63,5 @@ All four complete arms finished 179/179 questions. Card normalization reduced fa
 With identical retrieved contexts to normalization-only, the final prompt achieved F1 0.348090 (paired delta +0.119295; paper-clustered 95% interval [+0.089414, +0.152149]), and full-answer P95 fell from 2353.941 to 1660.141 ms. It made 179 live answer requests without retries or errors. These gains largely reflect focused wording and shorter answers; they do not establish a comparable semantic-correctness increase. Known all-systems/absence-of-evidence errors and a completeness regression remain. Evidence-ready P95 increased and online token usage rose about 2.5%. The same development slice informed prompt revisions, so this is not held-out evidence. Preserve the unchanged scoring rules and disabled heading prior.
 
 Final source verification: 101 files / 1398 Vitest tests and 18 branding checks passed (one Linux validator skipped on macOS), as did typecheck and the macOS arm64 directory build. Independent spec and quality reviews passed. The report records per-arm metrics, qualitative regressions, timing limitations, hashes and local reproduction artifacts. No credentials or generated results are included in source control.
+
+Delivery verification on 2026-10-04: an independent final report review checked raw artifacts and recomputed the paired F1/bootstrap results without findings. The branch was fast-forwarded into main and pushed at `fb75dae`; local and remote main matched with a clean checkout. No conflict occurred, and both pre-existing stashes were retained.
