@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { GROUNDING_INSTRUCTION } from '../../../src/utils/answerMessages'
 import type { StreamingLlmClient } from '../llmClient'
 import type { PerSampleRecord, QuerySpeedRecord, QueryTimeline } from '../types'
 
@@ -81,7 +82,7 @@ describe('generateSpeedAnswer', () => {
     expect(streamAnswer).toHaveBeenCalledWith([
       {
         role: 'system',
-        content: 'System prompt\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n参考内容：\nmaterialized evidence',
+        content: `System prompt\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\nmaterialized evidence`,
       },
       { role: 'assistant', content: 'Earlier answer' },
       { role: 'user', content: 'What happened?' },

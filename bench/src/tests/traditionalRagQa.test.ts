@@ -5,6 +5,7 @@ import { materializeContext, type ContextGroup } from '../../../src/utils/contex
 import type { EvalSample, TraditionalRagConfig } from '../types'
 import type { StreamingLlmClient } from '../llmClient'
 import type { SpeedRunContract } from '../speed/contract'
+import { GROUNDING_INSTRUCTION } from '../../../src/utils/answerMessages'
 
 const embeddingFactories = vi.hoisted(() => ({
   createProvider: vi.fn(),
@@ -294,7 +295,7 @@ describe('traditional RAG runner', () => {
     expect(streamAnswer).toHaveBeenCalledWith([
       {
         role: 'system',
-        content: 'system\n\nanswer in English\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n参考内容：\nevidence',
+        content: `system\n\nanswer in English\n\n数学公式请使用 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$。不要使用 \\(...\\) 或 \\[...\\] 包裹公式。\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\nevidence`,
       },
       { role: 'user', content: 'question?' },
     ], expect.any(Function))

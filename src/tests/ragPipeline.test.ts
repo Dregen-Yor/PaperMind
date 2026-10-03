@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { GROUNDING_INSTRUCTION } from '../utils/answerMessages'
 import type { IndexNode } from '../utils/pageIndex'
 import type { ChatTurn } from '../utils/queryRewrite'
 import type { Passage } from '../utils/passages'
@@ -67,7 +68,7 @@ describe('buildAnswerMessages', () => {
     expect(buildAnswerMessages(context, 'What is it?', [], systemPrompt)).toEqual([
       {
         role: 'system',
-        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${context}`,
+        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n${GROUNDING_INSTRUCTION}\n\n参考内容：\n${context}`,
       },
       { role: 'user', content: 'What is it?' },
     ])

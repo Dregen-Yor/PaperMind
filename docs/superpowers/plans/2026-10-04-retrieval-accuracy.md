@@ -34,3 +34,14 @@ Task 1 verification: expected red build-level failures were observed; 44 focused
 - [ ] Run required full tests/typecheck/build and independent complete review after final code changes.
 - [ ] Record which changes are justified by real accuracy and speed evidence. Keep any unverified ranking/prompt changes experimental, rather than claiming success from tests alone.
 - [ ] Commit, fetch remote, apply the established remote-priority conflict policy, push, and verify clean/equal local and remote main. Preserve the pre-sync stash.
+
+## Follow-up hypothesis: grounded, question-focused answers
+
+The complete baseline finished 179/179 questions without request failures, with all-question F1 0.231928. A manual audit found a direct logical error on `2003.03106#2`: the answer says BERT is best, then cites NLNDE outperforming it. On `1611.04798#0`, absence of a statement about hyperparameter search becomes a definite negative. These examples justify testing explicit grounding and conclusion/evidence consistency. Some apparent F1 failures are metric limitations: a correct natural-language abstention scores zero against the literal reference `Unanswerable`, and correct explained yes/no answers score low. Do not force benchmark labels or remove necessary reasoning to inflate F1.
+
+Candidate design: when reference context exists, append a short general instruction to use that evidence for paper facts, distinguish statements from inferences, answer the precise question first with necessary support/qualifiers, and express uncertainty when context is insufficient. Absence of evidence must not become a negative fact. Respect requests for detailed explanations; no hard answer-length limit, no dataset-specific words, and no new model call. Preserve context, history, custom system prompt and math instructions. No-context behavior stays unchanged.
+
+- [x] Add focused regression tests and shared answer-message instruction, with separate spec/quality review. Four expected red failures were observed, then all 118 focused contracts passed. Independent spec and quality reviews found no remaining issues; model efficacy is still pending.
+- [ ] Finish the normalization-only arm before interpreting this prompt arm. Replay the same raw card responses and use live uncached answers for all 179 questions.
+- [ ] Run this as a separately labeled prompt ablation with a different framing hash; it is not a same-prompt retrieval/Q comparison. Inspect known errors and regressions against paper evidence, and disclose verbosity/F1 confounding.
+- [ ] Retain this candidate only if the evidence supports the behavior; otherwise revert the prompt while keeping independently justified fixes.
