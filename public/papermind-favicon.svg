@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">PaperMind</title>
+  <desc id="logo-desc">问页图标</desc>
+  <rect width="128" height="128" rx="28" fill="#73543C"/><g fill="#FFFDF8"><path d="M24 16H72C96 16 112 31 112 52C112 73 96 88 72 88H50V110H24V89L50 68H70C80 68 88 62 88 52C88 42 80 36 70 36H50V50L24 71Z" transform="translate(-4 1)"/></g>
+</svg>

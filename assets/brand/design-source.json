@@ -1,0 +1,94 @@
+{
+  "viewBox": "0 0 128 128",
+  "concepts": [
+    {
+      "id": "folio",
+      "title": "问页",
+      "recommended": true,
+      "description": "P 的内白向外打开，形成一条斜向页缝，也带出对话的轮廓。",
+      "body": "<path d=\"M24 16H72C96 16 112 31 112 52C112 73 96 88 72 88H50V110H24V89L50 68H70C80 68 88 62 88 52C88 42 80 36 70 36H50V50L24 71Z\" transform=\"translate(-4 1)\"/>"
+    },
+    {
+      "id": "open-leaf",
+      "title": "文间",
+      "description": "两片弧形书页之间留出开放的书脊，强调安静、持续的阅读。",
+      "body": "<g transform=\"translate(-.5 3)\"><path d=\"M17 27C32 22 47 25 59 36V105C47 92 32 86 17 89Z\"/><path d=\"M70 36C82 19 98 14 112 17V82C97 82 83 91 70 105Z\"/></g>"
+    },
+    {
+      "id": "dialogue",
+      "title": "双引",
+      "description": "错位的两块引文形状彼此回应，突出提问与讨论。",
+      "body": "<path d=\"M16 22H55V72L35 91H16Z\"/><path d=\"M73 37H112V106H73V87L93 68H73Z\"/>"
+    }
+  ],
+  "tones": {
+    "brand": {
+      "mark": "#73543C",
+      "text": "#352D26",
+      "title": "胡桃棕与墨棕"
+    },
+    "ink": {
+      "mark": "#352D26",
+      "text": "#352D26",
+      "title": "墨棕单色"
+    },
+    "reverse": {
+      "mark": "#FFFDF8",
+      "text": "#FFFDF8",
+      "title": "象牙白反白"
+    },
+    "black": {
+      "mark": "#161616",
+      "text": "#161616",
+      "title": "黑色单色"
+    }
+  },
+  "wordmark": {
+    "family": "Source Serif 4",
+    "weight": 600,
+    "outlined": true,
+    "source": "https://github.com/adobe-fonts/source-serif"
+  },
+  "files": [
+    "concepts/folio/papermind-folio-icon-brand.svg",
+    "concepts/folio/papermind-folio-horizontal-brand.svg",
+    "concepts/folio/papermind-folio-stacked-brand.svg",
+    "concepts/folio/papermind-folio-icon-ink.svg",
+    "concepts/folio/papermind-folio-horizontal-ink.svg",
+    "concepts/folio/papermind-folio-stacked-ink.svg",
+    "concepts/folio/papermind-folio-icon-reverse.svg",
+    "concepts/folio/papermind-folio-horizontal-reverse.svg",
+    "concepts/folio/papermind-folio-stacked-reverse.svg",
+    "concepts/folio/papermind-folio-icon-black.svg",
+    "concepts/folio/papermind-folio-horizontal-black.svg",
+    "concepts/folio/papermind-folio-stacked-black.svg",
+    "concepts/open-leaf/papermind-open-leaf-icon-brand.svg",
+    "concepts/open-leaf/papermind-open-leaf-horizontal-brand.svg",
+    "concepts/open-leaf/papermind-open-leaf-stacked-brand.svg",
+    "concepts/open-leaf/papermind-open-leaf-icon-ink.svg",
+    "concepts/open-leaf/papermind-open-leaf-horizontal-ink.svg",
+    "concepts/open-leaf/papermind-open-leaf-stacked-ink.svg",
+    "concepts/open-leaf/papermind-open-leaf-icon-reverse.svg",
+    "concepts/open-leaf/papermind-open-leaf-horizontal-reverse.svg",
+    "concepts/open-leaf/papermind-open-leaf-stacked-reverse.svg",
+    "concepts/open-leaf/papermind-open-leaf-icon-black.svg",
+    "concepts/open-leaf/papermind-open-leaf-horizontal-black.svg",
+    "concepts/open-leaf/papermind-open-leaf-stacked-black.svg",
+    "concepts/dialogue/papermind-dialogue-icon-brand.svg",
+    "concepts/dialogue/papermind-dialogue-horizontal-brand.svg",
+    "concepts/dialogue/papermind-dialogue-stacked-brand.svg",
+    "concepts/dialogue/papermind-dialogue-icon-ink.svg",
+    "concepts/dialogue/papermind-dialogue-horizontal-ink.svg",
+    "concepts/dialogue/papermind-dialogue-stacked-ink.svg",
+    "concepts/dialogue/papermind-dialogue-icon-reverse.svg",
+    "concepts/dialogue/papermind-dialogue-horizontal-reverse.svg",
+    "concepts/dialogue/papermind-dialogue-stacked-reverse.svg",
+    "concepts/dialogue/papermind-dialogue-icon-black.svg",
+    "concepts/dialogue/papermind-dialogue-horizontal-black.svg",
+    "concepts/dialogue/papermind-dialogue-stacked-black.svg",
+    "papermind-wordmark-brand.svg",
+    "papermind-wordmark-ink.svg",
+    "papermind-wordmark-reverse.svg",
+    "papermind-wordmark-black.svg"
+  ]
+}

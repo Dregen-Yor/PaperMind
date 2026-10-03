@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PaperMind · 标志设计</title>
+  <style>
+    :root { color-scheme: light; --paper: #f7f5f0; --surface: #fffdf8; --ink: #352d26; --muted: #6d6257; --brown: #73543c; --line: #dfd6c9; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.8 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+    button, input, a { -webkit-tap-highlight-color: transparent; }
+    button { font: inherit; cursor: pointer; }
+    a { color: inherit; text-underline-offset: 4px; }
+    button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--brown); outline-offset: 5px; }
+    .sheet { max-width: 1440px; margin: auto; padding: 40px 64px 32px; }
+    .masthead { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 22px; }
+    .masthead img { display: block; width: 126px; height: auto; }
+    .edition { font-size: 11px; color: var(--muted); letter-spacing: 1.2px; }
+    .intro { display: flex; justify-content: space-between; align-items: flex-end; gap: 40px; padding: 42px 0 30px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font: 42px/1.3 "Songti SC", "Noto Serif CJK SC", Georgia, serif; letter-spacing: 1px; }
+    .intro p { max-width: 440px; font-size: 14px; color: var(--muted); }
+    .eyebrow { font-size: 10px; letter-spacing: 1.8px; text-transform: uppercase; color: var(--muted); }
+    .hero { display: grid; grid-template-columns: 1fr 300px; min-height: 374px; border: 1px solid var(--line); }
+    .signature { display: flex; align-items: center; justify-content: center; padding: 44px; background: var(--surface); min-width: 0; }
+    .signature img { width: min(100%, 670px); height: auto; display: block; }
+    .reverse { display: flex; align-items: center; justify-content: center; background: var(--brown); }
+    .reverse img { width: 164px; height: 164px; }
+    .rationale { display: grid; grid-template-columns: 1fr 1.9fr; gap: 50px; padding: 24px 0 34px; border-bottom: 1px solid var(--line); }
+    .rationale h2 { font: 26px/1.5 "Songti SC", Georgia, serif; }
+    .rationale p { max-width: 680px; color: var(--muted); font-size: 14px; }
+    .section-label { display: flex; justify-content: space-between; gap: 20px; align-items: center; padding: 28px 0 16px; }
+    .section-label h2 { font-size: 16px; font-weight: 500; }
+    .section-label span { color: var(--muted); font-size: 11px; }
+    .applications { display: grid; grid-template-columns: 1fr 1.1fr 1fr; border: 1px solid var(--line); }
+    .application { min-height: 275px; padding: 22px 24px; display: flex; flex-direction: column; justify-content: space-between; gap: 18px; background: var(--surface); }
+    .application + .application { border-left: 1px solid var(--line); }
+    .application .caption { font-size: 11px; color: var(--muted); }
+    .app-icon { width: 160px; height: 160px; display: block; align-self: center; }
+    .size-row { display: flex; align-items: flex-end; gap: 27px; padding: 28px 0; justify-content: center; min-height: 153px; }
+    .size-example { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+    .size-example span { font-size: 10px; color: var(--muted); }
+    .size-example img { display: block; }
+    .swatches { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: auto 0; }
+    .swatch { height: 110px; padding: 12px; display: flex; align-items: flex-end; font: 11px/1.4 ui-monospace, monospace; }
+    .brown-swatch { background: var(--brown); color: var(--surface); }
+    .paper-swatch { background: var(--surface); border: 1px solid var(--line); }
+    .concepts { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); }
+    .concept { position: relative; appearance: none; border: 0; margin: 0; padding: 24px; color: var(--ink); background: transparent; text-align: left; }
+    .concept + .concept { border-left: 1px solid var(--line); }
+    .concept[aria-pressed="true"] { background: var(--surface); box-shadow: inset 0 -3px var(--brown); }
+    .concept:hover { background: var(--surface); }
+    .concept img { display: block; width: 92px; height: 92px; margin: 4px auto 24px; }
+    .concept h3 { font: 20px/1.5 "Songti SC", Georgia, serif; }
+    .concept p { margin-top: 8px; color: var(--muted); font-size: 12px; min-height: 44px; }
+    .recommendation { position: absolute; top: 16px; right: 18px; font-size: 10px; color: var(--brown); }
+    .playground { display: grid; grid-template-columns: 1fr 310px; min-height: 220px; margin-top: 18px; border: 1px solid var(--line); }
+    .preview { background: var(--surface); display: flex; align-items: center; justify-content: center; min-height: 235px; }
+    .preview img { display: block; width: 112px; height: 112px; }
+    .controls { padding: 24px; border-left: 1px solid var(--line); background: var(--surface); }
+    .controls label { display: flex; justify-content: space-between; margin: 18px 0 8px; font-size: 12px; }
+    .theme-buttons { display: flex; gap: 6px; }
+    .theme-buttons button { font-size: 12px; padding: 6px 13px; border: 1px solid var(--line); background: transparent; color: var(--muted); }
+    .theme-buttons button[aria-pressed="true"] { border-color: var(--brown); color: var(--brown); background: var(--paper); }
+    input[type="range"] { width: 100%; accent-color: var(--brown); }
+    .download { display: inline-block; margin-top: 18px; font-size: 12px; }
+    .footer { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 30px; font-size: 11px; color: var(--muted); }
+    .footer p { max-width: 690px; }
+    @media (max-width: 900px) {
+      .sheet { padding: 28px; }
+      .hero { grid-template-columns: 1fr 200px; min-height: 290px; }
+      .signature { padding: 24px; }
+      .reverse img { width: 132px; height: 132px; }
+      .intro { align-items: flex-start; }
+      .intro p { max-width: 300px; }
+      .applications { grid-template-columns: 1fr 1fr; }
+      .application:last-child { grid-column: 1 / -1; min-height: 180px; border-left: 0; border-top: 1px solid var(--line); }
+      .swatch { height: 80px; }
+      .size-row { gap: 20px; }
+      .playground { grid-template-columns: 1fr 260px; }
+    }
+    @media (max-width: 580px) {
+      .sheet { padding: 20px; }
+      .edition { font-size: 9px; letter-spacing: .4px; }
+      .intro { display: block; padding-top: 28px; }
+      h1 { font-size: 33px; }
+      .intro p { margin-top: 15px; max-width: none; font-size: 12px; }
+      .hero { grid-template-columns: 1fr; }
+      .signature { min-height: 200px; padding: 24px; }
+      .reverse { padding: 24px; min-height: 174px; }
+      .reverse img { width: 118px; height: 118px; }
+      .rationale { grid-template-columns: 1fr; gap: 14px; }
+      .applications, .concepts, .playground { grid-template-columns: 1fr; }
+      .application + .application, .concept + .concept, .controls { border-left: 0; border-top: 1px solid var(--line); }
+      .application { min-height: 230px; }
+      .concept img { width: 100px; height: 100px; }
+      .footer { flex-direction: column; gap: 12px; }
+    }
+    @media print {
+      .sheet { padding: 0; }
+      .playground { display: none; }
+      button { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <header class="masthead">
+      <img src="../../assets/brand/papermind-wordmark.svg" alt="PaperMind">
+      <span class="edition">VISUAL IDENTITY · 2026.09</span>
+    </header>
+    <div class="intro">
+      <div>
+        <p class="eyebrow">PaperMind · Logo design</p>
+        <h1>把提问，留在页间。</h1>
+      </div>
+      <p>为论文阅读与问答设计的「问页」标志。<br>一个打开内白的 P，延续米白与胡桃棕的学术气质。</p>
+    </div>
+    <section class="hero" aria-label="问页主标志，浅色与深色背景">
+      <div class="signature"><img src="../../assets/brand/papermind-logo.svg" alt="PaperMind 问页横版标志"></div>
+      <div class="reverse"><img src="../../assets/brand/papermind-mark-light.svg" alt="问页反白标志"></div>
+    </section>
+    <section class="rationale">
+      <div><p class="eyebrow">Recommended direction</p><h2>问页 · Folio</h2></div>
+      <p>P 对应 PaperMind；斜向的页缝把封闭内白打开，也形成对话的入口。直线建立清晰轮廓，内弧保留柔和感。搭配衬线字标，让它同时适合学术阅读界面与独立应用图标。</p>
+    </section>
+    <div class="section-label"><h2>应用与细节</h2><span>同一轮廓 · 不同尺寸</span></div>
+    <section class="applications" aria-label="应用图标、尺寸与配色">
+      <div class="application">
+        <p class="eyebrow">Application icon</p>
+        <img class="app-icon" src="../../assets/papermind-icon.png" alt="PaperMind 应用图标">
+        <p class="caption">1024 px 主图 · PNG / SVG / ICO / ICNS</p>
+      </div>
+      <div class="application">
+        <p class="eyebrow">At actual size</p>
+        <div class="size-row">
+          <div class="size-example"><img src="../../public/papermind-favicon.svg" width="16" height="16" alt="16 像素网站图标"><span>16 px</span></div>
+          <div class="size-example"><img src="../../assets/brand/papermind-mark.svg" width="24" height="24" alt="24 像素标志"><span>24 px</span></div>
+          <div class="size-example"><img src="../../assets/brand/papermind-mark.svg" width="32" height="32" alt="32 像素标志"><span>32 px</span></div>
+          <div class="size-example"><img src="../../assets/brand/papermind-mark.svg" width="48" height="48" alt="48 像素标志"><span>48 px</span></div>
+        </div>
+        <p class="caption">保留页缝与内白，适配侧栏和问答头像。</p>
+      </div>
+      <div class="application">
+        <p class="eyebrow">Colour</p>
+        <div class="swatches"><div class="swatch brown-swatch">WALNUT<br>#73543C</div><div class="swatch paper-swatch">IVORY<br>#FFFDF8</div></div>
+        <p class="caption">字标使用墨棕 #352D26，另备黑色与反白版本。</p>
+      </div>
+    </section>
+    <div class="section-label"><h2>三个设计方向</h2><span>点击方案，在下方切换背景与尺寸</span></div>
+    <section class="concepts" aria-label="选择设计方向">
+      <button class="concept" data-concept="folio" aria-pressed="true">
+        <span class="recommendation">推荐</span>
+        <img src="../../assets/brand/concepts/folio/papermind-folio-icon-brand.svg" alt="">
+        <h3>01 / 问页</h3><p>以打开内白的 P 为记忆点，连接论文、阅读与提问。</p>
+      </button>
+      <button class="concept" data-concept="open-leaf" aria-pressed="false">
+        <img src="../../assets/brand/concepts/open-leaf/papermind-open-leaf-icon-brand.svg" alt="">
+        <h3>02 / 文间</h3><p>两片舒展的书页，偏向安静、温和的阅读气质。</p>
+      </button>
+      <button class="concept" data-concept="dialogue" aria-pressed="false">
+        <img src="../../assets/brand/concepts/dialogue/papermind-dialogue-icon-brand.svg" alt="">
+        <h3>03 / 双引</h3><p>错位而呼应的引文形状，偏向简洁、抽象的讨论工具。</p>
+      </button>
+    </section>
+    <section class="playground" aria-label="标志交互预览">
+      <div class="preview" id="preview"><img id="preview-mark" src="../../assets/brand/concepts/folio/papermind-folio-icon-brand.svg" alt="问页标志预览"></div>
+      <div class="controls">
+        <div class="theme-buttons" aria-label="背景">
+          <button data-theme="brand" aria-pressed="true">米白</button>
+          <button data-theme="reverse" aria-pressed="false">深棕</button>
+          <button data-theme="black" aria-pressed="false">黑白</button>
+        </div>
+        <label for="size">预览尺寸 <output id="size-value">112 px</output></label>
+        <input id="size" type="range" min="16" max="192" step="8" value="112">
+        <a id="download" class="download" href="../../assets/brand/concepts/folio/papermind-folio-icon-brand.svg" download>下载当前 SVG ↗</a>
+      </div>
+    </section>
+    <footer class="footer">
+      <p>参考研究：Paul Rand、Chermayeff &amp; Geismar &amp; Haviv、Saul Bass、Pentagram，以及 Logobook 的出版与字母标志档案。成品以独立的矢量路径构造，字标已转为轮廓。</p>
+      <p><a href="README.md">使用规范</a> · <a href="research.md">研究记录</a> · <a href="papermind-logo-kit.zip" download>完整文件包</a></p>
+    </footer>
+  </main>
+  <script>
+    let selectedConcept = 'folio'
+    let selectedTone = 'brand'
+    const names = { folio: '问页', 'open-leaf': '文间', dialogue: '双引' }
+    const backgrounds = { brand: '#fffdf8', reverse: '#73543c', black: '#ffffff' }
+    function refresh() {
+      const file = '../../assets/brand/concepts/' + selectedConcept + '/papermind-' + selectedConcept + '-icon-' + selectedTone + '.svg'
+      const mark = document.querySelector('#preview-mark')
+      mark.src = file
+      mark.alt = names[selectedConcept] + '标志预览'
+      document.querySelector('#preview').style.background = backgrounds[selectedTone]
+      document.querySelector('#download').href = file
+      document.querySelectorAll('[data-concept]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.concept === selectedConcept)))
+      document.querySelectorAll('[data-theme]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.theme === selectedTone)))
+    }
+    document.querySelectorAll('[data-concept]').forEach(button => button.addEventListener('click', () => {
+      selectedConcept = button.dataset.concept
+      refresh()
+    }))
+    document.querySelectorAll('[data-theme]').forEach(button => button.addEventListener('click', () => {
+      selectedTone = button.dataset.theme
+      refresh()
+    }))
+    document.querySelector('#size').addEventListener('input', event => {
+      const size = event.target.value
+      document.querySelector('#preview-mark').style.width = size + 'px'
+      document.querySelector('#preview-mark').style.height = size + 'px'
+      document.querySelector('#size-value').value = size + ' px'
+    })
+  </script>
+</body>
+</html>
