@@ -14,30 +14,34 @@
 
 Files: `src/utils/passageRetrieval.ts`, `src/utils/ragPipeline.ts`, `src/tests/passageRetrieval.test.ts`, `src/tests/ragPipeline.test.ts` (a focused helper file is permitted if needed).
 
-- [ ] Add failing tests for prepared-state reuse/invalidation, multi-paper query embedding reuse, no eager embedding for unavailable/mismatched vectors, shared request failure and next-request retry, and budget run bridging.
-- [ ] Cache passage/card BM25 scorers, card ranges and source-title mappings by an index snapshot. Validate relevant content when snapshots change; retain no cross-request query result or answer cache. Use weak ownership so discarded indexes can be collected.
-- [ ] Forward a lazy request-scoped embedder wrapper through `retrieveRagContext`. Preserve the embedder identity and other methods; call the original with its receiver. One request uses at most one query inference, including failures. External context and non-passage paths remain unchanged.
-- [ ] Replace repeated sorting/summing of selected orders with token total and contiguous-run count. Adding a passage with zero, one or two selected neighbors creates, extends or bridges a run. Preserve heap ordering, neighbor offering, skip behavior, short-document handling and final ordering.
-- [ ] Run `npx vitest run src/tests/passageRetrieval.test.ts src/tests/ragPipeline.test.ts` before and after implementation; require failures on the old implementation and green regression tests afterwards.
-- [ ] Obtain independent spec review, then code quality review; fix and re-review findings.
+- [x] Add failing tests for prepared-state reuse/invalidation, multi-paper query embedding reuse, no eager embedding for unavailable/mismatched vectors, shared request failure and next-request retry, and budget run bridging.
+- [x] Cache passage/card BM25 scorers, card ranges and source-title mappings by an index snapshot. Validate relevant content when snapshots change; retain no cross-request query result or answer cache. Use weak ownership so discarded indexes can be collected.
+- [x] Forward a lazy request-scoped embedder wrapper through `retrieveRagContext`. Preserve the embedder identity and other methods; call the original with its receiver. One request uses at most one query inference, including failures. External context and non-passage paths remain unchanged.
+- [x] Replace repeated sorting/summing of selected orders with token total and contiguous-run count. Adding a passage with zero, one or two selected neighbors creates, extends or bridges a run. Preserve heap ordering, neighbor offering, skip behavior, short-document handling and final ordering.
+- [x] Run `npx vitest run src/tests/passageRetrieval.test.ts src/tests/ragPipeline.test.ts` before and after implementation; require failures on the old implementation and green regression tests afterwards.
+- [x] Obtain independent spec review, then code quality review; fix and re-review findings.
+
+Task 1: initial RED had 19 expected failures; final focused suite passed 87 tests. Independent reviews closed in-place and whole-array mutation cases across the embedding await. Full-result reference comparison now includes 248 cases.
 
 ## Task 2: Reuse parsed product indexes at the loading boundary
 
 Files: create `src/utils/parsedPaperCache.ts` and `src/tests/parsedPaperCache.test.ts`; modify `src/stores/chat.ts` and `src/tests/chatPassageIndex.test.ts`.
 
-- [ ] Add failing behavioral tests for same-record object reuse, changed index/pages content, progressive stage updates, record removal, bounded LRU eviction and reloading after eviction.
-- [ ] Add a per-store bounded cache (eight recent papers) keyed by paper ID and exact raw `indexJson`/`pagesJson`. Cache only valid passage indexes; keep legacy and malformed-index rebuild behavior. Remove entries when a record is absent and reject changed content immediately. Do not alter SQLite or serialization.
-- [ ] Integrate at `collectIndexedPapers` so repeated sends reuse the same parsed passage index and vectors. Preserve page parsing errors and existing fallback branches.
-- [ ] Run `npx vitest run src/tests/parsedPaperCache.test.ts src/tests/chatPassageIndex.test.ts src/tests/chat.store.test.ts` red then green.
-- [ ] Obtain independent spec review, then code quality review; fix and re-review findings.
+- [x] Add failing behavioral tests for same-record object reuse, changed index/pages content, progressive stage updates, record removal, bounded LRU eviction and reloading after eviction.
+- [x] Add a per-store bounded cache (eight recent papers) keyed by paper ID and exact raw `indexJson`/`pagesJson`. Cache only valid passage indexes; keep legacy and malformed-index rebuild behavior. Remove entries when a record is absent and reject changed content immediately. Do not alter SQLite or serialization.
+- [x] Integrate at `collectIndexedPapers` so repeated sends reuse the same parsed passage index and vectors. Preserve page parsing errors and existing fallback branches.
+- [x] Run `npx vitest run src/tests/parsedPaperCache.test.ts src/tests/chatPassageIndex.test.ts src/tests/chat.store.test.ts` red then green.
+- [x] Obtain independent spec review, then code quality review; fix and re-review findings.
+
+Task 2: repeated-send identity tests failed before integration; final focused suites passed 60 tests. Both independent reviews passed, with 29 focused cache/integration tests independently rerun.
 
 ## Task 3: Stage-one equivalence, performance and integration verification
 
 Files: create `scripts/benchmark-passage-retrieval.ts` and `docs/testing/retrieval-optimization.md`.
 
-- [ ] Compare the full passage retrieval output against source from `1649433` using deterministic synthetic fixtures. Cover absent/present cards and vectors, mismatch/failure, tied scores, budgets, passage pieces and page provenance. For multi-paper RAG, compare stable output excluding wall-clock timings. Keep baseline source in a temporary directory rather than duplicating it in the repository.
-- [ ] Add a repeatable local microbenchmark that loads a baseline source from a specified path, warms both implementations, checks exact outputs and reports preparation cost and warm P50/P95 on a fixed corpus/query sequence. Include parsed cache and request embedding behavioral results in documentation. Synthetic timing is engineering evidence only.
-- [ ] Run `npm test`, `npm run typecheck`, `git diff --check`, and `CSC_IDENTITY_AUTO_DISCOVERY=false npm run build -- --dir`. Inspect the Electron app with isolated user data.
+- [x] Compare the full passage retrieval output against source from `1649433` using deterministic synthetic fixtures. Cover absent/present cards and vectors, mismatch/failure, tied scores, budgets, passage pieces and page provenance. For multi-paper RAG, compare stable output excluding wall-clock timings. Keep baseline source in a temporary directory rather than duplicating it in the repository.
+- [x] Add a repeatable local microbenchmark that loads baseline modules from a specified Git revision, warms both implementations, checks exact outputs and reports first-use preparation plus retrieval cost and warm P50/P95 on a fixed corpus/query sequence. Include parsed cache and request embedding behavioral results in documentation. Synthetic timing is engineering evidence only; private cache internals are not exported for instrumentation.
+- [x] Run `npm test`, `npm run typecheck`, `git diff --check`, and `CSC_IDENTITY_AUTO_DISCOVERY=false npm run build -- --dir`. Inspect the Electron app with isolated user data.
 - [ ] Record actual results and limitations, then commit/push the stage-one changes.
 
 ## Task 4: Add the experimental heading prior with full benchmark wiring

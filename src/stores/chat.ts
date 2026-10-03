@@ -4,6 +4,7 @@ import { extractPages, type IndexNode } from '../utils/pageIndex'
 import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex, type RagPipelineDeps } from '../utils/ragPipeline'
 import { buildEvidenceBlocks, hasExactPagePartition, DEFAULT_EVIDENCE_OPTIONS } from '../utils/evidenceBlock'
 import { createBuildGeneration } from '../utils/buildGeneration'
+import { createParsedPaperCache } from '../utils/parsedPaperCache'
 import type { Embedder } from '../utils/embedder'
 import {
   PASSAGE_INDEX_SCHEMA_VERSION, PASSAGE_INDEX_VERSION,
@@ -430,6 +431,7 @@ export const useChatStore = defineStore('chat', () => {
   const loaded = ref(false)
   const indexingPapers = ref<Set<string>>(new Set())
   const indexedPapers = ref<Set<string>>(new Set())
+  const parsedPaperCache = createParsedPaperCache()
   const abstractToken = ref('')
   /**
    * 轻量语义树总开关；默认关闭（方案 §6.3：语义树退出默认检索路径）。
@@ -1297,6 +1299,7 @@ export const useChatStore = defineStore('chat', () => {
     for (const paperId of conv.paperIds) {
       let stored = await window.db.index.get(paperId)
       if (!stored) {
+        parsedPaperCache.get(paperId, stored)
         // 没有记录：导入时后台预处理未完成（LLM 未配置等），或这一篇正在构建中。
         // 前者同步补阶段①（本地切段，<1 秒）；后者等它的阶段① 里程碑再重读——
         // 绝不因为 `indexingPapers` 去重让 `indexPaper` 立刻返回、再读到一行空记录
@@ -1307,16 +1310,9 @@ export const useChatStore = defineStore('chat', () => {
           stored = await window.db.index.get(paperId)
         } catch { /* ignore — no index available for this paper */ }
       }
-      if (!stored) continue
-
-      const pages: string[] = JSON.parse(stored.pagesJson)
-      let rawIndex: unknown
-      try {
-        rawIndex = JSON.parse(stored.indexJson)
-      } catch {
-        rawIndex = undefined
-      }
-      const passageIndex = parsePassageIndex(rawIndex)
+      const parsed = parsedPaperCache.get(paperId, stored)
+      if (!parsed) continue
+      const { pages, rawIndex, passageIndex } = parsed
       if (passageIndex) {
         // 段落路径：`tree` 用卡片/标题推导的那棵，检索交由 `passageIndex`。
         // D57：这里**不挂 `semantic`**——两者互斥是 `treeRouted` 保持诚实的前提

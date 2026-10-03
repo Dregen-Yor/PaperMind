@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as bm25Module from '../utils/bm25'
 import { createMaxHeap } from '../utils/priorityQueue'
 import { buildPassages, createEstimatingTokenCounter } from '../utils/passages'
 import { buildTitleCards, cardsToIndexNodes, type StructureCard } from '../utils/structureCards'
@@ -13,6 +14,8 @@ import { CONTEXT_GROUP_SEPARATOR, materializeContext } from '../utils/contextTra
 import type { Passage } from '../utils/passages'
 
 const counter = createEstimatingTokenCounter()
+
+afterEach(() => vi.restoreAllMocks())
 
 describe('createMaxHeap', () => {
   it('按分数降序出队', () => {
@@ -135,6 +138,143 @@ function longPaper(): Passage[] {
   const pages = [`Methods\n${paragraph}\n\n${paragraph}\n\n${paragraph}\n\n${paragraph}`]
   return buildPassages(pages, counter, { minTokens: 1 })
 }
+
+describe('retrievePassageContext 的索引快照缓存', () => {
+  it('复用段落与卡片 BM25 和范围映射，但每次重新评分查询', async () => {
+    const build = vi.spyOn(bm25Module, 'buildBm25Scorer')
+    const { index } = fakeIndex({ passageVectors: undefined, cardVectors: undefined })
+    let rangeReads = 0
+    for (const card of index.cards!) {
+      const range = card.range
+      Object.defineProperty(card, 'range', { get: () => { rangeReads++; return range } })
+    }
+
+    const alpha = await retrievePassageContext(index, 'alpha', { maxTokens: 15 })
+    const results = await retrievePassageContext(index, 'MultiUN results', { maxTokens: 15 })
+
+    expect(build).toHaveBeenCalledTimes(2)
+    expect(rangeReads).toBeLessThanOrEqual(index.cards!.length * 2)
+    expect(alpha.scores).not.toEqual(results.scores)
+    expect(results.sources).toContain('Pages 3–3: MultiUN results')
+  })
+
+  it.each([
+    ['stage', (index: PassageIndex) => { index.stage = 1 }],
+    ['passage text', (index: PassageIndex) => { index.passages[1].searchText = 'alpha alpha alpha' }],
+    ['passage ID', (index: PassageIndex) => { index.passages[0].id = 'updated-id' }],
+    ['passage array', (index: PassageIndex) => { index.passages = [...index.passages] }],
+    ['card title', (index: PassageIndex) => { index.cards![0].title = 'Updated alpha title' }],
+    ['card summary', (index: PassageIndex) => { index.cards![1].summary = 'alpha alpha alpha' }],
+    ['card terms', (index: PassageIndex) => { index.cards![1].keyTerms.push('alpha') }],
+    ['card range', (index: PassageIndex) => { index.cards![0].range[1] = index.passages[2].id }],
+    ['card order', (index: PassageIndex) => { index.cards!.reverse() }],
+    ['card array', (index: PassageIndex) => { index.cards = [...index.cards!] }],
+    ['structure identity', (index: PassageIndex) => { index.structureHash = 'updated' }],
+    ['passage identity', (index: PassageIndex) => { index.passageConfigHash = 'updated' }],
+  ])('%s 的原地更新会使缓存失效并与新快照保持相同结果', async (_, mutate) => {
+    const build = vi.spyOn(bm25Module, 'buildBm25Scorer')
+    const { index } = fakeIndex({ passageVectors: undefined, cardVectors: undefined })
+    const opts = { maxTokens: 15, neighbourFactor: 0 }
+    await retrievePassageContext(index, 'alpha', opts)
+    mutate(index)
+    const updated = await retrievePassageContext(index, 'alpha', opts)
+    expect(build).toHaveBeenCalledTimes(4)
+    await retrievePassageContext(index, 'results', opts)
+    expect(build).toHaveBeenCalledTimes(4)
+    const fresh = await retrievePassageContext({ ...index }, 'alpha', opts)
+    expect(updated).toEqual(fresh)
+  })
+
+  it('阶段升级后新增卡片与向量立即生效，直接调用不共享查询或失败', async () => {
+    const { index, embedder } = fakeIndex()
+    const cards = index.cards
+    index.stage = 1
+    index.cards = undefined
+    index.passageVectors = undefined
+    index.cardVectors = undefined
+    const lexical = await retrievePassageContext(index, 'alpha', { embedder })
+    expect(lexical.hybrid.retrievalMode).toBe('bm25')
+    expect(embedder.embedQuery).not.toHaveBeenCalled()
+
+    index.stage = 3
+    index.cards = cards
+    index.passageVectors = index.passages.map(() => new Float32Array([1, 1, 0, 0]))
+    index.cardVectors = cards!.map(() => new Float32Array([1, 1, 0, 0]))
+    vi.mocked(embedder.embedQuery).mockRejectedValueOnce(new Error('offline'))
+    const failed = await retrievePassageContext(index, 'alpha', { embedder })
+    const recovered = await retrievePassageContext(index, 'alpha', { embedder })
+    expect(failed.hybrid.retrievalMode).toBe('bm25+card-lexical')
+    expect(recovered.hybrid.retrievalMode).toBe('full')
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(2)
+  })
+
+  it('等待嵌入期间对段落文本与卡片标题的原地修改仍作用于本次检索', async () => {
+    const { index, embedder } = fakeIndex()
+    vi.mocked(embedder.embedQuery).mockResolvedValue(new Float32Array([0, 1, 0, 0])).mockImplementationOnce(async () => {
+      index.passages[0].searchText = 'updated term'
+      index.passages[1].searchText = 'alpha alpha alpha'
+      index.cards![0].title = 'Updated source title'
+      return new Float32Array([0, 1, 0, 0])
+    })
+    const opts = { embedder, maxTokens: 15, neighbourFactor: 0 }
+    const updated = await retrievePassageContext(index, 'alpha', opts)
+    const fresh = await retrievePassageContext({ ...index }, 'alpha', opts)
+    expect(updated).toEqual(fresh)
+    expect(updated.sources[0]).toContain('Updated source title')
+  })
+
+  it.each(['cards', 'passages'] as const)('等待嵌入失败期间替换 %s 数组仍使用捕获的数组评分、当前索引组装来源', async replaced => {
+    const { index, embedder } = fakeIndex()
+    index.passages = index.passages.slice(0, 2).map((passage, order) => ({
+      ...passage,
+      text: `Original passage ${order}.`,
+      searchText: replaced === 'passages' && order === 0 ? 'alpha' : 'neutral',
+      pieces: [{ page: order, text: `Original passage ${order}.` }],
+      tokenCount: 40,
+      subsection: `section-${order}`,
+    }))
+    index.cards = index.passages.map((passage, order) => ({
+      id: `S${order}`,
+      range: [passage.id, passage.id],
+      title: replaced === 'cards' && order === 0 ? 'Original alpha' : 'Original beta',
+      summary: '',
+      keyTerms: [],
+    }))
+    index.passageVectors = index.passages.map(() => new Float32Array([1, 0, 0, 0]))
+    index.cardVectors = undefined
+    const opts = { maxTokens: 45, neighbourFactor: 0 }
+    const before = await retrievePassageContext(index, 'alpha', opts)
+    expect(before.hybrid.selectedPassageIds).toEqual([index.passages[0].id])
+
+    let rejectEmbedding!: (reason: Error) => void
+    vi.mocked(embedder.embedQuery).mockReturnValueOnce(new Promise<Float32Array>((_, reject) => {
+      rejectEmbedding = reject
+    }))
+    const pending = retrievePassageContext(index, 'alpha', { ...opts, embedder })
+    if (replaced === 'cards') {
+      index.cards = index.cards.map((card, order) => ({ ...card, title: order === 0 ? 'Replacement beta' : 'Replacement alpha' }))
+    } else {
+      index.passages = index.passages.map((passage, order) => ({
+        ...passage,
+        text: `Replacement passage ${order}.`,
+        searchText: order === 0 ? 'neutral' : 'alpha',
+        pieces: [{ page: order, text: `Replacement passage ${order}.` }],
+      }))
+    }
+    rejectEmbedding(new Error('offline'))
+    const result = await pending
+
+    expect(result.hybrid.selectedPassageIds).toEqual([index.passages[0].id])
+    expect(result.scores).toEqual(before.scores)
+    expect(result.context).toBe(index.passages[0].text)
+    expect(result.sources).toEqual([`Pages 1–1: ${index.cards[0].title}`])
+
+    // 后续请求捕获的是新数组，应该立即用新文本评分；再下一次复用新快照。
+    const next = await retrievePassageContext(index, 'alpha', opts)
+    expect(next.hybrid.selectedPassageIds).toEqual([index.passages[1].id])
+    expect(await retrievePassageContext(index, 'alpha', opts)).toEqual(next)
+  })
+})
 
 describe('retrievePassageContext（模式判定与组装）', () => {
   it('阶段③ 完整信号 → full，检索阶段零 LLM 调用', async () => {
@@ -344,6 +484,28 @@ describe('fillPassageBudget', () => {
     maxTokens: 10_000,
   }
   const candidates = (...scores: number[]) => scores.map((score, order) => ({ order, score, fromNeighbour: false }))
+
+  it('新建、桥接与延长连续组只增量读取候选 token 数，并回收桥接分隔符', () => {
+    let tokenReads = 0
+    const bridgePassages = Array.from({ length: 6 }, (_, order) => ({
+      ...passages[0],
+      order,
+      subsection: `section-${order}`,
+      get tokenCount() { tokenReads++; return order === 5 ? 20 : 1 },
+    }))
+    const visitOrder = [0, 2, 1, 4, 3, 5]
+    const fill = fillPassageBudget({
+      ...base,
+      passages: bridgePassages,
+      candidates: visitOrder.map((order, rank) => ({ order, score: 10 - rank, fromNeighbour: false })),
+      separatorTokens: 2,
+      maxTokens: 4,
+    })
+
+    // 0、2 各成一组（4 token），1 桥接两组后只用 3，3 延长后正好用满 4。
+    expect(fill).toEqual({ selectedOrders: [0, 1, 2, 3], neighbourOrders: [], skippedCount: 2 })
+    expect(tokenReads).toBeLessThanOrEqual(bridgePassages.length + visitOrder.length)
+  })
 
   it('放不下即跳过并计数，堆空即结束', () => {
     // 预算 4：0 号 22 token 放不下，1 号正好放入，随后每段都放不下

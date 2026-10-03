@@ -195,15 +195,8 @@ export function fillPassageBudget(args: FillPassageBudgetArgs): FillPassageBudge
 
   for (const candidate of candidates) offer(candidate.order, candidate.score, candidate.fromNeighbour)
 
-  const runCount = (chosen: number[]): number => {
-    const sorted = [...chosen].sort((a, b) => a - b)
-    let runs = 0
-    for (let i = 0; i < sorted.length; i++) if (i === 0 || sorted[i] !== sorted[i - 1] + 1) runs++
-    return runs
-  }
-  const usedTokens = (chosen: number[]): number =>
-    chosen.reduce((sum, order) => sum + passages[order].tokenCount, 0) + Math.max(0, runCount(chosen) - 1) * separatorTokens
-
+  let selectedTokens = 0
+  let selectedRuns = 0
   let consecutiveSkips = 0
   let skippedCount = 0
   while (heap.size > 0 && consecutiveSkips < skipLimit) {
@@ -211,12 +204,17 @@ export function fillPassageBudget(args: FillPassageBudgetArgs): FillPassageBudge
     if (selected.has(entry.order)) continue
     // 惰性删除：堆里可能留着同一段落的旧（较低）分数
     if ((queued.get(entry.order) ?? Number.NEGATIVE_INFINITY) > entry.score) continue
-    if (usedTokens([...selected, entry.order]) > maxTokens) {
+    // 无邻居时新建一组，有一个邻居时延长，两侧都有时桥接并回收一个分隔符。
+    const nextRuns = selectedRuns + 1 - Number(selected.has(entry.order - 1)) - Number(selected.has(entry.order + 1))
+    const nextTokens = selectedTokens + passages[entry.order].tokenCount
+    if (nextTokens + Math.max(0, nextRuns - 1) * separatorTokens > maxTokens) {
       consecutiveSkips++
       skippedCount++
       continue
     }
     selected.add(entry.order)
+    selectedTokens = nextTokens
+    selectedRuns = nextRuns
     consecutiveSkips = 0
     if (offered.get(entry.order)) neighbourSelected.add(entry.order)
     // 邻段扩展：同一小节内的前后邻段以「本段分 × neighbourFactor」入队，取较大值
@@ -235,18 +233,84 @@ export function fillPassageBudget(args: FillPassageBudgetArgs): FillPassageBudge
   }
 }
 
-/** 卡片标题查询表：段落 order → 卡片标题。卡片覆盖连续区间，线性扫一遍即可。 */
-function cardTitlesByOrder(index: PassageIndex): Map<number, string> {
-  const titles = new Map<number, string>()
-  if (!index.cards) return titles
-  const orderById = new Map(index.passages.map(passage => [passage.id, passage.order]))
-  for (const card of index.cards) {
-    const start = orderById.get(card.range[0])
-    const end = orderById.get(card.range[1])
-    if (start === undefined || end === undefined) continue
-    for (let order = start; order <= end; order++) titles.set(order, card.title)
+interface PassageRetrievalArtifacts {
+  stage: PassageIndex['stage']
+  passageConfigHash: string
+  structureHash: string | undefined
+  passages: PassageIndex['passages']
+  cards: PassageIndex['cards']
+  passageInputs: Array<Pick<Passage, 'id' | 'order' | 'searchText'>>
+  cardInputs: Array<{ startId: string; endId: string; title: string; summary: string; keyTerms: string[] }>
+  passageBm25: ReturnType<typeof buildBm25Scorer>
+  cardBm25?: ReturnType<typeof buildBm25Scorer>
+  cardByPassage: Map<number, number>
+  titlesByOrder: Map<number, string>
+}
+
+// 索引对象只弱持有：切换/卸载论文后，派生统计量随原索引一起释放。
+const retrievalArtifacts = new WeakMap<PassageIndex, PassageRetrievalArtifacts>()
+
+type RetrievalInputs = Pick<PassageIndex, 'passages' | 'cards'>
+
+function artifactsMatch(index: PassageIndex, inputs: RetrievalInputs, cached: PassageRetrievalArtifacts): boolean {
+  if (index.stage !== cached.stage
+    || index.passageConfigHash !== cached.passageConfigHash
+    || index.structureHash !== cached.structureHash
+    || inputs.passages !== cached.passages
+    || inputs.cards !== cached.cards
+    || inputs.passages.length !== cached.passageInputs.length
+    || (inputs.cards?.length ?? 0) !== cached.cardInputs.length) return false
+
+  // 公共索引仍可原地修改；比较建库输入，不能仅靠数组引用/阶段判断是否复用。
+  if (!cached.passageInputs.every((input, position) => {
+    const passage = inputs.passages[position]
+    return passage.id === input.id && passage.order === input.order && passage.searchText === input.searchText
+  })) return false
+  return cached.cardInputs.every((input, position) => {
+    const card = inputs.cards![position]
+    const range = card.range
+    return range[0] === input.startId && range[1] === input.endId
+      && card.title === input.title && card.summary === input.summary
+      && card.keyTerms.length === input.keyTerms.length
+      && card.keyTerms.every((term, termIndex) => term === input.keyTerms[termIndex])
+  })
+}
+
+function getRetrievalArtifacts(index: PassageIndex, inputs: RetrievalInputs = index): PassageRetrievalArtifacts {
+  const cached = retrievalArtifacts.get(index)
+  if (cached && artifactsMatch(index, inputs, cached)) return cached
+
+  const passageInputs = inputs.passages.map(({ id, order, searchText }) => ({ id, order, searchText }))
+  const cardInputs = (inputs.cards ?? []).map(card => {
+    const range = card.range
+    return { startId: range[0], endId: range[1], title: card.title, summary: card.summary, keyTerms: [...card.keyTerms] }
+  })
+  const cardByPassage = new Map<number, number>()
+  const titlesByOrder = new Map<number, string>()
+  const orderById = new Map(passageInputs.map(passage => [passage.id, passage.order]))
+  cardInputs.forEach((card, cardIndex) => {
+    const start = orderById.get(card.startId)
+    const end = orderById.get(card.endId)
+    if (start === undefined || end === undefined) return
+    for (let order = start; order <= end; order++) {
+      cardByPassage.set(order, cardIndex)
+      titlesByOrder.set(order, card.title)
+    }
+  })
+  const artifacts: PassageRetrievalArtifacts = {
+    stage: index.stage,
+    passageConfigHash: index.passageConfigHash,
+    structureHash: index.structureHash,
+    passages: inputs.passages,
+    cards: inputs.cards,
+    passageInputs,
+    cardInputs,
+    passageBm25: buildBm25Scorer(passageInputs.map(passage => passage.searchText)),
+    cardByPassage,
+    titlesByOrder,
   }
-  return titles
+  retrievalArtifacts.set(index, artifacts)
+  return artifacts
 }
 
 function emptyResult(mode: RetrievalMode): PassageRetrievalResult {
@@ -281,7 +345,9 @@ export async function retrievePassageContext(
   if (passages.length === 0) return emptyResult('bm25')
 
   const cards = index.cards
-  const cardByPassage = cards ? mapCardsToPassageIndexes(index) : undefined
+  const scoringInputs = { passages, cards }
+  let artifacts = getRetrievalArtifacts(index, scoringInputs)
+  const cardByPassage = cards ? artifacts.cardByPassage : undefined
 
   // 查询向量是唯一需要 await 的一步。模型不可用**不发异常给调用方**：
   // 这一次提问按可用信号降级即可，下一次模型就绪后自然恢复（方案 §8）
@@ -308,10 +374,12 @@ export async function retrievePassageContext(
     } catch {
       queryVector = undefined
     }
+    // await 后重读捕获数组的文本：原地更新生效，但替换整个数组只影响下一次检索评分。
+    artifacts = getRetrievalArtifacts(index, scoringInputs)
   }
   const denseAvailable = queryVector !== undefined && passagesUsable && queryVector.length === vectorDim
 
-  const bm25 = buildBm25Scorer(passages.map(passage => passage.searchText))
+  const bm25 = artifacts.passageBm25
 
   let dense: ((query: string) => RankedItem[]) | undefined
   let card: ((query: string) => RankedItem[]) | undefined
@@ -340,7 +408,7 @@ export async function retrievePassageContext(
     }
   } else if (cards && cards.length > 0) {
     // 向量不可用但卡片已生成：卡片先验退化为卡片文本的词法匹配（方案 §4 的表）
-    const scoreCards = buildBm25Scorer(cards.map(card => cardEmbedText(card)))
+    const scoreCards = artifacts.cardBm25 ??= buildBm25Scorer(artifacts.cardInputs.map(card => cardEmbedText(card)))
     card = text => {
       const scores = scoreCards(text)
       return inheritCardRanks(passages, cards.map((_, cardIndex) => scores[cardIndex]?.score ?? 0), cardByPassage!, true)
@@ -370,7 +438,11 @@ export async function retrievePassageContext(
     skipLimit,
   })
 
-  return assembleResult(index, fill, candidates, mode)
+  // 来源组装沿用旧路径的当前索引读取；await 期间换数组时，它与评分捕获的数组不同。
+  const titles = index.passages === passages && index.cards === cards
+    ? artifacts.titlesByOrder
+    : getRetrievalArtifacts(index).titlesByOrder
+  return assembleResult(index, fill, candidates, mode, titles)
 }
 
 /** 选中段落 → 原文顺序组装。组与组的页序即 materializeContext 的输入。 */
@@ -379,6 +451,7 @@ function assembleResult(
   fill: FillPassageBudgetResult,
   candidates: PassageCandidate[],
   mode: RetrievalMode,
+  titles: Map<number, string>,
 ): PassageRetrievalResult {
   const passages = index.passages
   if (fill.selectedOrders.length === 0) {
@@ -406,7 +479,6 @@ function assembleResult(
 
   // selected：按真实连续页区间拆分。相邻但不连续（中间缺页）必须分成两段，
   // 否则 sources 会声称读了一页其实没读的原文
-  const titles = cardTitlesByOrder(index)
   interface Span { startPage: number; endPage: number; startOrder: number }
   const spans: Span[] = []
   for (const order of fill.selectedOrders) {
@@ -444,18 +516,4 @@ function assembleResult(
       skippedCount: fill.skippedCount,
     },
   }
-}
-
-/** 段落 order → 卡片下标（查询卡片向量时用） */
-function mapCardsToPassageIndexes(index: PassageIndex): Map<number, number> {
-  const map = new Map<number, number>()
-  if (!index.cards) return map
-  const orderById = new Map(index.passages.map(passage => [passage.id, passage.order]))
-  index.cards.forEach((card, cardIndex) => {
-    const start = orderById.get(card.range[0])
-    const end = orderById.get(card.range[1])
-    if (start === undefined || end === undefined) return
-    for (let order = start; order <= end; order++) map.set(order, cardIndex)
-  })
-  return map
 }
