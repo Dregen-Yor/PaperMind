@@ -4,7 +4,7 @@
 
 **Goal:** Improve evidence usefulness and actual answer accuracy with controlled model/data/settings, while retaining the zero-LLM retrieval path and measuring latency.
 
-**Current evidence:** A complete 60-paper / 179-question baseline is running at code `65073f0`, using user-authorized DeepSeek `deepseek-flash`, thinking disabled, temperature 0, requested top-p 1, max output 4096, streaming, answer cache disabled and concurrency one. The index uses the existing small q8/384 embedder, section weight 0.5, heading weight 0, and the frozen BGE-M3/4096 materializer. Raw public-corpus index responses are captured for diagnosis without credentials.
+**Initial evidence:** A complete 60-paper / 179-question baseline was started at code `65073f0`, using user-authorized DeepSeek `deepseek-flash`, thinking disabled, temperature 0, requested top-p 1, max output 4096, streaming, answer cache disabled and concurrency one. The index uses the existing small q8/384 embedder, section weight 0.5, heading weight 0, and the frozen BGE-M3/4096 materializer. Raw public-corpus index responses were captured for diagnosis without credentials. Completed comparisons and limitations are recorded below and in `docs/testing/retrieval-optimization.md`.
 
 In the first ten index responses, only three passed the existing card validation. Five otherwise usable responses placed `sections` under `paper`; two exceeded the maximum keyword count. A prototype that moved the uniquely located nested array and bounded valid string keyword lists restored all ten while retaining strict range/coverage/title checks. This is a diagnostic sample, not a claim of answer improvement.
 
@@ -23,16 +23,16 @@ Task 1 verification: expected red build-level failures were observed; 44 focused
 
 ## Task 2: Diagnose and compare accuracy
 
-- [ ] Complete the baseline and retain all-question AnswerF1, fixed-cohort page evidence metrics, question-level answers/errors, fallback causes, TTFT and evidence-ready P50/P95. Do not replace the existing fixed denominator or drop failed questions.
-- [ ] Validate all captured responses with the original and normalized schema. Record recoverable versus genuinely invalid counts, with no relaxation of evidence provenance or coverage.
-- [ ] Use the same model, endpoint, generation parameters, corpus, tokenizer and final 4096 budget for the candidate. Compare all 179 question-level answers, inspect both gains and regressions, and distinguish metric changes from semantically supported correctness.
-- [ ] Investigate evidence-content omissions and unsupported/excess answer text from actual errors. Further algorithm or prompt changes must have their own clear comparison; do not silently mix them into this normalization experiment.
-- [ ] Preserve raw results and experimental identity. Report actual AnswerF1 and evidence metrics together with speed, including failures and the limitations of a single corpus/model run.
+- [x] Complete the baseline and retain all-question AnswerF1, fixed-cohort page evidence metrics, question-level answers/errors, fallback causes, TTFT and evidence-ready P50/P95. Do not replace the existing fixed denominator or drop failed questions.
+- [x] Validate all captured responses with the original and normalized schema. Record recoverable versus genuinely invalid counts, with no relaxation of evidence provenance or coverage.
+- [x] Use the same model, endpoint, generation parameters, corpus, tokenizer and final 4096 budget for the candidate. Compare all 179 question-level answers, inspect both gains and regressions, and distinguish metric changes from semantically supported correctness.
+- [x] Investigate evidence-content omissions and unsupported/excess answer text from actual errors. Further algorithm or prompt changes must have their own clear comparison; do not silently mix them into this normalization experiment.
+- [x] Preserve raw results and experimental identity. Report actual AnswerF1 and evidence metrics together with speed, including failures and the limitations of a single corpus/model run.
 
 ## Task 3: Deliver only verified gains
 
-- [ ] Run required full tests/typecheck/build and independent complete review after final code changes.
-- [ ] Record which changes are justified by real accuracy and speed evidence. Keep any unverified ranking/prompt changes experimental, rather than claiming success from tests alone.
+- [x] Run required full tests/typecheck/build and independent complete review after final code changes.
+- [x] Record which changes are justified by real accuracy and speed evidence. Keep any unverified ranking/prompt changes experimental, rather than claiming success from tests alone.
 - [ ] Commit, fetch remote, apply the established remote-priority conflict policy, push, and verify clean/equal local and remote main. Preserve the pre-sync stash.
 
 ## Follow-up hypothesis: grounded, question-focused answers
@@ -41,10 +41,10 @@ The complete baseline finished 179/179 questions without request failures, with 
 
 Candidate design: when reference context exists, append a short general instruction to use that evidence for paper facts, distinguish statements from inferences, answer the precise question first with necessary support/qualifiers, and express uncertainty when context is insufficient. Absence of evidence must not become a negative fact. Respect requests for detailed explanations; no hard answer-length limit, no dataset-specific words, and no new model call. Preserve context, history, custom system prompt and math instructions. No-context behavior stays unchanged.
 
-- [x] Add focused regression tests and shared answer-message instruction, with separate spec/quality review. Four expected red failures were observed, then all 118 focused contracts passed. Independent spec and quality reviews found no remaining issues; model efficacy is still pending.
-- [ ] Finish the normalization-only arm before interpreting this prompt arm. Replay the same raw card responses and use live uncached answers for all 179 questions.
-- [ ] Run this as a separately labeled prompt ablation with a different framing hash; it is not a same-prompt retrieval/Q comparison. Inspect known errors and regressions against paper evidence, and disclose verbosity/F1 confounding.
-- [ ] Retain this candidate only if the evidence supports the behavior; otherwise revert the prompt while keeping independently justified fixes.
+- [x] Add focused regression tests and shared answer-message instruction, with separate spec/quality review. Four expected red failures were observed, then all 118 focused contracts passed. Independent spec and quality reviews found no remaining issues; subsequent model efficacy results are recorded below.
+- [x] Finish the normalization-only arm before interpreting this prompt arm. Replay the same raw card responses and use live uncached answers for all 179 questions.
+- [x] Run this as a separately labeled prompt ablation with a different framing hash; it is not a same-prompt retrieval/Q comparison. Inspect known errors and regressions against paper evidence, and disclose verbosity/F1 confounding.
+- [x] Retain this candidate only if the evidence supports the behavior; otherwise revert the prompt while keeping independently justified fixes.
 
 ### Rejected first grounding prompt and revised experiment
 
@@ -55,3 +55,11 @@ Revised hypothesis: the requirement to provide evidence after every answer invit
 Run a small, fixed diagnostic set drawn from the already inspected failure categories before paying for another full run; pilot results are diagnostic only. If behavior is promising, run all 179 questions with identical recorded cards, model, parameters and evidence, report both factual audits and lexical F1, and retain all rejected-arm artifacts.
 
 The revised message contract passed spec and quality review and all 118 focused tests. On the fixed 12-question diagnostic, F1 rose from 0.273014 to 0.410233, but known scope/absence errors persisted. A prototype with three unrelated synthetic examples did not improve those errors and is rejected; it was never added to product source. Two additional Chinese/English detailed requests confirmed that explicit explanation requests still receive substantial supported discussion. Proceed with the complete slice using the adaptive-detail candidate, and disclose unresolved errors and development-slice tuning.
+
+### Completed comparison and acceptance
+
+All four complete arms finished 179/179 questions. Card normalization reduced fallback from 34/60 to 4/60, but its F1 change (0.231928 to 0.228795) did not establish an answer-quality gain. Retain it for response reliability. The rejected first grounding prompt is superseded by the adaptive-detail prompt at `1249248`.
+
+With identical retrieved contexts to normalization-only, the final prompt achieved F1 0.348090 (paired delta +0.119295; paper-clustered 95% interval [+0.089414, +0.152149]), and full-answer P95 fell from 2353.941 to 1660.141 ms. It made 179 live answer requests without retries or errors. These gains largely reflect focused wording and shorter answers; they do not establish a comparable semantic-correctness increase. Known all-systems/absence-of-evidence errors and a completeness regression remain. Evidence-ready P95 increased and online token usage rose about 2.5%. The same development slice informed prompt revisions, so this is not held-out evidence. Preserve the unchanged scoring rules and disabled heading prior.
+
+Final source verification: 101 files / 1398 Vitest tests and 18 branding checks passed (one Linux validator skipped on macOS), as did typecheck and the macOS arm64 directory build. Independent spec and quality reviews passed. The report records per-arm metrics, qualitative regressions, timing limitations, hashes and local reproduction artifacts. No credentials or generated results are included in source control.
