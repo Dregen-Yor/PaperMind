@@ -57,6 +57,17 @@ export function expandHeadingPaths(tree: TocTreeArtifact): HeadingNode[] {
 }
 const rank = (scores: ScoredDoc[]) => [...scores].sort((a, b) => b.score - a.score || a.id - b.id)
 const validVector = (v: Float32Array, dim: number) => v instanceof Float32Array && v.length === dim && dim > 0 && v.every(Number.isFinite) && v.some(x => x !== 0)
+export const headingConfigSha256 = (options: HeadingConfig) => hashCanonical({ version: 'heading-hierarchy-v1', ...options, bm25: { k1: 1.2, b: 0.75 }, lexicalInput: 'path+original-page-range', denseInput: 'full-heading-path', zeroBm25RankCredit: false, parentSelection: 'prefer-selected-child' })
+
+export function rankHeadingScores(lexical: ScoredDoc[], similarities: ScoredDoc[], options: HeadingConfig): ScoredDoc[] {
+  const fused = new Map<number, number>()
+  if (options.algorithm === 'hybrid') {
+    for (const scores of [rank(lexical.filter(s => s.score > 0)), rank(similarities)]) {
+      scores.forEach((s, i) => fused.set(s.id, (fused.get(s.id) ?? 0) + 1 / (options.rrfK + i + 1)))
+    }
+  }
+  return rank(lexical.map(s => ({ id: s.id, score: options.algorithm === 'bm25' ? s.score : options.algorithm === 'dense' ? similarities[s.id].score : fused.get(s.id) ?? 0 })))
+}
 
 export async function prepareHeadingRetrieval(
   tree: TocTreeArtifact,
@@ -64,6 +75,8 @@ export async function prepareHeadingRetrieval(
   deps: { countTokens: (s: string) => number; embedder?: Embedder },
   options: HeadingConfig,
 ) {
+  // Query behavior and saved provenance must use the same preparation-time settings.
+  options = Object.freeze({ ...options })
   requireThat(['bm25', 'dense', 'hybrid'].includes(options.algorithm), 'invalid heading algorithm')
   requireThat(Number.isInteger(options.topK) && options.topK > 0, 'invalid heading topK')
   requireThat(Number.isFinite(options.rrfK) && options.rrfK > 0, 'invalid RRF constant')
@@ -74,12 +87,12 @@ export async function prepareHeadingRetrieval(
   const dense = options.algorithm !== 'bm25'
   requireThat(!dense || deps.embedder, 'heading embedder required')
   const vectors = dense ? await deps.embedder!.embedPassages(nodes.map(node => node.path)) : []
-  const dim = vectors[0]?.length ?? 0
-  requireThat(!dense || vectors.length === nodes.length && vectors.every(v => validVector(v, dim)), 'invalid heading vectors')
-  const configSha256 = hashCanonical({ version: 'heading-hierarchy-v1', ...options, bm25: { k1: 1.2, b: 0.75 }, lexicalInput: 'path+original-page-range', denseInput: 'full-heading-path', zeroBm25RankCredit: false, parentSelection: 'prefer-selected-child' })
+  const dim = vectors?.[0]?.length ?? 0
+  requireThat(!dense || Array.isArray(vectors) && vectors.length === nodes.length && nodes.every((_, i) => validVector(vectors[i], dim)), 'invalid heading vectors')
+  const configSha256 = headingConfigSha256(options)
   const index: HeadingIndexArtifact = {
     version: 'heading-hierarchy-v1', treeInputSha256: tree.inputSha256,
-    config: { ...options }, configSha256, embedderId: dense ? deps.embedder!.id : null,
+    config: options, configSha256, embedderId: dense ? deps.embedder!.id : null,
     nodes, vectors: vectors.map(v => Array.from(v)),
   }
   return {
@@ -93,13 +106,7 @@ export async function prepareHeadingRetrieval(
         requireThat(validVector(query, dim), 'invalid heading query vector')
         similarities = vectors.map((v, id) => ({ id, score: cosineSimilarity(query, v) }))
       }
-      const fused = new Map<number, number>()
-      if (options.algorithm === 'hybrid') {
-        for (const scores of [rank(lexical.filter(s => s.score > 0)), rank(similarities)]) {
-          scores.forEach((s, i) => fused.set(s.id, (fused.get(s.id) ?? 0) + 1 / (options.rrfK + i + 1)))
-        }
-      }
-      const ranked = rank(nodes.map((_, id) => ({ id, score: options.algorithm === 'bm25' ? lexical[id].score : options.algorithm === 'dense' ? similarities[id].score : fused.get(id) ?? 0 })))
+      const ranked = rankHeadingScores(lexical, similarities, options)
       const selectedNodeIds = resolveTocNodeIds(ranked.slice(0, options.topK).map(s => nodes[s.id].nodeId), tree)
       const selectedRanges = selectedNodeIds.map(nodeId => {
         const node = nodes.find(n => n.nodeId === nodeId)!

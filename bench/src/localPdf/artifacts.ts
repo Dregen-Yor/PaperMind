@@ -3,8 +3,9 @@ import { join, resolve } from 'node:path'
 import type { QueryRecord, RunHeader, RunSummary } from './types'
 import { requireThat, validateHeader, validateQueryRecord, validateRunSummary } from './contract'
 import { safeError } from './errors'
-import { validateTocTree, type TocTreeArtifact } from './tocTree'
+import { flattenTocTree, validateTocTree, type TocTreeArtifact } from './tocTree'
 import { isHeadingMethod, type HeadingIndexArtifact, type HeadingMethod } from './headingRetrieval'
+import { validateHeadingDiagnostic, validateHeadingIndex } from './headingArtifacts'
 export interface RunWriter {
   append(record: QueryRecord): Promise<void>
   writeTree(paperId: string, tree: TocTreeArtifact): Promise<void>
@@ -17,6 +18,30 @@ async function atomicJson(path: string, value: unknown) {
   try { await f.writeFile(JSON.stringify(value, null, 2) + '\n'); await f.sync() } finally { await f.close() }
   await rename(temp, path)
 }
+function validatePaperId(paperId: string): void {
+  requireThat(typeof paperId === 'string' && paperId.length > 0
+    && !paperId.includes('/') && !paperId.includes('\\') && paperId !== '.' && paperId !== '..', 'invalid artifact paper ID')
+}
+async function readTree(out: string, paperId: string): Promise<TocTreeArtifact> {
+  validatePaperId(paperId)
+  const tree = JSON.parse(await readFile(join(out, 'trees', `${paperId}.json`), 'utf8')) as TocTreeArtifact
+  requireThat(tree.paperId === paperId, 'tree paper identity mismatch')
+  return validateTocTree(tree, Math.max(...flattenTocTree(tree).map(node => node.endPage)) + 1)
+}
+type HeadingArtifactCache = Map<string, { tree: TocTreeArtifact; index: HeadingIndexArtifact }>
+async function validateRecordHeading(out: string, record: QueryRecord, cache: HeadingArtifactCache): Promise<void> {
+  if (!isHeadingMethod(record.method) || record.retrievalStatus !== 'completed') return
+  validatePaperId(record.paperId)
+  const key = `${record.method}:${record.paperId}`
+  let artifacts = cache.get(key)
+  if (!artifacts) {
+    const tree = await readTree(out, record.paperId)
+    const raw = JSON.parse(await readFile(join(out, 'headings', record.method, `${record.paperId}.json`), 'utf8'))
+    artifacts = { tree, index: validateHeadingIndex(raw, record.method, tree) }
+    cache.set(key, artifacts)
+  }
+  validateHeadingDiagnostic(record.heading!, artifacts.index, artifacts.tree)
+}
 export async function createRun(out: string, header: RunHeader): Promise<RunWriter> {
   validateHeader(header); out = resolve(out)
   await mkdir(out)
@@ -24,12 +49,14 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
   await writeFile(join(out, 'records.jsonl'), '', { flag: 'wx' })
   const seen = new Set<string>()
   const seenTrees = new Set<string>()
+  const headings: HeadingArtifactCache = new Map()
   return {
     append: async record => {
       validateQueryRecord(record)
       requireThat(header.methods.includes(record.method) && header.expectedQuestionIds.includes(record.questionId), 'unexpected record')
       const key = `${record.method}:${record.questionId}`
       requireThat(!seen.has(key), 'duplicate record')
+      await validateRecordHeading(out, record, headings)
       const safe = { ...record, ...(record.error ? { error: { ...record.error, message: safeError(record.error.message) } } : {}) }
       const f = await open(join(out, 'records.jsonl'), 'a')
       try { await f.writeFile(JSON.stringify(safe) + '\n'); await f.sync() } finally { await f.close() }
@@ -37,8 +64,7 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
     },
     writeTree: async (paperId, tree) => {
       requireThat(header.methods.includes('D') || header.methods.some(isHeadingMethod), 'trees require D or E')
-      requireThat(typeof paperId === 'string' && paperId.length > 0
-        && !paperId.includes('/') && !paperId.includes('\\') && paperId !== '.' && paperId !== '..', 'invalid tree paper ID')
+      validatePaperId(paperId)
       requireThat(tree.paperId === paperId && !seenTrees.has(paperId), 'duplicate or mismatched paper tree')
       const nodes = tree.roots.flatMap(function flatten(node): TocTreeArtifact['roots'] { return [node, ...node.children.flatMap(flatten)] })
       const pageCount = Math.max(...nodes.map(node => node.endPage)) + 1
@@ -51,7 +77,8 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
     },
     writeHeadingIndex: async (method, paperId, index) => {
       requireThat(isHeadingMethod(method) && header.methods.includes(method), 'unknown heading method')
-      requireThat(paperId.length > 0 && !paperId.includes('/') && !paperId.includes('\\') && paperId !== '.' && paperId !== '..', 'invalid heading paper ID')
+      const tree = await readTree(out, paperId)
+      validateHeadingIndex(index, method, tree)
       const dir = join(out, 'headings', method)
       await mkdir(dir, { recursive: true })
       await writeFile(join(dir, `${paperId}.json`), JSON.stringify(index, null, 2) + '\n', { flag: 'wx' })
@@ -73,9 +100,11 @@ export async function readRun(out: string): Promise<{ header: RunHeader; records
   try { records = text.split('\n').filter(Boolean).map(line => validateQueryRecord(JSON.parse(line))) }
   catch { throw new Error('corrupt records.jsonl') }
   const seen = new Set<string>()
+  const headings: HeadingArtifactCache = new Map()
   for (const r of records) {
     requireThat(header.methods.includes(r.method) && header.expectedQuestionIds.includes(r.questionId), 'unexpected record')
     const key = `${r.method}:${r.questionId}`; requireThat(!seen.has(key), 'duplicate record'); seen.add(key)
+    await validateRecordHeading(out, r, headings)
   }
   if (header.status === 'running' || records.length < header.expectedQuestionIds.length * header.methods.length) header.status = 'incomplete'
   return { header, records }

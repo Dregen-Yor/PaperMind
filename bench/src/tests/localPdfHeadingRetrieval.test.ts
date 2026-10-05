@@ -83,6 +83,18 @@ it('deduplicates same-page siblings and changes selections when k changes', asyn
   expect(result.trace.filter(t => t.source?.page === 1)).toHaveLength(1)
 })
 
+it('keeps query behavior consistent with the frozen index config when caller options change', async () => {
+  const options = { ...E_METHOD_CONFIGS['E-hybrid-k1'] }
+  const prepared = await prepareHeadingRetrieval(tree, pages, { countTokens: s => s.length, embedder: embedder() }, options)
+  const before = await prepared.retrieve('unseenword')
+  options.topK = 5
+  options.rrfK = 1
+  options.contextBudget = 1
+  const after = await prepared.retrieve('unseenword')
+  expect(after).toEqual(before)
+  expect(prepared.index.config).toEqual(E_METHOD_CONFIGS['E-hybrid-k1'])
+})
+
 it('uses the shared budget and emits each overlapping page once', async () => {
   const prepared = await prepareHeadingRetrieval(tree, pages, { countTokens: s => s.length, embedder: embedder() }, { ...E_METHOD_CONFIGS['E-dense-k3'], contextBudget: 26 })
   const result = await prepared.retrieve('q')
@@ -104,4 +116,12 @@ it('fails explicitly on missing, malformed, or zero vectors and invalid configur
   const bad = await prepareHeadingRetrieval(tree, pages, { countTokens: deps.countTokens, embedder: badQuery }, E_METHOD_CONFIGS['E-hybrid-k3'])
   await expect(bad.retrieve('q')).rejects.toThrow(/query vector/)
   expect(ready.index.nodes.length).toBe(4)
+})
+
+it('rejects sparse embedding output before persisting a heading index', async () => {
+  const vectors = embedder()
+  const sparse: Awaited<ReturnType<typeof vectors.embedPassages>> = new Array(4)
+  sparse[0] = new Float32Array([1, 0])
+  vectors.embedPassages.mockResolvedValue(sparse)
+  await expect(prepareHeadingRetrieval(tree, pages, { countTokens: s => s.length, embedder: vectors }, E_METHOD_CONFIGS['E-dense-k3'])).rejects.toThrow(/vectors/)
 })

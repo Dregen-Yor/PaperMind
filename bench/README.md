@@ -36,6 +36,8 @@ E 复用 D 的冷启动标题树，将每个节点展开为完整祖先路径，
 
 E 取 top-k 节点后按 D 的规则删除同时选中的父节点，保留更具体的子节点；按排名物化原始页范围，去重重叠页，使用同一 4096-token 预算和来源 trace。父子去重后实际节点数可以小于 k；最终预算也可能只容纳前几个节点。没有在线生成式路由，向量失败或目录树不可用时如实记录失败。索引路径、配置与向量保存到 `headings/<method>/<paperId>.json`；逐题原始得分、所选节点和页范围保存在 `records.jsonl` 的 `heading` 字段。
 
+写入索引时校验方法配置及哈希、目录树来源、路径和页范围、完整有限向量。写入已完成的 E 查询以及离线生成报告时，还会校验对应树和索引文件，并重新核对诊断得分、排名、top-k 裁剪和所选页范围。缺失或无效的产物会中止报告；解析、建索引或检索失败的记录仍按固定分母计入，不要求保存成功索引。
+
 ```bash
 # E 变体比较，速度 cohort 为同一 run 中各 E 变体共同完整成功题
 npm run bench -- run --manifest bench/prepared/qasper-60-179-toc-tree-v1.json --methods E-bm25-k3,E-dense-k3,E-hybrid-k1,E-hybrid-k3,E-hybrid-k5 --out bench/results/pdf-e-001

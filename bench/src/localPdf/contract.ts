@@ -77,7 +77,7 @@ export function validateQueryRecord(value: unknown): QueryRecord {
     uniqueIds(h.ranking.map(n => n.nodeId)); uniqueIds(h.selectedNodeIds)
     requireThat(h.ranking.every(n => Number.isFinite(n.score) && Number.isFinite(n.bm25Score) && (n.denseScore === null || Number.isFinite(n.denseScore))), 'invalid heading scores')
     requireThat(h.selectedNodeIds.length > 0 && h.selectedNodeIds.every(id => h.ranking.some(n => n.nodeId === id)), 'invalid heading selection')
-    requireThat(h.selectedRanges.length === h.selectedNodeIds.length && h.selectedRanges.every((range, i) => range.nodeId === h.selectedNodeIds[i]
+    requireThat(Array.isArray(h.selectedRanges) && h.selectedRanges.length === h.selectedNodeIds.length && h.selectedRanges.every((range, i) => range.nodeId === h.selectedNodeIds[i]
       && Number.isInteger(range.startPage) && Number.isInteger(range.endPage) && range.startPage >= 0 && range.endPage >= range.startPage), 'invalid heading ranges')
   }
   if (!r.method.startsWith('E-')) requireThat(r.heading === undefined, 'heading diagnostics are E-only')
