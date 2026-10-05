@@ -28,6 +28,7 @@ const { materializeContext } = await import('../../../src/utils/contextTrace')
 const { cardsToIndexNodes } = await import('../../../src/utils/structureCards')
 const { PASSAGE_INDEX_VERSION, passageConfigHash } = await import('../../../src/utils/passageIndex')
 const { buildEvaluationContract } = await import('../evaluationContract')
+const { retrieveRagContext } = await import('../../../src/utils/ragPipeline')
 
 /** 与受控物化同形态的确定性分词器：空白切词、1 词 1 token，预算与计数完全可预测。 */
 const tokenizer = { tokenize: (text: string) => text.split(/\s+/).filter(Boolean).map(word => `▁${word}`) }
@@ -158,6 +159,36 @@ async function runWithSectionWeight(sectionWeight: number) {
 }
 
 describe('runQaTask 段落路径 — 融合旋钮的端到端转发', () => {
+  it.each([0, 0.25, 0.5])('forwards actual headingWeight %s through real retrieval and records it in result config', async headingWeight => {
+    const capture = capturingMaterialize()
+    const args = argsWithSectionWeight(0, capture.materialize)
+    const headingIndex: PassageIndex = {
+      ...index,
+      passages: index.passages.map((item, order) => ({ ...item, subsection: order === 0 ? 'Alpha navigation' : 'Other' })),
+    }
+    args.config = { name: 'papermind-hybrid-heading', headingWeight }
+    args.passage!.headingWeight = headingWeight
+    args.passage!.hook = async () => ({ index: headingIndex, coldStart: {}, cacheHits: 0, cacheMisses: 0 })
+    const forwarded: Array<number | undefined> = []
+    args.deps = {
+      retrieveContext: async (...params) => {
+        forwarded.push(params[5]?.passage?.headingWeight)
+        return retrieveRagContext(...params)
+      },
+    }
+
+    const result = await runQaTask(args)
+
+    expect(forwarded).toEqual([headingWeight])
+    expect(result.config).toEqual(args.config)
+    expect(result.meta.completed).toBe(1)
+    expect(capture.seen).toEqual([[headingWeight > 0 ? passages[0].text : passages[1].text]])
+    expect(client.complete).not.toHaveBeenCalled()
+    const calls = client.chat.mock.calls as unknown as Array<[Array<{ content: string }>]>
+    const messages = calls.at(-1)![0]
+    expect(messages.map(message => message.content).join('\n')).not.toContain('Alpha navigation')
+  })
+
   it('sectionWeight 0/1 真的改变进入 prompt 的选段（R42 在 bench 层的补充）', async () => {
     // 删掉 qa.ts 里那四行转发时，两次运行都吃默认 sectionWeight=0.5 → 捕获文本相同，
     // 本用例的第一条内容断言即失败。

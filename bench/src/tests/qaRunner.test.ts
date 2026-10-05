@@ -23,6 +23,7 @@ const {
 const { materializeContext } = await import('../../../src/utils/contextTrace')
 const ragPipeline = await import('../../../src/utils/ragPipeline')
 const { MATH_FORMAT_INSTRUCTION } = ragPipeline
+const { GROUNDING_INSTRUCTION } = await import('../../../src/utils/answerMessages')
 // token 估算口径不在此处复写第二份：跟着生产实现走，改了公式测试也跟着改
 const { estimateTokens } = await import('../metrics/retrieval')
 
@@ -1072,7 +1073,7 @@ describe('runFullContextQaTask — 生成上限基线', () => {
     expect(fullContextClient.chat).toHaveBeenCalledWith([
       {
         role: 'system',
-        content: `${baseSystemPrompt}\n\n${languageInstruction}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${paper}`,
+        content: `${baseSystemPrompt}\n\n${languageInstruction}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${paper}\n\n${GROUNDING_INSTRUCTION}`,
       },
       { role: 'user', content: sample.questions[0].question },
     ])
@@ -1139,7 +1140,7 @@ describe('runFullContextQaTask — 生成上限基线', () => {
       },
     })
 
-    const expectedSystem = `${DEFAULT_SYSTEM_PROMPT}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${speedSample.pages.join('\n\n')}`
+    const expectedSystem = `${DEFAULT_SYSTEM_PROMPT}\n\n${MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${speedSample.pages.join('\n\n')}\n\n${GROUNDING_INSTRUCTION}`
     expect(streamAnswer).toHaveBeenCalledTimes(2)
     expect(vi.mocked(streamAnswer).mock.calls[0][0]).toEqual([
       { role: 'system', content: expectedSystem },

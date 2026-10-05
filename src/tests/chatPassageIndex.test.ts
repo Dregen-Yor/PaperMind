@@ -1,7 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import type { PassagePipelineDeps } from '../utils/passageIndexBuilder'
 import type { PassageIndex } from '../utils/passageIndex'
+import { serializePassageIndex } from '../utils/passageIndex'
+import { buildPassages, createEstimatingTokenCounter } from '../utils/passages'
+import { buildTitleCards, cardsToIndexNodes } from '../utils/structureCards'
+import * as ragPipeline from '../utils/ragPipeline'
 import { useChatStore } from '../stores/chat'
 
 // pageIndex.ts (imported by chat.ts) pulls in pdfjs-dist which needs DOMMatrix — mock it in Node
@@ -138,5 +142,173 @@ describe('collectIndexedPapers 的索引形态分派', () => {
 
     expect(papers.papers).toHaveLength(0)
     expect(vi.mocked(window.db.paper.readFile)).toHaveBeenCalledWith('paper-1')
+  })
+})
+
+function passageRecord(text = 'Methods\nWe use BM25.', stage: 1 | 2 | 3 = 2) {
+  const pages = [text]
+  const passages = buildPassages(pages, createEstimatingTokenCounter(), { minTokens: 1 })
+  const cards = buildTitleCards(passages)
+  const index: PassageIndex = {
+    version: 2,
+    stage,
+    passages,
+    tree: cardsToIndexNodes(cards, passages),
+    passageConfigHash: 'test-config',
+    separatorTokens: 2,
+    ...(stage >= 2 ? {
+      embedderId: 'test-embedder',
+      vectorDim: 2,
+      passageVectors: passages.map(() => new Float32Array([1, 0])),
+    } : {}),
+    ...(stage === 3 ? { cards } : {}),
+  }
+  return { indexJson: JSON.stringify(serializePassageIndex(index)), pagesJson: JSON.stringify(pages) }
+}
+
+describe('collectIndexedPapers 的解析缓存', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    vi.mocked(window.db.paper.readFile).mockResolvedValue('BASE64')
+    vi.mocked(window.db.paper.list).mockResolvedValue([])
+  })
+
+  afterEach(() => vi.restoreAllMocks())
+
+  it('同一记录重复收集时复用段落、页面、树和解码向量', async () => {
+    const record = passageRecord()
+    vi.mocked(window.db.index.get).mockImplementation(async () => ({ ...record }))
+    const store = useChatStore()
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+
+    const first = (await store.collectIndexedPapers(conv)).papers[0]
+    const second = (await store.collectIndexedPapers(conv)).papers[0]
+
+    expect(first.passageIndex?.passageVectors?.[0]).toEqual(new Float32Array([1, 0]))
+    expect(second.passageIndex).toBe(first.passageIndex)
+    expect(second.pages).toBe(first.pages)
+    expect(second.tree).toBe(first.tree)
+    expect(second.passageIndex?.passageVectors?.[0]).toBe(first.passageIndex?.passageVectors?.[0])
+  })
+
+  it('记录被删除后不复用旧索引，即使随后恢复相同的 JSON', async () => {
+    const saved = passageRecord()
+    let record: typeof saved | null = saved
+    vi.mocked(window.db.index.get).mockImplementation(async () => record)
+    const store = useChatStore()
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+    const first = (await store.collectIndexedPapers(conv)).papers[0]
+
+    record = null
+    expect(await store.collectIndexedPapers(conv)).toEqual({ papers: [], paperIds: [] })
+    expect(window.db.paper.readFile).toHaveBeenCalledWith('paper-1')
+    record = saved
+    const restored = (await store.collectIndexedPapers(conv)).papers[0]
+    expect(restored.passageIndex).toEqual(first.passageIndex)
+    expect(restored.passageIndex).not.toBe(first.passageIndex)
+  })
+
+  it('首次读取缺失时立即失效，阶段① 后相同记录也会重新解析', async () => {
+    const record = passageRecord()
+    vi.mocked(window.db.index.get).mockResolvedValue(record)
+    const store = useChatStore()
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+    const first = (await store.collectIndexedPapers(conv)).papers[0]
+
+    vi.mocked(window.db.index.get).mockResolvedValueOnce(null)
+    const rebuilt = (await store.collectIndexedPapers(conv)).papers[0]
+    expect(rebuilt.passageIndex).toEqual(first.passageIndex)
+    expect(rebuilt.passageIndex).not.toBe(first.passageIndex)
+    expect(window.db.paper.readFile).toHaveBeenCalledWith('paper-1')
+  })
+
+  it('损坏的 v2 替换会跳过并重建，不保留上一份有效缓存', async () => {
+    const saved = passageRecord()
+    let record = saved
+    vi.mocked(window.db.index.get).mockImplementation(async () => record)
+    const store = useChatStore()
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+    const first = (await store.collectIndexedPapers(conv)).papers[0]
+
+    record = { ...saved, indexJson: JSON.stringify({ version: 2, stage: 1, passages: [], tree: {} }) }
+    expect(await store.collectIndexedPapers(conv)).toEqual({ papers: [], paperIds: [] })
+    expect(window.db.paper.readFile).toHaveBeenCalledWith('paper-1')
+    record = saved
+    expect((await store.collectIndexedPapers(conv)).papers[0].passageIndex).not.toBe(first.passageIndex)
+  })
+
+  it('旧版有效平面索引仍走原检索路径，同时后台重建且不缓存', async () => {
+    const saved = passageRecord()
+    const tree = JSON.parse(saved.indexJson).tree
+    vi.mocked(window.db.index.get).mockResolvedValue({ ...saved, indexJson: JSON.stringify(tree) })
+    const store = useChatStore()
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+    const first = (await store.collectIndexedPapers(conv)).papers[0]
+    const repeated = (await store.collectIndexedPapers(conv)).papers[0]
+
+    expect(first.tree).toEqual(tree)
+    expect(first.passageIndex).toBeUndefined()
+    expect(repeated.tree).not.toBe(first.tree)
+    expect(repeated.pages).not.toBe(first.pages)
+    expect(window.db.paper.readFile).toHaveBeenCalledWith('paper-1')
+  })
+
+  it('坏页面 JSON 仍抛错，并清除此前有效缓存', async () => {
+    const saved = passageRecord()
+    let record = saved
+    vi.mocked(window.db.index.get).mockImplementation(async () => record)
+    const store = useChatStore()
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+    const first = (await store.collectIndexedPapers(conv)).papers[0]
+
+    record = { indexJson: '{broken', pagesJson: '{broken' }
+    await expect(store.collectIndexedPapers(conv)).rejects.toThrow(SyntaxError)
+    record = saved
+    expect((await store.collectIndexedPapers(conv)).papers[0].passageIndex).not.toBe(first.passageIndex)
+  })
+
+  it('不同 store 实例之间不共享解析对象', async () => {
+    vi.mocked(window.db.index.get).mockResolvedValue(passageRecord())
+    const firstStore = useChatStore(createPinia())
+    const secondStore = useChatStore(createPinia())
+    const conv = { id: 'c1', paperIds: ['paper-1'] } as never
+    const first = (await firstStore.collectIndexedPapers(conv)).papers[0]
+    const second = (await secondStore.collectIndexedPapers(conv)).papers[0]
+
+    expect(second.passageIndex).not.toBe(first.passageIndex)
+    expect(second.pages).not.toBe(first.pages)
+    expect(second.tree).not.toBe(first.tree)
+  })
+
+  it('重复发送复用索引，持久化记录改变后下一次发送读取新页面和阶段', async () => {
+    let record = passageRecord('Methods\nWe use BM25.', 1)
+    vi.mocked(window.db.index.get).mockImplementation(async () => ({ ...record }))
+    const pipeline = vi.spyOn(ragPipeline, 'runRagPipeline')
+    const body = `data: ${JSON.stringify({ choices: [{ delta: { content: 'answer' } }] })}\n\n`
+      + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`
+      + 'data: [DONE]\n\n'
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: new Response(body).body })))
+    const store = useChatStore()
+    const conv = await store.newConversation('Cached paper', ['paper-1'])
+    try {
+      expect(await store.sendMessage(conv.id, 'How does BM25 work?')).toBe('answer')
+      expect(await store.sendMessage(conv.id, 'Explain BM25 again.')).toBe('answer')
+      const first = pipeline.mock.calls[0][0][0]
+      const repeated = pipeline.mock.calls[1][0][0]
+      expect(repeated.passageIndex).toBe(first.passageIndex)
+      expect(repeated.pages).toBe(first.pages)
+      expect(repeated.tree).toBe(first.tree)
+
+      record = passageRecord('Results\nUpdated BM25 evaluation.', 3)
+      expect(await store.sendMessage(conv.id, 'What are the BM25 results?')).toBe('answer')
+      const updated = pipeline.mock.calls[2][0][0]
+      expect(updated.passageIndex).not.toBe(first.passageIndex)
+      expect(updated.passageIndex?.stage).toBe(3)
+      expect(updated.pages).toEqual(['Results\nUpdated BM25 evaluation.'])
+      expect(updated.tree).not.toBe(first.tree)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

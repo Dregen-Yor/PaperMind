@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { buildPassages, createEstimatingTokenCounter } from '../utils/passages'
 import {
   MAX_KEY_TERMS, MIN_STRUCTURE_CARDS, StructureCardError,
-  buildStructureCardPrompt, buildStructureCards, buildTitleCards, cardsToIndexNodes,
-  parseStructureCards, validateStructureCards,
+  STRUCTURE_CARD_PROMPT_VERSION, buildStructureCardPrompt, buildStructureCards, buildTitleCards, cardsToIndexNodes,
+  normalizeStructureCardResponse, parseStructureCards, validateStructureCards,
 } from '../utils/structureCards'
 
 const counter = createEstimatingTokenCounter()
@@ -90,6 +90,81 @@ describe('parseStructureCards', () => {
   })
 })
 
+describe('normalizeStructureCardResponse', () => {
+  it('versions output processing and preserves identity when input is already valid', () => {
+    expect(STRUCTURE_CARD_PROMPT_VERSION).toBe('v2')
+    expect(normalizeStructureCardResponse(valid)).toBe(valid)
+  })
+
+  it('lifts only a plain paper object with an array when root sections is absent', () => {
+    const sections = valid.sections
+    const paper = { ...valid.paper, sections }
+    const input = { paper }
+    const result = normalizeStructureCardResponse(input) as typeof input & { sections: typeof sections }
+    expect(result).not.toBe(input)
+    expect(result.sections).toBe(sections)
+    expect(result.paper).toBe(paper)
+    for (const nestedSections of [undefined, null, 'bad', {}]) {
+      const malformed = { paper: { ...valid.paper, sections: nestedSections } }
+      expect(normalizeStructureCardResponse(malformed)).toBe(malformed)
+    }
+    expect(normalizeStructureCardResponse({ paper: null })).toEqual({ paper: null })
+    expect(normalizeStructureCardResponse({ paper: [sections] })).toEqual({ paper: [sections] })
+    expect(normalizeStructureCardResponse([sections])).toEqual([sections])
+  })
+
+  it('never replaces an explicitly present root sections property', () => {
+    for (const sections of [undefined, null, 'bad', {}]) {
+      const input = { paper: { ...valid.paper, sections: valid.sections }, sections }
+      expect(normalizeStructureCardResponse(input)).toBe(input)
+    }
+    const rootWins = { ...valid, paper: { ...valid.paper, sections: [] } }
+    expect(normalizeStructureCardResponse(rootWins)).toBe(rootWins)
+  })
+
+  it('truncates only wholly valid over-limit string arrays without mutating input', () => {
+    const keyTerms = Array.from({ length: MAX_KEY_TERMS + 2 }, (_, i) => ` term-${i} `)
+    const section = { ...valid.sections[0], keyTerms }
+    const sections = [section, ...valid.sections.slice(1)]
+    const input = { ...valid, sections }
+    const result = normalizeStructureCardResponse(input) as typeof input
+    expect(result).not.toBe(input)
+    expect(result.sections).not.toBe(sections)
+    expect(result.sections[0]).not.toBe(section)
+    expect(result.sections[0].keyTerms).toEqual(keyTerms.slice(0, MAX_KEY_TERMS))
+    expect(section.keyTerms).toBe(keyTerms)
+    expect(keyTerms).toHaveLength(MAX_KEY_TERMS + 2)
+    expect(validateStructureCards(input, passages).ok).toBe(false)
+  })
+
+  it('leaves mixed, blank, and within-limit arrays unchanged', () => {
+    for (const keyTerms of [
+      [...Array.from({ length: MAX_KEY_TERMS }, (_, i) => `term-${i}`), 1],
+      [...Array.from({ length: MAX_KEY_TERMS }, (_, i) => `term-${i}`), '  '],
+      valid.sections[0].keyTerms,
+    ]) {
+      const input = { ...valid, sections: [{ ...valid.sections[0], keyTerms }, ...valid.sections.slice(1)] }
+      expect(normalizeStructureCardResponse(input)).toBe(input)
+      if (keyTerms.length > MAX_KEY_TERMS) expect(validateStructureCards(input, passages).ok).toBe(false)
+    }
+  })
+
+  it('combines the two narrow repairs with copy-on-change at only changed levels', () => {
+    const terms = Array.from({ length: MAX_KEY_TERMS + 1 }, (_, i) => `t${i}`)
+    const first = { ...valid.sections[0], keyTerms: terms }
+    const sections = [first, ...valid.sections.slice(1)]
+    const paper = { ...valid.paper, sections }
+    const input = { paper }
+    const result = normalizeStructureCardResponse(input) as typeof input & { sections: typeof sections }
+    expect(result).not.toBe(input)
+    expect(result.paper).toBe(paper)
+    expect(result.sections).not.toBe(sections)
+    expect(result.sections[0]).not.toBe(first)
+    expect(result.sections[0].keyTerms).toEqual(terms.slice(0, MAX_KEY_TERMS))
+    expect(sections[0].keyTerms).toBe(terms)
+  })
+})
+
 describe('buildStructureCards', () => {
   const llm = vi.fn(async () => JSON.stringify(valid))
 
@@ -124,6 +199,84 @@ describe('buildStructureCards', () => {
       reason: 'invalid-structure',
       cost: { llmCalls: 1 },
     })
+  })
+
+  it('仅在建卡调用中提取 paper.sections 并保留 paper 元数据', async () => {
+    const nested = {
+      paper: { title: 'Nested title', summary: 'Nested summary', sections: valid.sections },
+    }
+    expect(validateStructureCards(nested, passages)).toMatchObject({
+      ok: false,
+      failure: 'invalid-structure',
+    })
+
+    const response = vi.fn(async () => JSON.stringify(nested))
+    const result = await buildStructureCards(passages, response)
+    expect(result.cards).toHaveLength(3)
+    expect(result.paper).toEqual({ title: 'Nested title', summary: 'Nested summary' })
+    expect(response).toHaveBeenCalledTimes(1)
+  })
+
+  it('仅截断所有条目有效的超限 keyTerms 并保留顺序', async () => {
+    const expanded = {
+      ...valid,
+      sections: valid.sections.map((section, index) => index === 0
+        ? { ...section, keyTerms: Array.from({ length: MAX_KEY_TERMS + 2 }, (_, i) => `term-${i}`) }
+        : section),
+    }
+    expect(validateStructureCards(expanded, passages)).toMatchObject({
+      ok: false,
+      failure: 'invalid-structure',
+    })
+
+    const response = vi.fn(async () => JSON.stringify(expanded))
+    const result = await buildStructureCards(passages, response)
+    expect(response).toHaveBeenCalledTimes(1)
+    expect(result.cards[0].keyTerms).toEqual(Array.from({ length: MAX_KEY_TERMS }, (_, i) => `term-${i}`))
+    expect(result.meta.llmCalls).toBe(1)
+  })
+
+  it('不截断含无效条目的超限 keyTerms', async () => {
+    for (const keyTerms of [
+      [...Array.from({ length: MAX_KEY_TERMS }, (_, i) => `term-${i}`), 1],
+      [...Array.from({ length: MAX_KEY_TERMS }, (_, i) => `term-${i}`), '   '],
+    ]) {
+      const malformed = {
+        ...valid,
+        sections: valid.sections.map((section, index) => index === 0 ? { ...section, keyTerms } : section),
+      }
+      expect(validateStructureCards(malformed, passages).ok).toBe(false)
+      await expect(buildStructureCards(passages, vi.fn(async () => JSON.stringify(malformed))))
+        .rejects.toMatchObject({ reason: 'invalid-structure', cost: { llmCalls: 1 } })
+    }
+  })
+
+  it('根 sections 始终优先，非法根值不能被嵌套值覆盖', async () => {
+    const nestedAlternative = valid.sections.map((section, index) => index === 0
+      ? { ...section, title: 'Nested alternative' }
+      : section)
+    const response = vi.fn(async () => JSON.stringify({ ...valid, paper: { ...valid.paper, sections: nestedAlternative } }))
+    expect((await buildStructureCards(passages, response)).cards[0].title).toBe(valid.sections[0].title)
+
+    for (const sections of [null, 'bad', {}]) {
+      const malformed = { paper: { ...valid.paper, sections: valid.sections }, sections }
+      await expect(buildStructureCards(passages, vi.fn(async () => JSON.stringify(malformed))))
+        .rejects.toMatchObject({ reason: 'invalid-structure', cost: { llmCalls: 1 } })
+    }
+  })
+
+  it('嵌套形状修复后仍拒绝错误范围、覆盖与通用标题', async () => {
+    const invalidShapes = [
+      valid.sections.map((section, index) => index === 1 ? { ...section, range: ['P02', 'P04'] } : section),
+      valid.sections.map((section, index) => index === 1 ? { ...section, range: ['P04', 'P05'] } : section),
+      valid.sections.map((section, index) => index === 0 ? { ...section, title: 'Introduction' } : section),
+    ]
+    for (const sections of invalidShapes) {
+      const malformed = { paper: { title: valid.paper.title, summary: valid.paper.summary, sections } }
+      expect(validateStructureCards(malformed, passages).ok).toBe(false)
+      await expect(buildStructureCards(passages, vi.fn(async () => JSON.stringify(malformed))))
+        .rejects.toMatchObject({ reason: 'invalid-structure', cost: { llmCalls: 1 } })
+    }
   })
 
   it('没有段落时按 no-passages 回落', async () => {

@@ -27,6 +27,7 @@ function run(argv: string[]): string {
 }
 
 describe('offline Q CLI', () => {
+  // Three real CLI processes each have a 30-second timeout; allow their combined runtime.
   it('compares without an API key, exports only on --out, and recalculates new weights from the same source bytes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'q-cli-')); dirs.push(dir)
     const ref = join(dir, 'ref.json')
@@ -64,7 +65,7 @@ describe('offline Q CLI', () => {
     expect(artifact2.comparison.score).toBeCloseTo(100 * 2 ** -0.6)
     expect(artifact2.inputs.reference.sha256).toBe(artifact1.inputs.reference.sha256)
     expect(artifact2.inputs.candidate.sha256).toBe(artifact1.inputs.candidate.sha256)
-  })
+  }, 90_000)
 
   it('shows unavailable Q for a tampered numeric metric without a raw TypeError', () => {
     const dir = mkdtempSync(join(tmpdir(), 'q-cli-')); dirs.push(dir)
@@ -79,5 +80,5 @@ describe('offline Q CLI', () => {
     const output = run(['--compare', ref, cand, '--q-config', cfg])
     expect(output).toContain('Q 不可用')
     expect(output).toContain('answerF1AllQuestions')
-  })
+  }, 30_000)
 })

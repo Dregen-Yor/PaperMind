@@ -187,7 +187,8 @@ if ((args.task === 'summary' || args.task === 'all') && configs.some(config => c
 if (args.mode === 'full-context' && configs.some(config => 'passage' in config && config.passage !== undefined)) {
   throw new Error('--mode full-context 不支持段落混合配置：全文直投没有检索路径，混用会产出无意义的对照')
 }
-if (args.mode === 'full-context' && configs.some(config => config.kind !== 'papermind')) {
+// expandMatrix omits the default PaperMind kind to preserve legacy config shapes.
+if (args.mode === 'full-context' && configs.some(config => config.kind !== undefined && config.kind !== 'papermind')) {
   throw new Error('--mode full-context 只接受 PaperMind 配置；检索型基线请直接用对应 --config')
 }
 const samples = await loadDatasets(args.dataset)
@@ -447,6 +448,7 @@ for (const config of configs) {
             maxInputChars: config.maxInputChars as number,
             rrfK: config.rrfK as number,
             sectionWeight: config.sectionWeight as number,
+            ...(config.headingWeight !== undefined ? { headingWeight: config.headingWeight } : {}),
             neighbourFactor: config.neighbourFactor as number,
             skipLimit: config.skipLimit as number,
           }
@@ -468,10 +470,10 @@ for (const config of configs) {
               // 上下文预算与切分上限是两个数：前者是冻结的 4096（与物化器同源），
               // 后者是 knobs.maxTokens（切段），字段名分开写，避免未来被对调
               contextBudgetTokens: CONTEXT_BUDGET_TOKENS,
-              // 方案 §4 融合旋钮：本配置唯一的消融轴（sectionWeight 0/0.5/1）靠这四行
-              // 走到检索；漏一条，三次运行就产出三份一样的数字而各自声称不同口径
+              // 融合旋钮原样走到检索；可选标题先验缺席时不写入，显式 0 仍须转发
               rrfK: knobs.rrfK,
               sectionWeight: knobs.sectionWeight,
+              ...(knobs.headingWeight !== undefined ? { headingWeight: knobs.headingWeight } : {}),
               neighbourFactor: knobs.neighbourFactor,
               skipLimit: knobs.skipLimit,
               embedderUnavailable: passageEmbedder === undefined,

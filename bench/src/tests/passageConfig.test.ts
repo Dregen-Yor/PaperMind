@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { expandMatrix, validatePaperMind } from '../config'
+import { expandMatrix, loadConfigs, validatePaperMind } from '../config'
 
 const baseConfig = {
   name: 'papermind-hybrid',
@@ -13,6 +13,40 @@ const baseConfig = {
 }
 
 describe('validatePaperMind（段落混合配置）', () => {
+  it('headingWeight is optional, preserves historical objects, and accepts finite nonnegative experimental arms', () => {
+    const historical = expandMatrix(validatePaperMind(baseConfig, 'test'))
+    expect(historical.every(config => !Object.hasOwn(config, 'headingWeight'))).toBe(true)
+    const configs = expandMatrix(validatePaperMind({
+      ...baseConfig,
+      matrix: { ...baseConfig.matrix, sectionWeight: [0.5], headingWeight: [0, 0.25, 0.5, 2] },
+    }, 'test'))
+    expect(configs.map(config => config.headingWeight)).toEqual([0, 0.25, 0.5, 2])
+  })
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, true])('rejects invalid headingWeight %s', headingWeight => {
+    expect(() => validatePaperMind({ ...baseConfig, matrix: { ...baseConfig.matrix, headingWeight: [headingWeight] } }, 'test')).toThrow(/headingWeight/)
+  })
+
+  it('a heading-only knob requires the passage block and the existing seven required knobs', () => {
+    expect(() => validatePaperMind({ name: 'invalid', matrix: { headingWeight: [0] } }, 'test')).toThrow(/passage/)
+    expect(() => validatePaperMind({ ...baseConfig, matrix: { headingWeight: [0] } }, 'test')).toThrow(/minTokens/)
+  })
+
+  it('loads a separate three-arm heading experiment while keeping the historical matrix unchanged', async () => {
+    const configs = await loadConfigs('papermind-hybrid-heading')
+    expect(configs.map(config => (config as { headingWeight?: number }).headingWeight)).toEqual([0, 0.25, 0.5])
+    const baseline = await loadConfigs('papermind-hybrid')
+    expect(baseline).toHaveLength(3)
+    expect(baseline.every(config => !Object.hasOwn(config, 'headingWeight'))).toBe(true)
+    for (const config of configs) {
+      expect(config).toMatchObject({
+        sectionWeight: 0.5, rrfK: 60, minTokens: 120, maxTokens: 350,
+        maxInputChars: 120000, neighbourFactor: 0.5, skipLimit: 20,
+        passage: { embedder: { model: 'Xenova/bge-small-en-v1.5', revision: 'main', dtype: 'q8', dim: 384 } },
+      })
+    }
+  })
+
   it('合法配置通过，matrix 展开为 sectionWeight 的三个取值', () => {
     const configs = expandMatrix(validatePaperMind(baseConfig, 'test'))
     expect(configs).toHaveLength(3)

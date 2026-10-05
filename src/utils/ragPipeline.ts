@@ -20,6 +20,31 @@ const REWRITE_MIN_HISTORY = 2
 /** 改写时参考的最近历史轮数。 */
 const REWRITE_HISTORY_WINDOW = 3
 
+/** 一次检索请求内惰性复用查询向量（包括失败）；下一次请求重新尝试。 */
+function requestScopedEmbedder(embedder: Embedder): Embedder {
+  const queries = new Map<string, Promise<Float32Array>>()
+  const embedQuery = (text: string): Promise<Float32Array> => {
+    let vector = queries.get(text)
+    if (!vector) {
+      try {
+        vector = embedder.embedQuery(text)
+      } catch (error) {
+        vector = Promise.reject(error)
+      }
+      queries.set(text, vector)
+    }
+    return vector
+  }
+  // 以空对象为代理目标，可包装冻结的模型实例；getter 和其他方法仍使用原模型作 this。
+  return new Proxy({} as Embedder, {
+    get(_target, property) {
+      if (property === 'embedQuery') return embedQuery
+      const value: unknown = Reflect.get(embedder, property, embedder)
+      return typeof value === 'function' ? value.bind(embedder) : value
+    },
+  })
+}
+
 /**
  * 已构建好的轻量语义树索引（§4：语义树与原文证据块分离保存）。
  * 树缺失或未就绪时该字段为 undefined，检索退回平面路径。
@@ -82,7 +107,7 @@ export interface PipelineTiming {
 /**
  * 注入式依赖：`now` 供单测注入单调时钟（返回预设序列而非真实 sleep）；生产默认 Date.now。
  * `materialize` 供 benchmark 注入受控 token 预算（§5）；生产不注入时上下文沿用字符预算。
- * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器、预算与四个融合旋钮），
+ * `passage` 是段落混合检索的注入项（查询向量模型、token 计数器、预算与融合旋钮），
  * 只对带 `passageIndex` 的论文生效；全部缺席时段落路径按词法模式工作、不碰模型。
  */
 export interface RagPipelineDeps {
@@ -102,6 +127,8 @@ export interface RagPipelineDeps {
     maxTokens?: number
     rrfK?: number
     sectionWeight?: number
+    /** 可选实验性标题导航先验；缺席时关闭 */
+    headingWeight?: number
     neighbourFactor?: number
     skipLimit?: number
   }
@@ -236,6 +263,7 @@ export async function retrieveRagContext(
   const retrievals: PipelineRetrieval[] = []
   let treeRouted = false
   if (!skipRetrieval) {
+    const passageEmbedder = deps.passage?.embedder ? requestScopedEmbedder(deps.passage.embedder) : undefined
     for (const paper of papers) {
       // 分派优先级：段落索引（零 LLM 调用）→ 语义树（一次判断）→ 平面 scoreAndSelect。
       // 后两路的判据与选项逐字不变，不带 `passageIndex` 的论文行为与接入前逐字一致。
@@ -244,13 +272,14 @@ export async function retrieveRagContext(
       // 平面叶节点一并交给树路由打分：树取不到证据时才能在同一次调用里就地回落（§9）。
       const result = paper.passageIndex
         ? await retrievePassageContext(paper.passageIndex, retrievalQuery, {
-            ...(deps.passage?.embedder ? { embedder: deps.passage.embedder } : {}),
+            ...(passageEmbedder ? { embedder: passageEmbedder } : {}),
             ...(deps.passage?.countTokens ? { countTokens: deps.passage.countTokens } : {}),
             // 数值选项一律按 `!== undefined` 判缺席：0 是 sectionWeight / neighbourFactor 的
             // 合法取值（关掉该路权重），按真值转发会把「显式归零」静默变成「用默认值」
             ...(deps.passage?.maxTokens !== undefined ? { maxTokens: deps.passage.maxTokens } : {}),
             ...(deps.passage?.rrfK !== undefined ? { rrfK: deps.passage.rrfK } : {}),
             ...(deps.passage?.sectionWeight !== undefined ? { sectionWeight: deps.passage.sectionWeight } : {}),
+            ...(deps.passage?.headingWeight !== undefined ? { headingWeight: deps.passage.headingWeight } : {}),
             ...(deps.passage?.neighbourFactor !== undefined ? { neighbourFactor: deps.passage.neighbourFactor } : {}),
             ...(deps.passage?.skipLimit !== undefined ? { skipLimit: deps.passage.skipLimit } : {}),
           })

@@ -92,10 +92,12 @@ export interface QaTaskArgs {
     /**
      * 方案 §4 融合旋钮：原样透传进 `retrieveRagContext` 的 `passage` 注入
      * （缺席时检索侧吃 `DEFAULT_HYBRID_OPTIONS`）。配置矩阵的消融轴只有真的走到
-     * 检索才产生差异，这四行就是「配置 → deps → 检索」的最后一段。
+     * 检索才产生差异，这里是「配置 → deps → 检索」的最后一段。
      */
     rrfK?: number
     sectionWeight?: number
+    /** 可选实验性标题导航先验；缺席时关闭 */
+    headingWeight?: number
     neighbourFactor?: number
     skipLimit?: number
     /** 本轮 embedder 加载失败：结果标为不参与正式对照（方案 §7） */
@@ -285,7 +287,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
             now,
             materialize: args.materialize,
             // 段落路径的注入项：查询向量模型、契约分词器、冻结预算（与物化器同一常量）
-            // 与四个融合旋钮。前三者同源是「填充放得下 ⇒ 物化不截断」成立的前提
+            // 与融合旋钮。前三者同源是「填充放得下 ⇒ 物化不截断」成立的前提
             // （见 passageRetrieval 文件头）；旋钮只有给出时才转发——0 是合法取值
             // （关掉该路权重），按真值转发会把显式归零静默换回默认 0.5
             ...(args.passage
@@ -296,6 +298,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
                     maxTokens: args.passage.contextBudgetTokens,
                     ...(args.passage.rrfK !== undefined ? { rrfK: args.passage.rrfK } : {}),
                     ...(args.passage.sectionWeight !== undefined ? { sectionWeight: args.passage.sectionWeight } : {}),
+                    ...(args.passage.headingWeight !== undefined ? { headingWeight: args.passage.headingWeight } : {}),
                     ...(args.passage.neighbourFactor !== undefined ? { neighbourFactor: args.passage.neighbourFactor } : {}),
                     ...(args.passage.skipLimit !== undefined ? { skipLimit: args.passage.skipLimit } : {}),
                   },

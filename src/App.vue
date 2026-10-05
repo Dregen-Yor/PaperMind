@@ -2,9 +2,9 @@
   <div class="app-shell" :class="{ 'is-reading': isReading }">
     <aside class="sidebar" aria-label="主导航">
       <router-link to="/library" class="sidebar-logo" aria-label="PaperMind 文献库" title="PaperMind 文献库">
-        <span class="logo-mark font-display" aria-hidden="true">P<span class="logo-bookmark" /></span>
+        <img class="logo-mark" :src="paperMindMark" alt="" />
         <div class="logo-copy">
-          <span class="logo-text font-display">PaperMind</span>
+          <img class="logo-text" :src="paperMindWordmark" alt="" />
           <span class="logo-sub">阅读，让想法生长</span>
         </div>
       </router-link>
@@ -67,6 +67,9 @@ import { Collection, ChatDotRound, Document, Setting } from '@element-plus/icons
 import { usePaperStore } from './stores/paper'
 import { useChatStore } from './stores/chat'
 
+const paperMindMark = new URL('../assets/brand/papermind-mark.svg', import.meta.url).href
+const paperMindWordmark = new URL('../assets/brand/papermind-wordmark.svg', import.meta.url).href
+
 const paperStore = usePaperStore()
 const chatStore = useChatStore()
 const route = useRoute()
@@ -108,32 +111,14 @@ const navItems = [
   color: inherit;
 }
 .logo-mark {
-  position: relative;
-  width: 34px;
-  height: 39px;
-  background: var(--accent);
-  border-radius: 3px 7px 7px 3px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 26px;
-  font-weight: 600;
-  color: var(--bg-surface);
+  width: 40px;
+  height: 40px;
+  display: block;
   flex-shrink: 0;
-  line-height: 1;
-  box-shadow: inset 3px 0 0 rgb(255 253 248 / 15%);
-}
-.logo-bookmark {
-  position: absolute;
-  top: -1px;
-  right: 7px;
-  width: 4px;
-  height: 10px;
-  background: #c8ae84;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
+  object-fit: contain;
 }
 .logo-copy { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.logo-text { font-size: 22px; font-weight: 600; line-height: 1; letter-spacing: -0.7px; }
+.logo-text { display: block; width: 126px; max-width: 100%; height: auto; }
 .logo-sub { font-size: 10px; color: var(--text-muted); }
 .sidebar-nav { padding: 0 14px; display: flex; flex-direction: column; gap: 6px; }
 .nav-item {
@@ -178,7 +163,8 @@ const navItems = [
 @media (max-width: 1050px) {
   .sidebar { width: 184px; }
   .sidebar-logo { margin-left: 16px; margin-right: 16px; gap: 10px; }
-  .logo-text { font-size: 20px; }
+  .logo-mark { width: 36px; height: 36px; }
+  .logo-text { width: 104px; }
   .sidebar-nav, .sidebar-bottom { padding-left: 10px; padding-right: 10px; }
 }
 @media (max-width: 760px) {
@@ -192,7 +178,7 @@ const navItems = [
   .app-shell { flex-direction: column; }
   .sidebar, .is-reading .sidebar { width: 100%; height: 62px; flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); padding: 0 14px; }
   .sidebar-logo, .is-reading .sidebar-logo { margin: 0 auto 0 0; }
-  .logo-mark { width: 29px; height: 33px; font-size: 23px; }
+  .logo-mark { width: 36px; height: 36px; }
   .sidebar-nav, .is-reading .sidebar-nav { flex-direction: row; padding: 0; gap: 6px; }
   .sidebar-bottom, .is-reading .sidebar-bottom { margin: 0 0 0 6px; padding: 0; }
   .nav-item { min-height: 40px; width: 42px; }

@@ -83,6 +83,8 @@ export interface PaperMindConfig extends IndexOptions, Omit<RagOptions, 'externa
   maxInputChars?: number
   rrfK?: number
   sectionWeight?: number
+  /** 实验性标题导航先验；缺席时为 0，历史配置对象保持原形态 */
+  headingWeight?: number
   neighbourFactor?: number
   skipLimit?: number
 }
