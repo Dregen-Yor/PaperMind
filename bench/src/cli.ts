@@ -187,7 +187,8 @@ if ((args.task === 'summary' || args.task === 'all') && configs.some(config => c
 if (args.mode === 'full-context' && configs.some(config => 'passage' in config && config.passage !== undefined)) {
   throw new Error('--mode full-context 不支持段落混合配置：全文直投没有检索路径，混用会产出无意义的对照')
 }
-if (args.mode === 'full-context' && configs.some(config => config.kind !== 'papermind')) {
+// expandMatrix omits the default PaperMind kind to preserve legacy config shapes.
+if (args.mode === 'full-context' && configs.some(config => config.kind !== undefined && config.kind !== 'papermind')) {
   throw new Error('--mode full-context 只接受 PaperMind 配置；检索型基线请直接用对应 --config')
 }
 const samples = await loadDatasets(args.dataset)
