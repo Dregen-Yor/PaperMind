@@ -32,6 +32,19 @@ npm run bench -- report --run bench/results/pdf-dev-001
 
 A 是 BM25；B 是 BM25 + passage 向量；C 增加 PDF 原生目录先验，目录缺失/非法时回落 B 并记录原因。D 是 PageIndex-style 目录树路由对照组，R 是全文直投单列参考。A/B/C 共用 120/350 token 切段、4096 token 上下文预算。
 
+E 复用 D 的冷启动标题树，将每个节点展开为完整祖先路径，例如 `Method > Training > Training Objective`。`E-dense-k3` 只对路径建向量，查询向量与路径向量按余弦排序；`E-hybrid-k1`、`E-hybrid-k3`、`E-hybrid-k5` 把余弦排名与 BM25 排名按等权 RRF（常数 60）融合。BM25 文档为完整路径加对应原始 PDF 页范围文本，零匹配不获得任意文档顺序的融合排名分。`E-bm25-k3` 是不用向量的词法消融。向量模型与 B/C 相同。
+
+E 取 top-k 节点后按 D 的规则删除同时选中的父节点，保留更具体的子节点；按排名物化原始页范围，去重重叠页，使用同一 4096-token 预算和来源 trace。父子去重后实际节点数可以小于 k；最终预算也可能只容纳前几个节点。没有在线生成式路由，向量失败或目录树不可用时如实记录失败。索引路径、配置与向量保存到 `headings/<method>/<paperId>.json`；逐题原始得分、所选节点和页范围保存在 `records.jsonl` 的 `heading` 字段。
+
+```bash
+# E 变体比较，速度 cohort 为同一 run 中各 E 变体共同完整成功题
+npm run bench -- run --manifest bench/prepared/qasper-60-179-toc-tree-v1.json --methods E-bm25-k3,E-dense-k3,E-hybrid-k1,E-hybrid-k3,E-hybrid-k5 --out bench/results/pdf-e-001
+# 若需跨方法速度比较，将对照组放进同一次新运行
+npm run bench -- run --manifest bench/prepared/qasper-60-179-toc-tree-v1.json --methods A,B,C,D,R,E-bm25-k3,E-dense-k3,E-hybrid-k1,E-hybrid-k3,E-hybrid-k5 --out bench/results/pdf-all-e-001
+```
+
+六列指标和官方评分器保持原有定义；E 质量仍以全部冻结问题为分母。独立运行的速度 cohort 不能直接拼成配对速度表。同一 dev 切片上的 k 搜索只表示探索性结果；确定超参的独立验证应使用 train。
+
 D 的树按“有效 PDF 原生目录 → 经正文标题核验的目录页 → 正文标题”选取单一来源；只有标题、层级和页范围，不含正文、摘要、问题、答案或 gold。路由 prompt 也只含问题和这些元数据，严格返回 1–3 个节点 ID；最多两次逻辑尝试，失败后整题按 retrieval failure 记录，不回落 A/B/C/R。父子节点同时命中时保留更具体节点，重叠页只物化一次；从首个所选节点开头按相关性顺序填充，使用 grapheme 安全的 4096-token 前缀裁剪。
 
 这里的 “PageIndex-style” 只表示“标题/页码树 + LLM 节点路由 + 原页范围物化”的实验形态，不声称复现 PageIndex 的专有实现或摘要树。每篇成功的 D 树保存在 run 的 `trees/<paperId>.json`，每题原始路由尝试、reasoning、节点和页范围保存在 `records.jsonl` 的 `routing` 字段中。

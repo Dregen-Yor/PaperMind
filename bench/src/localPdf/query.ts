@@ -16,6 +16,7 @@ export async function executeQuery(question: FrozenQuestion, prepared: PreparedM
       const context = await prepared.retrieve!(question.question)
       r.context = context.text; r.trace = context.trace
       if (context.routing) r.routing = context.routing
+      if (context.heading) r.heading = context.heading
       r.tContextReady = deps.now(); r.retrievalStatus = 'completed'
     } catch (error) {
       if (error instanceof TocRoutingError) r.routing = error.diagnostic

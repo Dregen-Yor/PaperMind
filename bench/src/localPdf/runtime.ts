@@ -10,6 +10,7 @@ import { RETRIEVAL_CONFIG, type MethodDeps } from './methods'
 import type { FileIdentity, Method, RunIdentity } from './types'
 import { TOC_TREE_CONFIG_SHA256 } from './tocTree'
 import { TOC_ROUTING_CONFIG_SHA256, TOC_ROUTING_PROMPT_VERSION } from './tocRouting'
+import { E_METHOD_CONFIGS, isHeadingMethod } from './headingRetrieval'
 export const ANSWER_PROMPT = 'Answer the question in concise English using only the provided paper text. If the paper does not provide the answer, respond exactly Unanswerable. For yes/no questions respond Yes or No. Do not add citations or repeat the question.'
 export type RuntimeIdentity = Omit<RunIdentity, 'manifestFingerprint' | 'gitSha' | 'evaluatorSha256'>
 async function modelFiles(dir: string): Promise<FileIdentity[]> {
@@ -39,7 +40,7 @@ export async function initializeRuntime(env: Record<string, string | undefined>,
     files.push(...tokenFiles)
   }
   if (methods.includes('D')) deps.routeToc = prompt => client.complete(prompt)
-  if (methods.some(m => m === 'B' || m === 'C')) {
+  if (methods.some(m => m === 'B' || m === 'C' || isHeadingMethod(m) && E_METHOD_CONFIGS[m].algorithm !== 'bm25')) {
     deps.embedder = await createTransformersEmbedder({ model: 'Xenova/bge-small-en-v1.5', revision: 'main', dtype: 'q8', dim: 384, cacheDir })
     await deps.embedder.embedQuery('Benchmark warmup.')
     const embeddingFiles = await modelFiles(join(cacheDir, 'Xenova/bge-small-en-v1.5'))
@@ -52,6 +53,10 @@ export async function initializeRuntime(env: Record<string, string | undefined>,
     endpointSha256: hashCanonical(endpoint.toString()),
     environmentSha256: hashCanonical({ platform: process.platform, arch: process.arch, node: process.version, backend: env.BENCH_EXECUTION_BACKEND ?? 'node' }),
     modelFiles: files,
+    ...(methods.some(isHeadingMethod) ? {
+      tocTreeSha256: TOC_TREE_CONFIG_SHA256,
+      headingRetrievalSha256: hashCanonical({ version: 'heading-hierarchy-v1', configs: E_METHOD_CONFIGS, lexicalInput: 'path+original-page-range', denseInput: 'full-heading-path', zeroBm25RankCredit: false, parentSelection: 'prefer-selected-child' }),
+    } : {}),
     ...(methods.includes('D') ? {
       tocTreeSha256: TOC_TREE_CONFIG_SHA256,
       tocRoutingSha256: hashCanonical({

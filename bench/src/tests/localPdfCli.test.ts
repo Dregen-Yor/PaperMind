@@ -12,3 +12,8 @@ it('defaults to five methods, accepts D, and rejects duplicate or unknown method
   expect(() => parseArgs(['run', '--manifest', 'm', '--out', 'r', '--methods', 'Z'])).toThrow()
   expect(parseArgs(['report', '--run', 'r'])).toEqual({ command: 'report', run: 'r' })
 })
+it('accepts explicit E configurations and rejects unsupported k values', () => {
+  expect(parseArgs(['run', '--manifest', 'm', '--out', 'r', '--methods', 'E-bm25-k3,E-dense-k3,E-hybrid-k1,E-hybrid-k3,E-hybrid-k5']))
+    .toMatchObject({ methods: ['E-bm25-k3', 'E-dense-k3', 'E-hybrid-k1', 'E-hybrid-k3', 'E-hybrid-k5'] })
+  expect(() => parseArgs(['run', '--manifest', 'm', '--out', 'r', '--methods', 'E-hybrid-k0'])).toThrow(/Unknown method/)
+})

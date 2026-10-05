@@ -1,7 +1,8 @@
 import type { ContextTrace, SourceRange } from '../../../src/utils/sourceTrace'
 import type { TocRoutingDiagnostic } from './tocRouting'
+import type { HeadingDiagnostic, HeadingMethod } from './headingRetrieval'
 export type { ContextTrace, SourceRange }
-export type Method = 'A' | 'B' | 'C' | 'D' | 'R'
+export type Method = 'A' | 'B' | 'C' | 'D' | 'R' | HeadingMethod
 export type Split = 'train' | 'dev'
 export type RunStatus = 'running' | 'completed' | 'incomplete' | 'failed'
 export interface FileIdentity { path: string; sha256: string }
@@ -28,6 +29,7 @@ export interface QueryRecord {
   answer: string; partialAnswer?: string; fallbackReason?: string; evidence: string[] | null
   context: string; trace: ContextTrace[]
   routing?: TocRoutingDiagnostic
+  heading?: HeadingDiagnostic
   t0: number | null; tContextReady: number | null; tFirstAnswerToken: number | null
   error?: { stage: 'parse' | 'index' | 'retrieve' | 'generate'; message: string }
 }
@@ -36,6 +38,7 @@ export interface RunIdentity {
   configSha256: string; generationSha256: string; endpointSha256: string
   environmentSha256: string; modelFiles: FileIdentity[]
   tocTreeSha256?: string; tocRoutingSha256?: string
+  headingRetrievalSha256?: string
 }
 export interface RunHeader {
   goldSha256?: string

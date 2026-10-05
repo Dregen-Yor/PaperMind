@@ -10,17 +10,26 @@ import { materializeTracedContext } from './context'
 import { extractHeadingCandidates, extractVerifiedTocCandidates } from './tocCandidates'
 import { buildTocTree, type TocTreeArtifact } from './tocTree'
 import { materializePageRanges, routeTocQuestion, TOC_ROUTING_CONFIG, type TocRoutingDiagnostic } from './tocRouting'
+import { E_METHOD_CONFIGS, isHeadingMethod, prepareHeadingRetrieval, type HeadingDiagnostic, type HeadingIndexArtifact } from './headingRetrieval'
 export const RETRIEVAL_CONFIG = { minTokens: 120, maxTokens: 350, contextBudget: 4096, rrfK: 60, sectionWeight: 0.5, neighbourFactor: 0.5, skipLimit: 20 }
 export interface PreparedCorpus { paperId: string; pages: string[]; outline: PdfOutlineEntry[]; layoutLines: PdfTextLine[][] }
 export interface MethodDeps { countTokens: (s: string) => number; embedder?: Embedder; routeToc?: (prompt: string) => Promise<string> }
 export interface PreparedMethod {
   method: Method
-  retrieve?: (question: string) => Promise<{ text: string; trace: ContextTrace[]; routing?: TocRoutingDiagnostic }>
+  retrieve?: (question: string) => Promise<{ text: string; trace: ContextTrace[]; routing?: TocRoutingDiagnostic; heading?: HeadingDiagnostic }>
   fullText?: string; fallbackReason?: string
   tree?: TocTreeArtifact
+  headingIndex?: HeadingIndexArtifact
 }
 export async function prepareMethod(method: Method, corpus: PreparedCorpus, deps: MethodDeps): Promise<PreparedMethod> {
   if (method === 'R') return { method, fullText: corpus.pages.join('\n\n') }
+  if (isHeadingMethod(method)) {
+    const headingCandidates = extractHeadingCandidates(corpus.layoutLines)
+    const tocCandidates = extractVerifiedTocCandidates(corpus.layoutLines, headingCandidates)
+    const tree = buildTocTree({ paperId: corpus.paperId, pageCount: corpus.pages.length, outline: corpus.outline, tocCandidates, headingCandidates })
+    const prepared = await prepareHeadingRetrieval(tree, corpus.pages, deps, E_METHOD_CONFIGS[method])
+    return { method, tree, headingIndex: prepared.index, retrieve: prepared.retrieve }
+  }
   if (method === 'D') {
     requireThat(deps.routeToc, 'D requires a TOC routing client')
     const headingCandidates = extractHeadingCandidates(corpus.layoutLines)

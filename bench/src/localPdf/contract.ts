@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Manifest, QueryRecord, RunHeader, RunSummary } from './types'
 export const SCHEMA = 'local-pdf-qasper-v1' as const
-export const METHODS = ['A', 'B', 'C', 'D', 'R'] as const
+export const METHODS = ['A', 'B', 'C', 'D', 'R', 'E-bm25-k3', 'E-dense-k3', 'E-hybrid-k1', 'E-hybrid-k3', 'E-hybrid-k5'] as const
 export const METRIC_KEYS = ['answerF1', 'evidenceF1', 'retrievalLatencyP50Ms', 'retrievalLatencyP95Ms', 'ttftP50Ms', 'ttftP95Ms'] as const
 export function requireThat(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
@@ -37,6 +37,7 @@ export function validateHeader(h: RunHeader): void {
   requireThat(['running', 'completed', 'incomplete', 'failed'].includes(h.status), 'invalid run status')
   requireThat(h.identity && Object.entries(h.identity).filter(([k]) => k !== 'modelFiles').every(([, v]) => typeof v === 'string' && v.length > 0), 'invalid identity')
   if (h.methods.includes('D')) requireThat(h.identity.tocTreeSha256 && h.identity.tocRoutingSha256, 'D requires TOC identity hashes')
+  if (h.methods.some(m => m.startsWith('E-'))) requireThat(h.identity.tocTreeSha256 && h.identity.headingRetrievalSha256, 'E requires heading identity hashes')
 }
 function validateRouting(value: QueryRecord['routing']): void {
   requireThat(value && Array.isArray(value.rawAttempts) && value.rawAttempts.length >= 1 && value.rawAttempts.length <= 2
@@ -70,6 +71,16 @@ export function validateQueryRecord(value: unknown): QueryRecord {
   if (r.method === 'D' && r.retrievalStatus === 'completed') validateRouting(r.routing)
   if (r.method === 'D' && r.retrievalStatus === 'failed' && r.routing !== undefined) validateRoutingFailure(r.routing)
   if (r.method !== 'D') requireThat(r.routing === undefined, 'routing diagnostics are D-only')
+  if (r.method.startsWith('E-') && r.retrievalStatus === 'completed') {
+    const h = r.heading
+    requireThat(h && /^[a-f0-9]{64}$/.test(h.configSha256) && Array.isArray(h.ranking) && h.ranking.length > 0, 'missing heading diagnostics')
+    uniqueIds(h.ranking.map(n => n.nodeId)); uniqueIds(h.selectedNodeIds)
+    requireThat(h.ranking.every(n => Number.isFinite(n.score) && Number.isFinite(n.bm25Score) && (n.denseScore === null || Number.isFinite(n.denseScore))), 'invalid heading scores')
+    requireThat(h.selectedNodeIds.length > 0 && h.selectedNodeIds.every(id => h.ranking.some(n => n.nodeId === id)), 'invalid heading selection')
+    requireThat(h.selectedRanges.length === h.selectedNodeIds.length && h.selectedRanges.every((range, i) => range.nodeId === h.selectedNodeIds[i]
+      && Number.isInteger(range.startPage) && Number.isInteger(range.endPage) && range.startPage >= 0 && range.endPage >= range.startPage), 'invalid heading ranges')
+  }
+  if (!r.method.startsWith('E-')) requireThat(r.heading === undefined, 'heading diagnostics are E-only')
   if (r.generationStatus !== 'completed') requireThat(r.answer === '', 'failed answer must be empty')
   return r
 }

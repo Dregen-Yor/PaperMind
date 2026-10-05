@@ -1,6 +1,9 @@
 import type { MethodResult, RunSummary } from './types'
 import { hashCanonical, validateRunSummary } from './contract'
-const label = { A: 'A · BM25', B: 'B · BM25 + dense', C: 'C · BM25 + dense + outline', D: 'D · PageIndex-style TOC tree', R: 'R · Full context' }
+const label = { A: 'A · BM25', B: 'B · BM25 + dense', C: 'C · BM25 + dense + outline', D: 'D · PageIndex-style TOC tree', R: 'R · Full context',
+  'E-bm25-k3': 'E-bm25-k3 · Heading hierarchy + BM25', 'E-dense-k3': 'E-dense-k3 · Heading-path cosine',
+  'E-hybrid-k1': 'E-hybrid-k1 · Heading hierarchy + BM25/cosine RRF', 'E-hybrid-k3': 'E-hybrid-k3 · Heading hierarchy + BM25/cosine RRF', 'E-hybrid-k5': 'E-hybrid-k5 · Heading hierarchy + BM25/cosine RRF',
+}
 const fmt = (n: number | null, digits: number) => n === null ? '—' : n.toFixed(digits)
 function table(rows: MethodResult[]): string[] {
   if (!rows.length) return []
@@ -20,6 +23,7 @@ export function renderReport(summary: RunSummary): string {
     `Generation identity: ${h.identity.generationSha256}. Evaluator: ${h.identity.evaluatorSha256}.`,
     'Input is parsed PDF text with canonical alignment; these are not official leaderboard inputs. Errors and original predictions are in records.jsonl.', '',
     ...(h.methods.includes('D') ? ['D routes over title/page metadata without summaries; selected PDF page text is used only after routing.', ''] : []),
+    ...(h.methods.some(m => m.startsWith('E-')) ? ['E embeds full heading paths during cold start; query-time BM25/cosine/RRF selects original PDF page ranges without generative routing. The BM25 variant is a lexical ablation.', ''] : []),
     ...table(summary.results.filter(r => r.method !== 'R')), '',
     ...(summary.results.some(r => r.method === 'R') ? ['Full-context reference (no evidence selection):', '', ...table(summary.results.filter(r => r.method === 'R'))] : []), '',
   ].join('\n')

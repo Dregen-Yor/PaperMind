@@ -4,9 +4,11 @@ import type { QueryRecord, RunHeader, RunSummary } from './types'
 import { requireThat, validateHeader, validateQueryRecord, validateRunSummary } from './contract'
 import { safeError } from './errors'
 import { validateTocTree, type TocTreeArtifact } from './tocTree'
+import { isHeadingMethod, type HeadingIndexArtifact, type HeadingMethod } from './headingRetrieval'
 export interface RunWriter {
   append(record: QueryRecord): Promise<void>
   writeTree(paperId: string, tree: TocTreeArtifact): Promise<void>
+  writeHeadingIndex(method: HeadingMethod, paperId: string, index: HeadingIndexArtifact): Promise<void>
   finish(summary: RunSummary): Promise<void>
 }
 async function atomicJson(path: string, value: unknown) {
@@ -34,7 +36,7 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
       seen.add(key)
     },
     writeTree: async (paperId, tree) => {
-      requireThat(header.methods.includes('D'), 'trees are D-only artifacts')
+      requireThat(header.methods.includes('D') || header.methods.some(isHeadingMethod), 'trees require D or E')
       requireThat(typeof paperId === 'string' && paperId.length > 0
         && !paperId.includes('/') && !paperId.includes('\\') && paperId !== '.' && paperId !== '..', 'invalid tree paper ID')
       requireThat(tree.paperId === paperId && !seenTrees.has(paperId), 'duplicate or mismatched paper tree')
@@ -46,6 +48,13 @@ export async function createRun(out: string, header: RunHeader): Promise<RunWrit
       const file = await open(path, 'wx')
       try { await file.writeFile(JSON.stringify(tree, null, 2) + '\n'); await file.sync() } finally { await file.close() }
       seenTrees.add(paperId)
+    },
+    writeHeadingIndex: async (method, paperId, index) => {
+      requireThat(isHeadingMethod(method) && header.methods.includes(method), 'unknown heading method')
+      requireThat(paperId.length > 0 && !paperId.includes('/') && !paperId.includes('\\') && paperId !== '.' && paperId !== '..', 'invalid heading paper ID')
+      const dir = join(out, 'headings', method)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, `${paperId}.json`), JSON.stringify(index, null, 2) + '\n', { flag: 'wx' })
     },
     finish: async summary => {
       validateRunSummary(summary)

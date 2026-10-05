@@ -66,3 +66,18 @@ it('fails D explicitly when routing or a valid tree is unavailable', async () =>
   const d = await prepareMethod('D', { ...corpus, pages: ['one', 'two'], layoutLines: lines }, deps)
   await expect(d.retrieve!('q')).rejects.toThrow(/two invalid/i)
 })
+
+it('prepares E with hierarchy vectors and no generative routing call', async () => {
+  const eCorpus = { ...corpus, pages: ['intro', 'objective body'], outline: [
+    { id: 'i', title: '1 Introduction', page: 0, children: [] },
+    { id: 'm', title: '2 Method', page: 1, children: [{ id: 'o', title: '2.1 Objective', page: 1, children: [] }] },
+  ], layoutLines: [[], []] }
+  const embedder = { id: 'test', embedQuery: vi.fn(async () => new Float32Array([0, 1])), embedPassages: vi.fn(async (texts: string[]) => texts.map(s => new Float32Array(s.includes('Objective') ? [0, 1] : [1, 0]))) }
+  const routeToc = vi.fn(async () => { throw new Error('unexpected generative routing') })
+  const e = await prepareMethod('E-hybrid-k3', eCorpus, { countTokens: s => s.length, embedder, routeToc })
+  expect(embedder.embedPassages).toHaveBeenCalledWith(['Introduction', 'Method', 'Method > Objective'])
+  const result = await e.retrieve!('objective')
+  expect(result.heading?.selectedNodeIds).toContain('n1.0')
+  expect(e.headingIndex?.nodes.map(n => n.path)).toContain('Method > Objective')
+  expect(routeToc).not.toHaveBeenCalled()
+})

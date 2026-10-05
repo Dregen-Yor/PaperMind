@@ -13,6 +13,7 @@ import { deriveEvidence } from './evidence'
 import { evaluatorHash, scoreOfficial } from './scoring'
 import { aggregateRun } from './timing'
 import { safeError } from './errors'
+import { isHeadingMethod } from './headingRetrieval'
 export interface RunDeps { runtime: Awaited<ReturnType<typeof initializeRuntime>>; now: () => number; score: typeof scoreOfficial; progress?: (message: string) => void }
 export async function runBenchmark(manifestPath: string, methods: Method[], out: string, deps: RunDeps): Promise<RunSummary> {
   uniqueIds(methods); requireThat(methods.length > 0 && methods.every(m => METHODS.includes(m)), 'invalid methods')
@@ -38,13 +39,19 @@ export async function runBenchmark(manifestPath: string, methods: Method[], out:
       alignment = JSON.parse(await readFile(files.alignment.path, 'utf8')) as AlignmentArtifact
     }
     const prepared = new Map<Method, PreparedMethod>(); const failures = new Map<Method, string>()
+    let savedTree = false
     if (corpus) for (const method of methods) {
       deps.progress?.(`paper ${p.id}: index ${method} start`)
       try {
         const ready = await prepareMethod(method, corpus, deps.runtime.methodDeps)
-        if (method === 'D') {
-          requireThat(ready.tree, 'D preparation did not produce a tree')
+        if ((method === 'D' || isHeadingMethod(method)) && !savedTree) {
+          requireThat(ready.tree, 'TOC preparation did not produce a tree')
           await writer.writeTree(p.id, ready.tree)
+          savedTree = true
+        }
+        if (isHeadingMethod(method)) {
+          requireThat(ready.headingIndex, 'E preparation did not produce heading index')
+          await writer.writeHeadingIndex(method, p.id, ready.headingIndex)
         }
         prepared.set(method, ready)
       }
