@@ -828,3 +828,91 @@ describe('retrieveRagContext 的段落路径', () => {
     expect(llm).not.toHaveBeenCalled()
   })
 })
+
+describe('retrieveRagContext 的目录先验（按篇转发，C 臂）', () => {
+  // 手工索引：4 段各 40 token、预算 45 → 只有融合第一名放得下，选段即融合名次的直接读数。
+  // 查询 'alpha' 只有 P02 命中（BM25 第一）；段落向量全相同（dense 名次按 id）。
+  // 于是不带目录时 P01 / P02 融合分完全相同（同分按 id → P01 胜出）；
+  // 目录只覆盖 P02（第 1 名）时，P02 比未覆盖的 P01 多拿一档目录 RRF 分，翻到第一。
+  // 两次检索入参只差论文上有没有挂目录，结果不同只可能来自「按篇转发」这条路径。
+  const makePassage = (order: number, text: string): Passage => ({
+    id: `P${String(order + 1).padStart(2, '0')}`,
+    order,
+    pieces: [{ page: order, text }],
+    text,
+    searchText: text,
+    tokenCount: 40,
+    prevId: order > 0 ? `P${String(order).padStart(2, '0')}` : null,
+    nextId: order < 3 ? `P${String(order + 2).padStart(2, '0')}` : null,
+    subsection: `S${order}`,
+  })
+  const passages = [
+    makePassage(0, 'Overview of the ranking protocol.'),
+    makePassage(1, 'We evaluate on the alpha dataset.'),
+    makePassage(2, 'Notes on the evaluation metrics.'),
+    makePassage(3, 'Ablation details and caveats.'),
+  ]
+  const dim = 2
+  const embedder = {
+    id: 'outline-embedder',
+    embedQuery: vi.fn(async () => new Float32Array([1, 0])),
+    embedPassages: vi.fn(async (texts: string[]) => texts.map(() => new Float32Array([1, 0]))),
+  }
+  const denseIndex: PassageIndex = {
+    version: PASSAGE_INDEX_VERSION,
+    stage: 2,
+    passages,
+    tree: multiLeafTree,
+    passageVectors: passages.map(() => new Float32Array([1, 0])),
+    vectorDim: dim,
+    embedderId: embedder.id,
+    passageConfigHash: passageConfigHash({ schemaVersion: 2, segmentation: { minTokens: 1, maxTokens: 350 } }),
+    separatorTokens: 2,
+  }
+  // 目录只覆盖 P02（order 1）：P02 吃第 1 名，其余段落并列末位
+  const outline = { nodes: [{ id: '0', passageOrders: [1], vector: new Float32Array([1, 0]) }], weight: 0.5 }
+  const llm = vi.fn(async () => 'should not be called')
+  const passageDeps = { passage: { embedder, maxTokens: 45, sectionWeight: 0.5 } }
+  const paperPages = passages.map(passage => passage.text)
+
+  it('论文上挂的目录真的改变选段；同一索引不挂目录时退回 B', async () => {
+    const withOutline = await retrieveRagContext(
+      [{ tree: multiLeafTree, pages: paperPages, passageIndex: denseIndex, outline }],
+      'alpha', [], llm, {}, passageDeps,
+    )
+    const without = await retrieveRagContext(
+      [{ tree: multiLeafTree, pages: paperPages, passageIndex: denseIndex }],
+      'alpha', [], llm, {}, passageDeps,
+    )
+    expect(without.retrievals[0].hybrid?.retrievalMode).toBe('bm25+dense')
+    expect(without.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01'])
+    expect(withOutline.retrievals[0].hybrid?.retrievalMode).toBe('bm25+dense+outline')
+    expect(withOutline.retrievals[0].hybrid?.outlineUsed).toBe(true)
+    expect(withOutline.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P02'])
+    expect(llm).not.toHaveBeenCalled()
+  })
+
+  it('论文上挂的目录 weight 被逐字转发：改 weight（sectionWeight 固定）即改选段', async () => {
+    // deps 的 sectionWeight 固定 0.5，只改论文自己携带的 outline.weight。
+    // 若 ragPipeline 忽略 paper.outline.weight、改从 deps.sectionWeight 重算，两次结果会逐字相同。
+    const weightFor = (weight: number) => retrieveRagContext(
+      [{ tree: multiLeafTree, pages: paperPages, passageIndex: denseIndex, outline: { ...outline, weight } }],
+      'alpha', [], llm, {}, passageDeps,
+    )
+    const zero = await weightFor(0)   // weight=0 ⇒ 目录路不计权，选段退回 B
+    const one = await weightFor(1)
+    expect(zero.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P01'])
+    expect(one.retrievals[0].hybrid?.selectedPassageIds).toEqual(['P02'])
+    expect(zero.retrievals[0].hybrid?.outlineUsed).toBe(true)
+    expect(one.retrievals[0].hybrid?.outlineUsed).toBe(true)
+  })
+
+  it('只有目录没有段落索引时不走段落路径（目录不会被误用）', async () => {
+    const complete = vi.fn(async () => '[{"id":0,"score":9},{"id":1,"score":8}]')
+    const result = await retrieveRagContext(
+      [{ tree: multiLeafTree, pages: paperPages, outline }],
+      'alpha', [], complete, {}, passageDeps,
+    )
+    expect(result.retrievals[0].hybrid).toBeUndefined()
+  })
+})

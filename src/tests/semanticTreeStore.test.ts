@@ -12,6 +12,8 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
           items: [{ str: 'Attention is all you need.', transform: [1, 0, 0, 1, 0, 10], hasEOL: true }],
         }),
       }),
+      // extractPages 的默认适配器在 finally 里经 loadingTask 拆除（pdfjs 6 无 PDFDocumentProxy.destroy）。
+      loadingTask: { destroy: async () => {} },
     }),
   })),
 }))

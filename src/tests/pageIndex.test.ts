@@ -270,6 +270,8 @@ describe('PDF line reconstruction and semantic sections', () => {
       getPage: vi.fn(async (page: number) => ({
         getTextContent: async () => ({ items: [{ str: page === 2 ? '1. Introduction' : page === 5 ? '2. Methods' : `body ${page}`, transform: [1, 0, 0, 1, 30, 500], hasEOL: true }] }),
       })),
+      // pdfDocument 的默认适配器在 finally 里经 loadingTask 拆除（pdfjs 6 无 PDFDocumentProxy.destroy）。
+      loadingTask: { destroy: async () => {} },
     }
     const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs') as any
     pdfjs.getDocument.mockReturnValue({ promise: pdf })

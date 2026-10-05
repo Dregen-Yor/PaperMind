@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ChatLLMFn, ChatMessage, LLMFn } from '../../src/utils/llm'
-import type { TokenSnapshot } from './types'
+export interface TokenSnapshot { totalTokens: number; incompleteRequestCount: number }
 import { parseOllamaNdjson } from './streaming/ollamaNdjson'
 import { parseOpenAiSse } from './streaming/openaiSse'
 
@@ -241,7 +241,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
     return completion
   }
 
-  async function withRetries(attemptRequest: () => Promise<StreamCompletion>): Promise<StreamCompletion> {
+  async function withRetries(attemptRequest: () => Promise<StreamCompletion>, mayRetry: () => boolean = () => true): Promise<StreamCompletion> {
     const retries = opts.retryAttempts ?? 0
     const baseDelay = opts.retryBaseDelayMs ?? 1_000
     let lastError: unknown
@@ -254,7 +254,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
         const { error, usage } = unwrapAttemptError(caught)
         recordAttempt(usage)
         lastError = error
-        if (attempt === retries || !isRetryable(error)) throw error
+        if (attempt === retries || !mayRetry() || !isRetryable(error)) throw error
         // capped exponential backoff + deterministic bounded jitter prevents reconnect storms.
         const delay = Math.min(30_000, baseDelay * 2 ** attempt) + Math.floor(Math.random() * Math.max(1, baseDelay))
         opts.onRetry?.({
@@ -274,7 +274,11 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
   }
 
   function requestStream(messages: ChatMessage[], onVisibleText: (delta: string) => void): Promise<StreamCompletion> {
-    return withRetries(() => requestOnce(signal => requestStreamWithSignal(messages, onVisibleText, signal)))
+    let visible = false
+    return withRetries(() => requestOnce(signal => requestStreamWithSignal(messages, delta => {
+      if (delta.trim()) visible = true
+      onVisibleText(delta)
+    }, signal)), () => !visible)
   }
 
   async function requestOnce(run: (signal?: AbortSignal) => Promise<StreamCompletion>): Promise<StreamCompletion> {
@@ -298,7 +302,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
       const res = await doFetch(`${env.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: env.model, messages, stream: false, ...ollamaOptions() }),
+        body: JSON.stringify({ model: env.model, messages, stream: false, truncate: false, ...ollamaOptions() }),
         signal,
       })
       if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
@@ -356,7 +360,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
       const res = await doFetch(`${env.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: env.model, messages, stream: true, ...ollamaOptions() }),
+        body: JSON.stringify({ model: env.model, messages, stream: true, truncate: false, ...ollamaOptions() }),
         signal,
       })
       if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)

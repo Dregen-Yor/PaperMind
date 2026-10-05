@@ -4,7 +4,11 @@ import {
   routeWithSemanticTree,
   type SemanticRouteDiagnostics,
 } from './semanticRoute'
-import { retrievePassageContext, type HybridPassageDiagnostics } from './passageRetrieval'
+import {
+  retrievePassageContext,
+  type HybridPassageDiagnostics,
+  type OutlineScoringNode,
+} from './passageRetrieval'
 import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type MaterializedContext } from './contextTrace'
 import type { EvidenceBlock } from './evidenceBlock'
 import type { Embedder } from './embedder'
@@ -79,6 +83,16 @@ export interface IndexedPaper {
    * 否则回落语义树路由或平面 scoreAndSelect。
    */
   passageIndex?: PassageIndex
+  /**
+   * 原生 PDF 目录先验（方案 C 臂）。**按篇携带**，只在该篇同时有 `passageIndex` 时转发给段落
+   * 检索。benchmark 一次只喂一篇，若把它挂在 per-run 的 `RagPipelineDeps.passage` 上会
+   * 「看起来能用」，却对多篇的产品路径是错的（先验属于某篇论文，不属于整轮检索）。
+   *
+   * `weight` **必填**，且被逐字转发给段落检索当作目录路的 RRF 权重——在这里重新计算或忽略它，
+   * 都会让挂载点设的值静默失效。挂载点（bench qa）填入本次运行配置的 `sectionWeight`，
+   * 保证权重仍只有**一个**配置源（目录/卡片互斥、共用同一旋钮，见 `PassageRetrievalOptions.outline`）。
+   */
+  outline?: { nodes: OutlineScoringNode[]; weight: number }
 }
 
 export interface RagOptions extends ScoreOptions {
@@ -282,6 +296,11 @@ export async function retrieveRagContext(
             ...(deps.passage?.headingWeight !== undefined ? { headingWeight: deps.passage.headingWeight } : {}),
             ...(deps.passage?.neighbourFactor !== undefined ? { neighbourFactor: deps.passage.neighbourFactor } : {}),
             ...(deps.passage?.skipLimit !== undefined ? { skipLimit: deps.passage.skipLimit } : {}),
+            // 目录先验**只在同时有段落索引与目录的那篇**转发：先验属于某篇论文而非整轮。
+            // 逐字转发整份 `outline`（含 `weight`）——在这里重算或忽略 weight 会让挂载点设的
+            // 权重静默失效，正是本仓库反复踩过的「字段名与行为不符」。weight 的唯一配置源仍是
+            // 本次运行的 `sectionWeight`，由挂载点在建立该字段时填入。
+            ...(paper.outline ? { outline: paper.outline } : {}),
           })
         : paper.semantic
           ? await routeWithSemanticTree(paper.semantic.tree, paper.semantic.blocks, retrievalQuery, llm, {

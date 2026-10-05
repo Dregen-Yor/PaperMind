@@ -4,10 +4,10 @@ import { createMaxHeap } from '../utils/priorityQueue'
 import { buildPassages, createEstimatingTokenCounter } from '../utils/passages'
 import { buildTitleCards, cardsToIndexNodes, type StructureCard } from '../utils/structureCards'
 import { PASSAGE_INDEX_VERSION, passageConfigHash, type PassageIndex } from '../utils/passageIndex'
-import { fusePassageCandidates, inheritCardRanks, rankWithTiedZeros } from '../utils/passageRetrieval'
+import { fusePassageCandidates, inheritCardRanks, rankOutlinePassages, rankWithTiedZeros } from '../utils/passageRetrieval'
 import type { Embedder } from '../utils/embedder'
 import {
-  DEFAULT_HYBRID_OPTIONS, fillPassageBudget, retrievePassageContext,
+  DEFAULT_HYBRID_OPTIONS, fillPassageBudget, retrievePassageContext, type OutlineScoringNode,
 } from '../utils/passageRetrieval'
 import { encodeVectors } from '../utils/embedder'
 import { CONTEXT_GROUP_SEPARATOR, materializeContext } from '../utils/contextTrace'
@@ -675,5 +675,169 @@ describe('卡片名次继承与零分并列（方案 §4.2）', () => {
       passagesCannotUseVectors: true,
     })
     expect(new Set(fused.map(item => item.score)).size).toBe(1)
+  })
+})
+
+describe('rankOutlinePassages（目录先验路）', () => {
+  const outlineNode = (id: string, passageOrders: number[], vector: number[]): OutlineScoringNode =>
+    ({ id, passageOrders, vector: new Float32Array(vector) })
+
+  it('段落取关联节点的最大相似度一次；父子/兄弟重叠既不重复也不求和', () => {
+    const query = new Float32Array([1, 0])
+    const ranked = rankOutlinePassages(query, [
+      outlineNode('0', [0], [1, 0]),        // 段落 0：相似度 1（父节点）
+      outlineNode('0.0', [0, 1], [0.6, 0.8]), // 段落 0 再次覆盖（子节点 0.6），段落 1：0.6
+      outlineNode('1', [1], [0, 1]),        // 段落 1 再次覆盖（兄弟节点 0）
+    ], 3)
+    // 段落 0 = max(1, 0.6) = 1（不是 1 + 0.6），且只出现一次；段落 1 = max(0.6, 0) = 0.6；段落 2 未覆盖
+    expect(ranked.map(item => item.id)).toEqual([0, 1, 2])
+    expect(ranked[0].score).toBe(1)
+    expect(ranked[1].score).toBeCloseTo(0.6)
+    expect(ranked[2].score).toBe(0)
+    expect(ranked.map(item => item.rank)).toEqual([1, 2, 3])
+  })
+
+  it('未覆盖段落并列末位、按 order 稳定破平，且绝不从列表里消失', () => {
+    const query = new Float32Array([1, 0])
+    const ranked = rankOutlinePassages(query, [outlineNode('0', [0], [1, 0])], 4)
+    expect(ranked).toHaveLength(4)
+    // 段落 0 覆盖（相似度 1）；1/2/3 未覆盖 → 全部 tailRank = covered.length + 1 = 2
+    expect(ranked.map(item => item.rank)).toEqual([1, 2, 2, 2])
+    expect(ranked.map(item => item.score)).toEqual([1, 0, 0, 0])
+  })
+
+  it('维度不符的节点被丢弃（既有向量策略），其余节点照常打分', () => {
+    const query = new Float32Array([1, 0])
+    const ranked = rankOutlinePassages(query, [
+      outlineNode('bad', [0], [1, 0, 0]),  // 3 维，与 2 维查询不符 → 丢弃该节点
+      outlineNode('good', [1], [1, 0]),    // 段落 1 有效
+    ], 2)
+    expect(ranked.map(item => item.rank)).toEqual([2, 1])   // 段落 0 未覆盖 → tailRank 2
+  })
+})
+
+describe('fusePassageCandidates 目录与卡片互斥（方案禁止同实验同时启用）', () => {
+  const passages = buildPassages(['a.\n\nb.\n\nc.'], counter, { minTokens: 1 })
+  const ranked = (...scores: number[]) => scores.map((score, id) => ({ id, score }))
+
+  it('card 与 outline 同时给出时只用 outline，卡片整路不进入融合', () => {
+    const bm25 = () => ranked(3, 2, 1)
+    const withBoth = fusePassageCandidates({
+      passages,
+      query: 'x',
+      bm25,
+      card: () => ranked(1, 3, 2),
+      outline: { list: () => ranked(2, 1, 3), weight: 0.5 },
+      rrfK: 60,
+      sectionWeight: 0.5,
+      passagesCannotUseVectors: true,
+    })
+    const outlineOnly = fusePassageCandidates({
+      passages,
+      query: 'x',
+      bm25,
+      outline: { list: () => ranked(2, 1, 3), weight: 0.5 },
+      rrfK: 60,
+      sectionWeight: 0.5,
+      passagesCannotUseVectors: true,
+    })
+    expect(withBoth).toEqual(outlineOnly)
+  })
+})
+
+describe('retrievePassageContext 目录先验（本地 PDF 目录）', () => {
+  /** 无卡片的稠密索引：目录是唯一的先验路，模式判定不被卡片分支干扰（形态同 C 臂）。 */
+  const denseNoCards = () => fakeIndex({ cards: undefined, cardVectors: undefined })
+  const outlineNode = (id: string, passageOrders: number[], vector: number[]): OutlineScoringNode =>
+    ({ id, passageOrders, vector: new Float32Array(vector) })
+
+  it('dense 可用 + 目录可用 → bm25+dense+outline，且 embedQuery 只调一次', async () => {
+    const { index, embedder } = denseNoCards()
+    const result = await retrievePassageContext(index, 'MultiUN results', {
+      embedder,
+      // fakeIndex 的查询向量是 [1,1,0,0]（4 维）；节点向量同维
+      outline: { nodes: [outlineNode('0', [index.passages.length - 1], [0, 0, 0, 1])], weight: 0.5 },
+    })
+    expect(result.hybrid.retrievalMode).toBe('bm25+dense+outline')
+    expect(result.hybrid.outlineAvailable).toBe(true)
+    expect(result.hybrid.outlineUsed).toBe(true)
+    expect(result.hybrid.outlineFallbackReason).toBeUndefined()
+    // 目录复用同一次查询向量：查询期零额外嵌入调用（这就是「本地打分」的硬口径）
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('加不加目录候选集合都不变（只排名次、绝不裁剪）', async () => {
+    const { index, embedder } = denseNoCards()
+    const withOutline = await retrievePassageContext(index, 'corpus', {
+      embedder,
+      outline: { nodes: [outlineNode('0', [0], [1, 0, 0, 0])], weight: 0.5 },
+    })
+    const without = await retrievePassageContext(index, 'corpus', { embedder })
+    expect(without.hybrid.retrievalMode).toBe('bm25+dense')
+    expect(without.hybrid.outlineUsed).toBe(false)
+    expect(withOutline.hybrid.candidateCount).toBe(without.hybrid.candidateCount)
+    expect(withOutline.hybrid.candidateCount).toBe(index.passages.length)
+    // 未覆盖的段落没有被目录删掉：候选 id 集合与不加目录时完全一致
+    expect(new Set(withOutline.scores.map(score => score.id)))
+      .toEqual(new Set(without.scores.map(score => score.id)))
+  })
+
+  it('节点向量维度不符 → 目录整路停用，退回 B 的 bm25+dense（既有向量策略）', async () => {
+    const { index, embedder } = denseNoCards()
+    const result = await retrievePassageContext(index, 'corpus', {
+      embedder,
+      outline: { nodes: [outlineNode('0', [0], [1, 0, 0])], weight: 0.5 },   // 3 维，索引是 4 维
+    })
+    expect(result.hybrid.retrievalMode).toBe('bm25+dense')
+    expect(result.hybrid.outlineAvailable).toBe(true)
+    expect(result.hybrid.outlineUsed).toBe(false)
+    expect(result.hybrid.outlineFallbackReason).toBe('outline-vector-dim-mismatch')
+  })
+
+  it('dense 不可用时目录也无从打分：outlineUsed=false、原因 dense-unavailable，模式如实降级', async () => {
+    const { index } = fakeIndex({ stage: 1, passageVectors: undefined, cardVectors: undefined, cards: undefined })
+    const result = await retrievePassageContext(index, 'corpus', {
+      outline: { nodes: [outlineNode('0', [0], [1, 0, 0, 0])], weight: 0.5 },
+    })
+    expect(result.hybrid.retrievalMode).toBe('bm25')
+    expect(result.hybrid.outlineAvailable).toBe(true)
+    expect(result.hybrid.outlineUsed).toBe(false)
+    expect(result.hybrid.outlineFallbackReason).toBe('dense-unavailable')
+  })
+
+  it('卡片与目录同时具备时目录胜出、卡片整路不进入融合（不是 full）', async () => {
+    const { index, embedder } = fakeIndex()   // 有卡片 + 卡片向量
+    const outline = [outlineNode('0', [0], [1, 1, 0, 0])]
+    const withCards = await retrievePassageContext(index, 'corpus', {
+      embedder, outline: { nodes: outline, weight: 0.5 },
+    })
+    expect(withCards.hybrid.retrievalMode).toBe('bm25+dense+outline')   // 不是 full
+    // 与「同一份索引但根本没有卡片」的融合结果逐字相同 ⇒ 卡片确实没有进入
+    const noCards = await retrievePassageContext(
+      { ...index, cards: undefined, cardVectors: undefined }, 'corpus',
+      { embedder, outline: { nodes: outline, weight: 0.5 } },
+    )
+    expect(withCards.scores).toEqual(noCards.scores)
+    expect(withCards.hybrid.selectedPassageIds).toEqual(noCards.hybrid.selectedPassageIds)
+  })
+
+  it('目录路的融合权重取自 outline.weight（不再是死字段）：改权重即改融合分', async () => {
+    const { index, embedder } = denseNoCards()
+    const nodes = [outlineNode('0', [index.passages.length - 1], [1, 1, 0, 0])]
+    // sectionWeight 两次都固定 0.5、只有 outline.weight 在变 ⇒ 分数差异只可能来自 weight 被真正读取。
+    // 旧实现把 weight 当占位字段丢弃，这两次会逐字相同，本用例随即变红。
+    const weightZero = await retrievePassageContext(index, 'corpus', {
+      embedder, sectionWeight: 0.5, outline: { nodes, weight: 0 },
+    })
+    const weightFive = await retrievePassageContext(index, 'corpus', {
+      embedder, sectionWeight: 0.5, outline: { nodes, weight: 5 },
+    })
+    expect(weightFive.scores).not.toEqual(weightZero.scores)
+    // weight=0 把目录路贡献归零 ⇒ 融合分与「根本不挂目录」逐字相同（0 是合法权重，不能被默认值吞掉）
+    const noOutline = await retrievePassageContext(index, 'corpus', { embedder })
+    expect(weightZero.scores).toEqual(noOutline.scores)
+    expect(weightZero.hybrid.retrievalMode).toBe('bm25+dense+outline')
+    expect(weightZero.hybrid.outlineUsed).toBe(true)
+    expect(weightFive.hybrid.retrievalMode).toBe('bm25+dense+outline')
   })
 })

@@ -8,6 +8,7 @@
  * 不可动摇的不变量：每个段落的 `text` 逐字等于其 `pieces` 的拼接，
  * 且进入上下文的永远是 `text`（原文）；清洗只作用于 `searchText`。
  */
+import { mapTransformedRuns, type SourceRun } from './sourceTrace'
 import type { ContextPiece } from './contextTrace'
 import { detectRunningLines, normalizeEvidenceText } from './evidenceBlock'
 import { isHeadingLine } from './sectionHeadings'
@@ -75,6 +76,7 @@ export function hasPassagePartition(passage: unknown): boolean {
 
 /** 同一页内的一个连续行块；`breakBefore` 表示它开启一个新自然段（换行符宽度不同）。 */
 interface Atom {
+  sourceRuns: SourceRun[]
   page: number
   text: string
   breakBefore: boolean
@@ -107,20 +109,26 @@ function collectParagraphs(pages: string[]): Paragraph[] {
     if (atoms.length > 0) paragraphs.push({ atoms, subsection: paragraphSubsection })
     atoms = []
   }
-  const append = (page: number, text: string, breakBefore: boolean) => {
+  const append = (page: number, text: string, breakBefore: boolean, start: number) => {
     const last = atoms.at(-1)
-    if (last && last.page === page && !breakBefore) last.text += `\n${text}`
-    else atoms.push({ page, text, breakBefore })
+    if (last && last.page === page && !breakBefore) {
+      const offset = last.text.length
+      last.sourceRuns.push({ textStart: offset, textEnd: offset + 1, source: null }, { textStart: offset + 1, textEnd: offset + 1 + text.length, source: { page, start, end: start + text.length } })
+      last.text += `\n${text}`
+    } else atoms.push({ page, text, breakBefore, sourceRuns: [{ textStart: 0, textEnd: text.length, source: { page, start, end: start + text.length } }] })
   }
-  const startParagraph = (page: number, text: string) => {
+  const startParagraph = (page: number, text: string, start: number) => {
     flush()
     paragraphSubsection = subsection
-    append(page, text, true)
+    append(page, text, true, start)
   }
 
   for (let page = 0; page < pages.length; page++) {
+    let lineOffset = 0
     for (const raw of pages[page].split(/\r?\n/)) {
       const text = raw.trim()
+      const start = lineOffset + raw.length - raw.trimStart().length
+      lineOffset += raw.length + (pages[page][lineOffset + raw.length] === '\r' ? 2 : 1)
       if (!text) {
         flush()
         previousLine = ''
@@ -132,12 +140,12 @@ function collectParagraphs(pages: string[]): Paragraph[] {
         flush()
         subsection = heading
         paragraphSubsection = heading
-        append(page, text, true)
+        append(page, text, true, start)
         previousLine = text
         continue
       }
-      if (atoms.length === 0 || startsNewParagraph(previousLine, text)) startParagraph(page, text)
-      else append(page, text, false)
+      if (atoms.length === 0 || startsNewParagraph(previousLine, text)) startParagraph(page, text, start)
+      else append(page, text, false, start)
       previousLine = text
     }
   }
@@ -250,8 +258,11 @@ function splitOversizedParagraph(paragraph: Paragraph, maxTokens: number, countT
     const atomTokens = countTokens(atom.text)
     if (atomTokens > maxTokens) {
       flush()
+      let cursor = 0
       for (const piece of splitLongText(atom.text, maxTokens, countTokens)) {
-        out.push({ atoms: [{ page: atom.page, text: piece, breakBefore: true }], subsection: paragraph.subsection })
+        const mapped = mapTransformedRuns(atom.text, atom.sourceRuns, piece, cursor)
+        cursor = mapped.cursor
+        out.push({ atoms: [{ page: atom.page, text: piece, breakBefore: true, sourceRuns: mapped.runs }], subsection: paragraph.subsection })
       }
       continue
     }
@@ -270,8 +281,14 @@ function atomsToPieces(atoms: Atom[]): ContextPiece[] {
     const prefix = index === 0 ? '' : atom.breakBefore ? '\n\n' : '\n'
     const fragment = `${prefix}${atom.text}`
     const last = pieces.at(-1)
-    if (last && last.page === atom.page) last.text += fragment
-    else pieces.push({ page: atom.page, text: fragment })
+    const runs: SourceRun[] = [
+      ...(prefix ? [{ textStart: 0, textEnd: prefix.length, source: null }] : []),
+      ...atom.sourceRuns.map(r => ({ ...r, textStart: r.textStart + prefix.length, textEnd: r.textEnd + prefix.length })),
+    ]
+    if (last && last.page === atom.page) {
+      last.sourceRuns!.push(...runs.map(r => ({ ...r, textStart: r.textStart + last.text.length, textEnd: r.textEnd + last.text.length })))
+      last.text += fragment
+    } else pieces.push({ page: atom.page, text: fragment, sourceRuns: runs })
   })
   return pieces
 }
@@ -295,6 +312,7 @@ export function buildPassages(
     const pieces = atomsToPieces(group.atoms)
     const text = pieces.map(piece => piece.text).join('')
     const id = `P${String(index + 1).padStart(2, '0')}`
+    for (const piece of pieces) piece.passageId = id
     if (!hasPassagePartition({ pieces, text })) throw new Error(`段落 ${id} 的分片与原文不一致`)
     return {
       id,

@@ -3,6 +3,7 @@
 # src/utils/ — 工具函数与 RAG 检索
 
 **变更记录**
+- 2026-09-28: 新增 `pdfOutline.ts`——把 PDF.js 原生目录解析为按页码锚定的 `PdfOutlineEntry` 树（`resolvePdfOutline`，失败返回带原因的结果、绝不静默剪枝）并构建带 passage 归属的 `PdfOutlineNode` 索引（`buildPdfOutlineIndex` / `pdfOutlinePassages`，只做关联不剪枝，坏输入抛 `PdfOutlineIndexError`）；`pdfDocument.ts` 的 `extractPdfDocument` 增加可选目录读取（`readOutline`，默认 true），产品路径 `extractPages` 显式传 `false`，故默认检索链不受影响；`passageRetrieval.ts` 新增 `bm25+dense+outline` 模式——目录先验参与 RRF、候选集合恒不变
 - 2026-09-24: 新增**段落混合检索链路**（方案 §1–§7）——`passages` / `sectionHeadings` / `bm25` / `lexicalTokenizer` / `rrf` / `priorityQueue` / `structureCards` / `passageIndex` / `passageIndexBuilder` / `passageRetrieval` / `embedder` / `transformersEmbedder` / `modelCache` / `buildGeneration`，即「段落级 BM25 + 向量 + 卡片先验三路加权 RRF」替换整章 `scoreAndSelect` 的检索路径（详见下文）
 - 2026-09-21: 新增三个纯函数模块——`sourceRef.ts`（消息来源结构化归一）、`highlightMerge.ts`（划选片段/page 合并与历史碎片合并计划）、`exportSanitize.ts`（导出默认脱敏 + 备份文件名）
 - 2026-09-15: 新增语义树检索链路——`evidenceBlock.ts`（原文证据块）、`semanticTree.ts`（单次调用建树 + 校验 + 诊断 + `semanticTreeConfigHash` 建树配置指纹）、`semanticRoute.ts`（单轮树路由 + 原文取证 + 统一上下文预算 + 平面就地回落）；`ragPipeline.ts` 的 `IndexedPaper` 增加可选 `semantic` 字段，提供时把平面叶节点与树节点放进**同一次**打分判断，因此既满足 §9 的回落要求又不增加查询阶段串行 LLM 调用

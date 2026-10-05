@@ -1,0 +1,91 @@
+[
+  {
+    "file": "01-method-attention-is-all-you-need.pdf",
+    "title": "Attention Is All You Need",
+    "questions": [
+      {
+        "q": "What value of warmup_steps was used in the learning-rate schedule?",
+        "answers": ["4000", "The warmup_steps value was 4000."],
+        "evidencePages": [7]
+      },
+      {
+        "q": "What BLEU scores did the Transformer (big) model achieve on WMT 2014 English-to-German and English-to-French translation, respectively?",
+        "answers": ["28.4 and 41.8", "28.4 BLEU for English-to-German and 41.8 BLEU for English-to-French"],
+        "evidencePages": [1, 8]
+      },
+      {
+        "q": "How many identical layers are used in the Transformer encoder stack?",
+        "answers": ["6", "six", "The encoder stack has six identical layers."],
+        "evidencePages": [3]
+      },
+      {
+        "q": "Why are the attention dot products scaled by 1/sqrt(d_k)?",
+        "answers": [
+          "To prevent large dot products from pushing the softmax into regions with extremely small gradients.",
+          "Because large d_k makes dot products grow in magnitude and drives the softmax into regions with very small gradients."
+        ],
+        "evidencePages": [4]
+      }
+    ]
+  },
+  {
+    "file": "02-theory-deep-sets.pdf",
+    "title": "Deep Sets",
+    "questions": [
+      {
+        "q": "What general form can a permutation-invariant set function take?",
+        "answers": ["rho applied to the sum of phi(x)", "rho(sum of phi(x))", "f(X) = rho(sum over x in X of phi(x))"],
+        "evidencePages": [2, 14]
+      },
+      {
+        "q": "What condition on the matrix Theta makes a standard neural-network layer permutation equivariant?",
+        "answers": [
+          "All off-diagonal elements are tied and all diagonal elements are equal.",
+          "Theta has the form lambda I plus gamma 11 transpose."
+        ],
+        "evidencePages": [2, 3]
+      },
+      {
+        "q": "Approximately what accuracy does the non-equivariant baseline achieve on the outlier-detection task?",
+        "answers": ["6.3%", "approximately 6.3 percent"],
+        "evidencePages": [8]
+      },
+      {
+        "q": "Which four application areas are used to demonstrate Deep Sets?",
+        "answers": [
+          "population statistics estimation, point cloud classification, set expansion, and outlier detection"
+        ],
+        "evidencePages": [1]
+      }
+    ]
+  },
+  {
+    "file": "03-experiments-bert.pdf",
+    "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+    "questions": [
+      {
+        "q": "What two objectives are used to pre-train BERT?",
+        "answers": ["masked language modeling and next sentence prediction", "masked LM and next sentence prediction"],
+        "evidencePages": [2, 4]
+      },
+      {
+        "q": "For tokens selected for masked-language-model training, what 80/10/10 replacement strategy is used?",
+        "answers": ["80% [MASK], 10% a random token, and 10% unchanged"],
+        "evidencePages": [4, 12]
+      },
+      {
+        "q": "How many parameters do BERT_BASE and BERT_LARGE contain, respectively?",
+        "answers": ["110 million and 340 million", "110M and 340M"],
+        "evidencePages": [8]
+      },
+      {
+        "q": "According to the ablation study, what happens when the next-sentence-prediction objective is removed?",
+        "answers": [
+          "Performance drops significantly on QNLI, MNLI, and SQuAD 1.1.",
+          "It significantly hurts performance on QNLI, MNLI, and SQuAD 1.1."
+        ],
+        "evidencePages": [8]
+      }
+    ]
+  }
+]

@@ -3,6 +3,7 @@
 # bench/ — 评测 Benchmark
 
 **变更记录**
+- 2026-09-28: PDF 原生目录产品实验——新增 `PassageMode`（`lexical` / `hybrid-raw` / `hybrid-outline`）三臂与 `runner/productSweep.ts` 编排的 `--sweep` 一键矩阵（热 A/B/C/R + 冷首问 A/B/C × 2 策略同一 cohort）；`runner/coldFirstQuery.ts` + `metrics/coldFirstQuery.ts` 实现 `cold-first-query-v1` 协议（t0 内含 PDF 读取/解析/索引/本地模型初始化，落在独立结果类型，**不进** `query-timeline-v2` 热速度契约与 Q）；`datasets/outlineStudy.ts` 加载 `bench/minibatch/` 冻结标注（3 篇 × 4 题）；质量协议新增第二定义 `pdf-qa-all-questions-v1` 与 pdf-study manifest/PDF/目录三份指纹；报告新增冷首问分策略表、产品热表与目录成本表（`renderOutlineCostTable`）；A/B/C 建索引零生成式 LLM 调用由 `passageIndexHook.test.ts` / `cli.test.ts` 钉死
 - 2026-09-23: QASPER 全题质量与速度合成 Q——新增 `answerF1AllQuestions` 固定分母、schema 2 / `query-timeline-v2`、可配置权重的离线 Q 对比及原始输入保留；旧 v1 结果不参与 Q
 - 2026-09-15: 语义树评测——新增 `semantic-tree` 配置（`kind: 'semantic-tree'`）与 `runner/semanticTreeQa.ts`（复用 `runQaTask` + 建树 hook，切片与对照组完全一致）；`metrics/treeDiagnostics.ts` 产出建树结构/成本/失败率与 `treeUsedRate` / `treeDegradationRate`；`treeInspect.ts` + `npm run bench:trees` 只建树不答题，输出 Markdown 树结构供人工核对（阶段 E 第 4 步）
 - 2026-09-14: 冻结 QA 横向基线切片——主结果表中的所有方法（含后续强基线）必须使用同一 QASPER 60 篇论文 / 179 道题切片；179 篇 / 632 题及其他扩容切片只能作为独立的规模泛化实验，禁止与主表混排或据此跨方法排名

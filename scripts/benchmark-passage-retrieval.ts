@@ -17,7 +17,8 @@ import { retrieveRagContext } from '../src/utils/ragPipeline'
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const { values } = parseArgs({
   options: {
-    'baseline-ref': { type: 'string', default: '1649433' },
+    // This branch includes outline diagnostics absent from upstream's old baseline.
+    'baseline-ref': { type: 'string', default: 'ed074fc' },
     iterations: { type: 'string', default: '120' },
     passages: { type: 'string', default: '600' },
   },
