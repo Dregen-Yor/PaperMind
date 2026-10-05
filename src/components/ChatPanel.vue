@@ -2,7 +2,7 @@
   <div class="chat-panel">
     <div class="chat-messages" ref="messagesRef" aria-live="polite">
       <div v-if="!conversation || conversation.messages.length === 0" class="chat-empty">
-        <div class="empty-visual" aria-hidden="true"><el-icon :size="28"><Reading /></el-icon></div>
+        <img class="empty-visual" :src="paperMindMark" alt="" />
         <h2 class="font-display">{{ conversation ? '读到这里，想问些什么？' : '与论文展开对话' }}</h2>
         <p>{{ conversation?.paperIds.length ? '从一个问题开始，理解论文背后的思路。\n也可以选中原文，把具体段落带入对话。' : '选择感兴趣的论文，梳理观点、比较方法，\n或从一个研究问题开始探索。' }}</p>
         <div v-if="conversation?.paperIds.length" class="starter-questions">
@@ -14,7 +14,10 @@
       </div>
 
       <div v-for="msg in conversation?.messages" :key="msg.id" class="message" :class="msg.role">
-        <div class="msg-avatar" :class="{ 'font-display': msg.role === 'assistant' }" aria-hidden="true">{{ msg.role === 'user' ? '你' : 'P' }}</div>
+        <div class="msg-avatar" aria-hidden="true">
+          <span v-if="msg.role === 'user'">你</span>
+          <img v-else :src="paperMindMarkLight" alt="" />
+        </div>
         <div class="msg-body">
           <div v-if="msg.role === 'assistant'" class="msg-author">PaperMind</div>
           <div v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" v-html="renderMarkdown(msg.content)" />
@@ -46,7 +49,7 @@
       </div>
 
       <div v-if="loading && !hasStreamingBubble" class="message assistant">
-        <div class="msg-avatar font-display" aria-hidden="true">P</div>
+        <div class="msg-avatar" aria-hidden="true"><img :src="paperMindMarkLight" alt="" /></div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
           <div class="typing" role="status" aria-label="正在生成回答"><span /><span /><span /></div>
@@ -94,10 +97,13 @@
 import { ref, computed, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Link, Document, Close, Top, Reading, ArrowRight, Cpu } from '@element-plus/icons-vue'
+import { Link, Document, Close, Top, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
 import { renderMarkdown } from '../utils/markdown'
 import { isJumpable, type SourceRef } from '../utils/sourceRef'
+
+const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
+const paperMindMarkLight = new URL('../../assets/brand/papermind-mark-light.svg', import.meta.url).href
 
 const props = defineProps<{ conversation: Conversation | null }>()
 const emit = defineEmits<{ (e: 'create'): void; (e: 'open-source', ref: SourceRef): void }>()
@@ -209,7 +215,7 @@ async function send() {
 .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg-surface); }
 .chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 24px; display: flex; flex-direction: column; gap: 28px; }
 .chat-empty { width: 100%; max-width: 380px; margin: auto; padding: 20px 0; display: flex; flex-direction: column; align-items: center; text-align: center; }
-.empty-visual { display: flex; align-items: center; justify-content: center; width: 58px; height: 62px; margin-bottom: 24px; background: var(--bg-elevated); color: var(--accent); border-radius: 5px 10px 10px 5px; box-shadow: inset 3px 0 0 var(--border); }
+.empty-visual { display: block; width: 64px; height: 64px; margin-bottom: 24px; object-fit: contain; }
 .chat-empty h2 { font-size: 24px; font-weight: 500; line-height: 1.5; color: var(--text-primary); }
 .chat-empty p { margin-top: 12px; font-size: 12px; line-height: 1.95; color: var(--text-muted); white-space: pre-line; }
 .starter-questions { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 280px; margin-top: 28px; }
@@ -220,6 +226,7 @@ async function send() {
 .message { display: flex; gap: 10px; }
 .message.user { flex-direction: row-reverse; }
 .msg-avatar { width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 22px; color: var(--bg-surface); background: var(--accent); line-height: 1; }
+.msg-avatar img { display: block; width: 26px; height: 26px; }
 .message.user .msg-avatar { font-size: 11px; background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border); }
 .msg-body { max-width: calc(100% - 38px); min-width: 0; flex: 1; }
 .message.user .msg-body { flex: 0 1 auto; max-width: 85%; }

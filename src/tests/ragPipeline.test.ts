@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
+import { GROUNDING_INSTRUCTION } from '../utils/answerMessages'
 import type { IndexNode } from '../utils/pageIndex'
 import type { ChatTurn } from '../utils/queryRewrite'
 import type { Passage } from '../utils/passages'
 import type { PassageIndex } from '../utils/passageIndex'
 import type { StructureCard } from '../utils/structureCards'
+import type { Embedder } from '../utils/embedder'
 
 // Node 环境缺 DOMMatrix，pageIndex 顶层会初始化 pdfjs worker
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -66,7 +68,7 @@ describe('buildAnswerMessages', () => {
     expect(buildAnswerMessages(context, 'What is it?', [], systemPrompt)).toEqual([
       {
         role: 'system',
-        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${context}`,
+        content: `${systemPrompt}\n\n${EXPECTED_MATH_FORMAT_INSTRUCTION}\n\n参考内容：\n${context}\n\n${GROUNDING_INSTRUCTION}`,
       },
       { role: 'user', content: 'What is it?' },
     ])
@@ -442,6 +444,120 @@ describe('retrieveRagContext 的段落路径', () => {
     separatorTokens: 2,
   }
 
+  function densePaper(overrides: Partial<PassageIndex> = {}) {
+    const index: PassageIndex = {
+      ...passageIndex,
+      stage: 3,
+      cards,
+      embedderId: 'request-embedder',
+      vectorDim: 2,
+      passageVectors: passages.map(() => new Float32Array([1, 0])),
+      cardVectors: cards.map(() => new Float32Array([1, 0])),
+      ...overrides,
+    }
+    return { tree: index.tree, pages: passagePages, passageIndex: index }
+  }
+
+  it('多篇论文共享一次改写后查询向量，下一次请求重新嵌入', async () => {
+    const embedder: Embedder = {
+      id: 'request-embedder',
+      embedQuery: vi.fn(async () => new Float32Array([1, 0])),
+      embedPassages: vi.fn(async () => []),
+    }
+    const llm = vi.fn(async () => 'rewritten query')
+    const papers = [densePaper(), densePaper()]
+    const history: ChatTurn[] = [{ role: 'user', content: 'question' }, { role: 'assistant', content: 'answer' }]
+    const result = await retrieveRagContext(papers, 'and datasets?', history, llm, {}, { passage: { embedder } })
+    expect(result.retrievalQuery).toBe('rewritten query')
+    expect(result.retrievals.map(item => item.hybrid?.retrievalMode)).toEqual(['full', 'full'])
+    expect(embedder.embedQuery).toHaveBeenCalledExactlyOnceWith('rewritten query')
+
+    await retrieveRagContext(papers, 'rewritten query', [], llm, {}, { passage: { embedder } })
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['rejection', 'synchronous throw'])('请求内共享 %s，下一次请求重试恢复', async failure => {
+    let attempts = 0
+    const embedder: Embedder = {
+      id: 'request-embedder',
+      embedQuery: vi.fn(() => {
+        attempts++
+        if (attempts === 1) {
+          if (failure === 'synchronous throw') throw new Error('offline')
+          return Promise.reject(new Error('offline'))
+        }
+        return Promise.resolve(new Float32Array([1, 0]))
+      }),
+      embedPassages: vi.fn(async () => []),
+    }
+    const papers = [densePaper(), densePaper()]
+    const failed = await retrieveRagContext(papers, 'query', [], vi.fn(), {}, { passage: { embedder } })
+    expect(failed.retrievals.map(item => item.hybrid?.retrievalMode)).toEqual(['bm25+card-lexical', 'bm25+card-lexical'])
+    expect(attempts).toBe(1)
+    const recovered = await retrieveRagContext(papers, 'query', [], vi.fn(), {}, { passage: { embedder } })
+    expect(recovered.retrievals.map(item => item.hybrid?.retrievalMode)).toEqual(['full', 'full'])
+    expect(attempts).toBe(2)
+  })
+
+  it('无可用段落向量、缺维度、来源不匹配及 externalContext 均不会提前嵌入', async () => {
+    const embedder: Embedder = {
+      id: 'request-embedder',
+      embedQuery: vi.fn(async () => new Float32Array([1, 0])),
+      embedPassages: vi.fn(async () => []),
+    }
+    const unusable = [
+      densePaper({ passageVectors: undefined }),
+      densePaper({ passageVectors: [] }),
+      densePaper({ vectorDim: undefined }),
+      densePaper({ embedderId: 'other-embedder' }),
+    ]
+    const result = await retrieveRagContext(unusable, 'query', [], vi.fn(), {}, { passage: { embedder } })
+    expect(result.retrievals.every(item => item.hybrid?.retrievalMode === 'bm25+card-lexical')).toBe(true)
+    expect(embedder.embedQuery).not.toHaveBeenCalled()
+    await retrieveRagContext([densePaper()], 'query', [], vi.fn(), { externalContext: 'selected text' }, { passage: { embedder } })
+    expect(embedder.embedQuery).not.toHaveBeenCalled()
+
+    const mixed = await retrieveRagContext([...unusable, densePaper(), densePaper()], 'query', [], vi.fn(), {}, { passage: { embedder } })
+    expect(mixed.retrievals.slice(-2).map(item => item.hybrid?.retrievalMode)).toEqual(['full', 'full'])
+    expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('请求包装保留原 embedder 的 id、其他方法及原始 this', async () => {
+    class StatefulEmbedder implements Embedder {
+      #modelId = 'request-embedder'
+      get id() { return this.#modelId }
+      embedQuery = vi.fn(async function (this: StatefulEmbedder, text: string) {
+        expect(this.id).toBe('request-embedder')
+        expect(text).toBe('query')
+        return new Float32Array([1, 0])
+      })
+      async embedPassages(texts: string[]) {
+        expect(this.id).toBe('request-embedder')
+        return texts.map(() => new Float32Array([1, 0]))
+      }
+      modelId() { return this.#modelId }
+    }
+    const embedder = Object.freeze(new StatefulEmbedder())
+    const module = await import('../utils/passageRetrieval')
+    const original = module.retrievePassageContext
+    const forwarded: Embedder[] = []
+    const spy = vi.spyOn(module, 'retrievePassageContext').mockImplementation(async (index, query, opts) => {
+      const wrapped = opts!.embedder!
+      forwarded.push(wrapped)
+      expect(wrapped.id).toBe(embedder.id)
+      expect(await wrapped.embedPassages(['text'])).toEqual([new Float32Array([1, 0])])
+      expect((wrapped as StatefulEmbedder).modelId()).toBe(embedder.id)
+      return original(index, query, opts)
+    })
+    try {
+      await retrieveRagContext([densePaper(), densePaper()], 'query', [], vi.fn(), {}, { passage: { embedder } })
+      expect(forwarded[0]).toBe(forwarded[1])
+      expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('有 passageIndex 时走段落检索且检索阶段零 LLM 调用', async () => {
     const llm = vi.fn(async () => 'should not be called')
     const retrieval = await retrieveRagContext(
@@ -556,6 +672,24 @@ describe('retrieveRagContext 的段落路径', () => {
     const lexical = await retrieveRagContext([paper], 'Europarl datasets', [], llm, {}, {})
     expect(lexical.retrievals[0].hybrid?.retrievalMode).toBe('bm25+card-lexical')
     expect(embedder.embedQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([0, 0.25])('forwards explicit headingWeight %s to passage retrieval', async headingWeight => {
+    const module = await import('../utils/passageRetrieval')
+    const original = module.retrievePassageContext
+    const forwarded: Array<number | undefined> = []
+    const spy = vi.spyOn(module, 'retrievePassageContext').mockImplementation(async (index, query, opts) => {
+      forwarded.push(opts?.headingWeight)
+      return original(index, query, opts)
+    })
+    try {
+      const llm = vi.fn()
+      await retrieveRagContext([densePaper()], 'Europarl', [], llm, {}, { passage: { headingWeight } })
+      expect(forwarded).toEqual([headingWeight])
+      expect(llm).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('转发 sectionWeight：卡片先验的权重真的改变融合选段（R42）', async () => {

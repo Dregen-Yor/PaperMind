@@ -156,7 +156,7 @@
 
       <!-- ── 关于 ── -->
       <section class="settings-card about">
-        <div class="about-mark" aria-hidden="true">P</div>
+        <img class="about-mark" :src="paperMindMark" alt="" />
         <div>
           <h3>关于</h3>
           <p class="card-desc">PaperMind 0.1.0 — 你的本地论文阅读助手</p>
@@ -264,6 +264,8 @@ import {
   type LLMProfile,
 } from '../stores/chat'
 import { storeToRefs } from 'pinia'
+
+const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
 
 const chatStore = useChatStore()
 const { profiles, chatProfileId, indexProfileId, abstractToken, treeEnabled, treeReadyPapers } =
@@ -566,18 +568,10 @@ async function clearData() {
 .about { display: flex; align-items: center; gap: 14px; }
 .about .card-desc { margin-bottom: 0; }
 .about-mark {
-  width: 40px;
-  height: 40px;
-  border-radius: 3px 7px 7px 3px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-reading);
-  font-weight: 700;
-  font-size: 26px;
-  color: var(--bg-surface);
-  background: var(--accent);
-  box-shadow: inset 3px 0 0 rgb(255 253 248 / 15%);
+  width: 44px;
+  height: 44px;
+  display: block;
+  object-fit: contain;
   flex-shrink: 0;
 }
 

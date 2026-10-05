@@ -41,9 +41,9 @@ export function materializeContext(
   let text = ''
   let tokenCount = 0
   let truncated = false
+  let separatorTokens: string[] | undefined
 
-  const emit = (raw: string, page?: number): boolean => {
-    const tokens = tokenizer.tokenize(raw)
+  const emit = (tokens: string[], page?: number): boolean => {
     const take = Math.min(tokens.length, maxTokens - tokenCount)
     if (take <= 0) {
       if (tokens.length > 0) truncated = true
@@ -63,20 +63,23 @@ export function materializeContext(
     const pieces = groups[groupIndex].pieces.filter(piece => piece.text.trim().length > 0)
     if (pieces.length === 0) continue
     const prefix = text.length > 0 ? CONTEXT_GROUP_SEPARATOR : ''
-    const prefixTokens = tokenizer.tokenize(prefix).length
-    const firstTokens = tokenizer.tokenize(pieces[0].text).length
+    const prefixTokens = prefix
+      ? (separatorTokens ??= tokenizer.tokenize(prefix))
+      : tokenizer.tokenize(prefix)
+    const firstTokens = tokenizer.tokenize(pieces[0].text)
     // 守卫：当「分隔符 + 至少一个内容 token」都放不下时，整组直接不进入，
     // 避免留下一个吃掉全部剩余预算的尾部分隔符。
     // 用 `>=` 是刻意为之：恰好占满（== maxTokens）时同样拒绝。
     // `firstTokens > 0` 仅为防御——pieces 已在上面按非空白过滤，
     // 合规的精确分词器必 >0；该子句用于兜底返回 [] 的退化分词器。
-    if (tokenCount + prefixTokens >= maxTokens && firstTokens > 0) {
+    if (tokenCount + prefixTokens.length >= maxTokens && firstTokens.length > 0) {
       truncated = true
       break
     }
-    if (prefix && !emit(prefix)) break
+    if (prefix && !emit(prefixTokens)) break
     for (let pieceIndex = 0; pieceIndex < pieces.length; pieceIndex++) {
-      if (!emit(pieces[pieceIndex].text, pieces[pieceIndex].page)) break
+      const tokens = pieceIndex === 0 ? firstTokens : tokenizer.tokenize(pieces[pieceIndex].text)
+      if (!emit(tokens, pieces[pieceIndex].page)) break
     }
     if (tokenCount >= maxTokens) {
       truncated ||= groupIndex < groups.length - 1
