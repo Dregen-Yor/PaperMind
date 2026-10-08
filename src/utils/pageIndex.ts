@@ -1,8 +1,15 @@
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { extractPdfDocument } from './pdfDocument'
 import { CONTEXT_GROUP_SEPARATOR, type ContextGroup, type ContextPiece } from './contextTrace'
 import type { LLMFn } from './llm'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs'
+
+// Page-text extraction now lives in pdfDocument.ts (shared with native outline extraction).
+// `reconstructTextLines` was previously exported from this module, so it is re-exported to keep
+// that public import path stable. `PdfTextItem` was module-private before this change — exporting
+// it is new surface (it types the shared helper's input), not stabilization.
+export { reconstructTextLines, type PdfTextItem } from './pdfDocument'
 
 // ── 语义分块：节标题识别模式（英文 + 中文）───────────────────────────────────
 const SECTION_PATTERNS: RegExp[] = [
@@ -78,45 +85,9 @@ export interface IndexNode {
 const CHUNK = 5 // pages per leaf
 
 export async function extractPages(base64: string): Promise<string[]> {
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  const pdf = await pdfjsLib.getDocument({ data: bytes.buffer }).promise
-  const pages: string[] = []
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i)
-    const content = await page.getTextContent()
-    pages.push(reconstructTextLines(content.items as PdfTextItem[]))
-  }
-  return pages
-}
-
-interface PdfTextItem {
-  str?: string
-  transform?: number[]
-  hasEOL?: boolean
-}
-
-/** Rebuild visual text lines from PDF.js items so line-anchored headings survive extraction. */
-export function reconstructTextLines(items: PdfTextItem[]): string {
-  const lines: Array<{ y: number; items: Array<{ x: number; text: string }> }> = []
-  let current: { y: number; items: Array<{ x: number; text: string }> } | undefined
-  const flush = () => { current = undefined }
-  for (const item of items) {
-    const text = item.str?.trim()
-    if (!text) continue
-    const x = item.transform?.[4] ?? 0
-    const y = item.transform?.[5] ?? 0
-    if (!current || Math.abs(current.y - y) > 2) {
-      current = { y, items: [] }
-      lines.push(current)
-    }
-    current.items.push({ x, text })
-    if (item.hasEOL) flush()
-  }
-  return lines
-    .map(line => line.items.sort((a, b) => a.x - b.x).map(item => item.text).join(' '))
-    .join('\n')
+  // Page text only: outline reading is skipped so non-outline callers (cold index build,
+  // /abstract, bench datasets) never pay the extra getOutline round-trips.
+  return (await extractPdfDocument(base64, { readOutline: false })).pages
 }
 
 async function summarizeRange(

@@ -41,6 +41,8 @@ models/
 .superpowers/
 
 # Benchmark 产物
+dataset/
+bench/prepared/
 bench/cache/
 bench/results/
 bench/minibatch/
