@@ -16,5 +16,5 @@
     }
   },
   "include": ["src/**/*", "electron/**/*", "bench/**/*"],
-  "exclude": ["node_modules", "dist", "dist-electron", "release"]
+  "exclude": ["node_modules", "dist", "dist-electron", "release", "bench/results", "bench/prepared", "bench/cache"]
 }

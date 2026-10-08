@@ -12,7 +12,7 @@
         <div class="card-title-row">
           <div>
             <h3>模型配置</h3>
-            <p class="card-desc">为精读、问答和索引分别配置合适的模型，随时切换使用。</p>
+            <p class="card-desc">配置用于论文问答的模型，随时切换使用。</p>
           </div>
           <el-button type="primary" size="small" @click="openNew">
             <el-icon><Plus /></el-icon> 新增配置
@@ -24,14 +24,14 @@
             v-for="p in profiles"
             :key="p.id"
             class="profile-row"
-            :class="{ 'is-chat': chatProfileId === p.id, 'is-index': indexProfileId === p.id }"
+            :class="{ 'is-chat': chatProfileId === p.id }"
           >
             <div class="profile-info">
               <span class="profile-name">{{ p.name }}</span>
               <span class="profile-sub">{{ p.provider }} · {{ p.model }}</span>
               <div class="profile-badges">
                 <span v-if="chatProfileId === p.id" class="badge badge-chat">对话</span>
-                <span v-if="indexProfileId === p.id" class="badge badge-index">索引</span>
+
               </div>
             </div>
             <div class="profile-actions">
@@ -54,7 +54,7 @@
       <!-- ── 默认选择 ── -->
       <section class="settings-card">
         <h3>默认使用配置</h3>
-        <p class="card-desc">对话和论文索引可以分别使用不同的 LLM 配置。</p>
+        <p class="card-desc">选择用于回答问题的模型。论文检索在本地完成，无需配置索引 LLM。</p>
 
         <div class="setting-row">
           <label>对话</label>
@@ -63,45 +63,24 @@
           </el-select>
         </div>
 
-        <div class="setting-row">
-          <label>论文索引</label>
-          <el-select v-model="indexProfileIdLocal" @change="chatStore.setIndexProfileId(indexProfileIdLocal)" style="width:240px">
-            <el-option v-for="p in profiles" :key="p.id" :label="p.name" :value="p.id" />
-          </el-select>
-        </div>
       </section>
 
-      <!-- ── 语义树检索 ── -->
-      <section class="settings-card">
-        <h3>语义树检索</h3>
-        <p class="card-desc">
-          论文导入后在后台额外构建一棵轻量语义导航树（每篇论文一次模型调用）。
-          提问时先在树上做单轮路由，再回到原文证据块取证，不增加串行模型调用。
-          关闭后全部检索退回原有平面路径，问答功能不受影响。
-        </p>
+      <section class="settings-card" data-test="ek5-settings">
+        <h3>论文检索</h3>
+        <p class="card-desc">使用章节混合检索，选取最相关的 5 个章节片段，保留完整原文。旧论文首次提问时自动更新索引。</p>
         <div class="setting-row">
-          <label>启用语义树</label>
-          <el-switch
-            v-model="treeEnabledLocal"
-            @change="onTreeEnabledChange"
-          />
-          <span class="card-desc inline-hint">
-            {{ treeReadyPapers.size }} 篇论文已有可用语义树
-          </span>
+          <label>本地模型</label>
+          <span>{{ { idle: '等待加载', loading: '正在加载，首次使用需要下载', ready: '已就绪', failed: '加载失败，请联网后重试提问' }[chatStore.vectorModelState] }}</span>
         </div>
         <div class="setting-row">
-          <el-button
-            data-test="rebuild-trees"
-            size="small"
-            :loading="rebuildingTrees"
-            @click="onRebuildTrees"
-          >
-            重建全部语义树
-          </el-button>
-          <span class="card-desc inline-hint">
-            索引模型、提示词或分块参数变更后，旧树会在下次建树时自动失效；
-            这里用于手动重来一遍（每篇论文一次模型调用，不重跑平面索引）。
-          </span>
+          <label>参考内容上限</label>
+          <el-input-number :model-value="chatStore.retrievalContextChars" :min="4000" :max="1000000" :step="10000"
+            @change="onContextLimitChange" />
+          <span class="card-desc">字符；多篇论文共用。超限时提示缩小范围，不截断章节。请根据回答模型的上下文容量调整，并为历史和回答留出空间。</span>
+        </div>
+        <div class="setting-row">
+          <el-button data-test="rebuild-ek5" :loading="rebuildingTrees" @click="onRebuildEk5">重建论文索引</el-button>
+          <span class="card-desc">本地处理 PDF 和章节向量，不调用聊天模型。</span>
         </div>
       </section>
 
@@ -268,19 +247,16 @@ import { storeToRefs } from 'pinia'
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
 
 const chatStore = useChatStore()
-const { profiles, chatProfileId, indexProfileId, abstractToken, treeEnabled, treeReadyPapers } =
+const { profiles, chatProfileId, abstractToken } =
   storeToRefs(chatStore)
 
 // 本地绑定，避免直接修改 store ref（select @change 时再写入）
 const chatProfileIdLocal = ref(chatProfileId.value)
-const indexProfileIdLocal = ref(indexProfileId.value)
 const abstractTokenLocal = ref(abstractToken.value)
-const treeEnabledLocal = ref(treeEnabled.value)
 const rebuildingTrees = ref(false)
 
 // 本地镜像必须跟着 store 走：视图挂载时 store 往往还没 init（init 在 App 的 onMounted 里），
 // 一次性快照会把「已存开启」显示成关闭（默认关闭后的新方向），诱使用户再拨一次
-watch(treeEnabled, value => { treeEnabledLocal.value = value })
 
 // ── Dialog state ──
 const dialogVisible = ref(false)
@@ -358,7 +334,6 @@ async function doRemove(id: string) {
   await chatStore.removeProfile(id)
   // 同步本地选择器
   chatProfileIdLocal.value = chatProfileId.value
-  indexProfileIdLocal.value = indexProfileId.value
   ElMessage.success('已删除')
 }
 
@@ -367,39 +342,20 @@ async function saveAbstractToken() {
   ElMessage.success('Hugging Face Token 已保存')
 }
 
-async function onTreeEnabledChange(value: string | number | boolean) {
-  await chatStore.setTreeEnabled(value === true)
-  ElMessage.success(treeEnabled.value ? '语义树检索已启用' : '语义树检索已关闭，检索回到平面路径')
+async function onContextLimitChange(value: number | undefined) {
+  if (value === undefined) return
+  try { await chatStore.setRetrievalContextChars(value) }
+  catch (e) { ElMessage.error(e instanceof Error ? e.message : '保存失败') }
 }
 
-async function onRebuildTrees() {
-  try {
-    await ElMessageBox.confirm(
-      '将为每篇已索引论文各发起一次模型调用重建语义树，是否继续？',
-      '重建语义树',
-      { type: 'warning' },
-    )
-  } catch {
-    return // 用户取消
-  }
+async function onRebuildEk5() {
   rebuildingTrees.value = true
   try {
-    const { attempted, rebuilt, failed, skipped, firstReason } = await chatStore.rebuildAllTrees()
-    // 「重建成 0 篇」有两种截然不同的原因，不能合并成一句话：
-    // 没有候选（跳过）与真的失败（网络/输出非法/输入超限）必须分开报，
-    // 失败还要带上首个原因，用户才知道该去改配置还是换论文（#13）
-    if (attempted > 0 && rebuilt === 0) {
-      ElMessage.error(`语义树重建失败（${failed}/${attempted} 篇）：${firstReason ?? '原因未知'}`)
-    } else if (failed > 0) {
-      ElMessage.warning(`已重建 ${rebuilt} 篇，${failed} 篇失败：${firstReason ?? '原因未知'}`)
-    } else if (rebuilt > 0) {
-      ElMessage.success(`已重建 ${rebuilt} 篇论文的语义树`)
-    } else {
-      ElMessage.info(skipped > 0 ? '没有可重建的论文（语义树已关闭，或正在建树中）' : '没有可重建的论文')
-    }
-  } finally {
-    rebuildingTrees.value = false
-  }
+    const { rebuilt, errors } = await chatStore.rebuildEk5Indexes()
+    if (errors.length) ElMessage.warning(`已重建 ${rebuilt} 篇，${errors.length} 篇失败：${errors[0]}`)
+    else ElMessage.success(`已重建 ${rebuilt} 篇论文索引`)
+  } catch (e) { ElMessage.error(e instanceof Error ? e.message : '重建失败，请重试') }
+  finally { rebuildingTrees.value = false }
 }
 
 function onProviderChange() {

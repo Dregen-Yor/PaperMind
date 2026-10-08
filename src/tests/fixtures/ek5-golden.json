@@ -1,0 +1,115 @@
+{
+  "provenance": "Generated from feat/Ek5 frozen E-hybrid-k5 leaf-groups-full benchmark on 2026-10-08; deterministic test embeddings, RRF 60, topK 5; no runtime bench dependency.",
+  "fixtures": [
+    {
+      "pages": [
+        "Introduction\nIntro body.\nMethods\nOur method uses lasers.",
+        "Results\nLasers succeed.\nConclusion\nDone."
+      ],
+      "outline": [
+        {
+          "id": "0",
+          "title": "Introduction",
+          "page": 0,
+          "children": []
+        },
+        {
+          "id": "1",
+          "title": "Methods",
+          "page": 0,
+          "children": []
+        },
+        {
+          "id": "2",
+          "title": "Results",
+          "page": 1,
+          "children": []
+        },
+        {
+          "id": "3",
+          "title": "Conclusion",
+          "page": 1,
+          "children": []
+        }
+      ],
+      "query": "lasers",
+      "expectedContext": "[Evidence G0003 | Heading: Results | PDF pages: 2-2]\nResults\nLasers succeed.\n\n\n---\n\n[Evidence G0002 | Heading: Methods | PDF pages: 1-1]\nMethods\nOur method uses lasers.\n\n---\n\n[Evidence G0001 | Heading: Introduction | PDF pages: 1-1]\nIntroduction\nIntro body.\n\n\n---\n\n[Evidence G0004 | Heading: Conclusion | PDF pages: 2-2]\nConclusion\nDone.",
+      "expectedSelectedNodeIds": [
+        "n2",
+        "n1",
+        "n0",
+        "n3"
+      ]
+    },
+    {
+      "pages": [
+        "Introduction\nOther content.",
+        "Background\nOther content.",
+        "Methods\nLasers are used and succeed.",
+        "Experiments\nOther content.",
+        "Results\nLasers are used and succeed.",
+        "Discussion\nOther content.",
+        "Conclusion\nOther content."
+      ],
+      "outline": [
+        {
+          "id": "0",
+          "title": "Introduction",
+          "page": 0,
+          "children": []
+        },
+        {
+          "id": "1",
+          "title": "Background",
+          "page": 1,
+          "children": []
+        },
+        {
+          "id": "2",
+          "title": "Methods",
+          "page": 2,
+          "children": []
+        },
+        {
+          "id": "3",
+          "title": "Experiments",
+          "page": 3,
+          "children": []
+        },
+        {
+          "id": "4",
+          "title": "Results",
+          "page": 4,
+          "children": []
+        },
+        {
+          "id": "5",
+          "title": "Discussion",
+          "page": 5,
+          "children": []
+        },
+        {
+          "id": "6",
+          "title": "Conclusion",
+          "page": 6,
+          "children": []
+        }
+      ],
+      "query": "lasers",
+      "expectedContext": "[Evidence G0003 | Heading: Methods | PDF pages: 3-3]\nMethods\nLasers are used and succeed.\n\n---\n\n[Evidence G0005 | Heading: Results | PDF pages: 5-5]\nResults\nLasers are used and succeed.\n\n---\n\n[Evidence G0001 | Heading: Introduction | PDF pages: 1-1]\nIntroduction\nOther content.\n\n---\n\n[Evidence G0002 | Heading: Background | PDF pages: 2-2]\nBackground\nOther content.\n\n---\n\n[Evidence G0004 | Heading: Experiments | PDF pages: 4-4]\nExperiments\nOther content.",
+      "expectedSelectedNodeIds": [
+        "n2",
+        "n4",
+        "n0",
+        "n1",
+        "n3"
+      ]
+    }
+  ],
+  "hashes": [
+    "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+    "aa9543a437b8acdd5b5708a0c7225e59f25ed92c8102722495c95cce3f5bc58d",
+    "54df96ab5649109cbf32a70a39f87a3f22dd210e4770cd25a58cee0bfdbfa08f",
+    "260a38fb3f945d9f28f1480166d7ae535abbb0c86b86ecd0d6de8b9ed1643584"
+  ]
+}

@@ -31,6 +31,9 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# 本地模型权重（体积大，不入库）
+models/
+
 # Tooling caches
 .codegraph/
 .cursor/
@@ -38,11 +41,14 @@ Thumbs.db
 .superpowers/
 
 # Benchmark 产物
+dataset/
+bench/prepared/
 bench/cache/
 bench/results/
 bench/minibatch/
 papermind-speed-demo*.json
-bench/datasets/qasper/qasper.jsonl
+bench/datasets/qasper/*.jsonl
+**/__pycache__/
 bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/semantic-headings.pdf

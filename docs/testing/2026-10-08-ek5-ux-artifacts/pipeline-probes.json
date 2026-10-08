@@ -1,0 +1,742 @@
+{
+  "environment": "Supplementary Node product-pipeline probes; not desktop UI tests",
+  "model": "deepseek-flash",
+  "embedder": "Xenova/bge-small-en-v1.5@main#q8",
+  "requests": [
+    {
+      "elapsedMs": 5409,
+      "usage": {
+        "prompt_tokens": 5649,
+        "completion_tokens": 758,
+        "total_tokens": 6407,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 299
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 5649
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 5109,
+      "usage": {
+        "prompt_tokens": 5685,
+        "completion_tokens": 893,
+        "total_tokens": 6578,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 783
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 5685
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 2403,
+      "usage": {
+        "prompt_tokens": 278,
+        "completion_tokens": 326,
+        "total_tokens": 604,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 278
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 278
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 3537,
+      "usage": {
+        "prompt_tokens": 4315,
+        "completion_tokens": 579,
+        "total_tokens": 4894,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 392
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 4315
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 1267,
+      "usage": {
+        "prompt_tokens": 6032,
+        "completion_tokens": 90,
+        "total_tokens": 6122,
+        "prompt_tokens_details": {
+          "cached_tokens": 1408
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 44
+        },
+        "prompt_cache_hit_tokens": 1408,
+        "prompt_cache_miss_tokens": 4624
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 17852,
+      "usage": {
+        "prompt_tokens": 3804,
+        "completion_tokens": 3529,
+        "total_tokens": 7333,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 2963
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 3804
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 11487,
+      "usage": {
+        "prompt_tokens": 7164,
+        "completion_tokens": 1835,
+        "total_tokens": 8999,
+        "prompt_tokens_details": {
+          "cached_tokens": 640
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 852
+        },
+        "prompt_cache_hit_tokens": 640,
+        "prompt_cache_miss_tokens": 6524
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 6554,
+      "usage": {
+        "prompt_tokens": 1695,
+        "completion_tokens": 1091,
+        "total_tokens": 2786,
+        "prompt_tokens_details": {
+          "cached_tokens": 1024
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 562
+        },
+        "prompt_cache_hit_tokens": 1024,
+        "prompt_cache_miss_tokens": 671
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 10392,
+      "usage": {
+        "prompt_tokens": 1192,
+        "completion_tokens": 1491,
+        "total_tokens": 2683,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1217
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 1192
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    },
+    {
+      "elapsedMs": 16373,
+      "usage": {
+        "prompt_tokens": 1937,
+        "completion_tokens": 3119,
+        "total_tokens": 5056,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 2685
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 1937
+      },
+      "finishReason": "stop",
+      "maxOutputTokens": null
+    }
+  ],
+  "results": [
+    {
+      "id": "wave-en-summary",
+      "query": "What problem does this paper address, and what are its core contributions?",
+      "answer": "**Problem addressed**\n\nThe paper quantifies how strong nonlinearity affects wave-induced vertical mixing in the ocean — specifically the mass-transport (mean-flow) processes from non-breaking surface waves that drive mixing of subsurface waters, which are important for ocean circulation and climate modelling but difficult to isolate from field data. It extends Sulisz and Paprota (2019), which used a weakly nonlinear theory, by replacing the wave velocity field with a fully nonlinear wavemaker model to obtain more exact phase-averaged velocities and temperature evolution under regular waves.\n\n**Core contributions**\n\n1. **Fully nonlinear velocity field.** Use of a fully nonlinear, pseudo-spectral-type wavemaker model (previously verified against laboratory kinematics) that admits strong nonlinearities, amplitude dispersion, nonlinear wave–wave interactions, and solitary waves — beyond weakly nonlinear applicability.\n\n2. **New Eulerian averaging procedure.** A new method for computing time-mean wave-induced flows, distinct from the Lagrangian particle-tracking approach used in earlier work; the paper compares Lagrangian (LMTV) versus approximated Eulerian (EMTV) mean velocities and develops an improved, more accurate estimate of the phase-averaged velocity.\n\n3. **Separation of mean-flow components.** Since the model fully resolves velocity evolution, the Stokes drift can be separated from Lagrangian and Eulerian mean velocities.\n\n4. **Return current via kinematic wavemaker boundary condition.** The numerical solution satisfies both nonlinear free-surface conditions and the kinematic wavemaker condition, admitting the return current — claimed to be the only available numerical solution doing so — allowing the return flow's effect on wave-induced mixing to be quantified and separated.\n\n5. **Nonlinearity effects on mixing.** Comparison of weakly nonlinear vs. higher-order predictions of the temperature field shows differences growing with wave steepness/Urssell number, reaching up to ~40% in the subsurface layer, and qualitatively different mixing patterns (e.g. cold water reaching the surface near the wavemaker, enhanced near-surface streaming) at higher order.\n\n6. **Practical framework.** The approach is intended to guide wave-flume experiment design and wave-parameter selection, and the modelling framework can be modified for open-ocean conditions (periodic domains, quasi-random sea states, other wave excitation forms).",
+      "sources": [
+        "Author contributions · 第 15–15 页",
+        "Introduction · 第 1–2 页",
+        "Results and discussion > Further discussions · 第 14–15 页",
+        "Results and discussion > Evolution of a temperature field · 第 10–14 页",
+        "Materials and methods > Wave-induced vertical mixing intensity · 第 5–6 页"
+      ],
+      "retrievalQuery": "What problem does this paper address, and what are its core contributions?",
+      "contextChars": 22080,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 21,
+        "answerGenerationLatencyMs": 5409,
+        "queryEndToEndLatencyMs": 5430
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "wave-zh-specific",
+      "query": "作者为什么没有研究深水情况？请引用原文并给出页码。",
+      "answer": "作者未研究深水情况，因为对于 $kh>\\pi$ 的深水条件，在所选时间范围内，混合会把较暖的水完全从所分析的流体域部分扫走，因此该情况被省略。原文：\n\n> “Moreover, for deep-water conditions corresponding to $kh>\\pi$, the mixing would completely sweep away the warmer water from the analysed part of the fluid domain for the selected time frame, and this case was omitted in the present study.”\n\n页码：PDF第6页（期刊第1266页）。",
+      "sources": [
+        "Results and discussion > Evolution of a temperature field · 第 10–14 页",
+        "References · 第 15–16 页",
+        "Materials and methods > Wave-induced vertical mixing intensity · 第 5–6 页",
+        "Review statement · 第 15–15 页",
+        "Results and discussion > Numerical test cases · 第 6–6 页"
+      ],
+      "retrievalQuery": "作者为什么没有研究深水情况？请引用原文并给出页码。",
+      "contextChars": 18350,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 20,
+        "answerGenerationLatencyMs": 5109,
+        "queryEndToEndLatencyMs": 5129
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "wave-zh-followup",
+      "query": "它采用的是真正的非线性方法，还是弱非线性近似？请说明依据。",
+      "answer": "采用**高阶非线性方法**，而非仅弱非线性近似。\n\n依据：\n\n- 数值算例中明确使用 “the higher-order solution” 造波（G0006）。\n- 论文在讨论中把弱非线性定位为**最低要求**：“it is necessary to apply **at least a weakly nonlinear wave theory** to obtain reasonable results”，而“an increased accuracy is possible using advanced nonlinear wave models **admitting higher-order effects**”（G0009）；本文正是后者。\n- 该模型被描述为在非线性自由表面边界条件之外还满足运动学造波机边界条件的数值解（G0009）。\n- 算例覆盖 $kh=0.5\\sim2$、$H/h$ 达 0.2、Ursell 数最高 31.6（G0006），属于强非线性范围；论文标题本身也聚焦 “strong nonlinearity”。",
+      "sources": [
+        "Results and discussion > Numerical test cases · 第 6–6 页",
+        "References · 第 15–16 页",
+        "Results and discussion > Further discussions · 第 14–15 页",
+        "Review statement · 第 15–15 页",
+        "Competing interests · 第 15–15 页"
+      ],
+      "retrievalQuery": "该论文针对波浪诱导的海洋上层垂向混合问题所建立、并用于分离回流影响的数值波浪水槽模型，采用的是完全非线性（强非线性）波方法，还是弱非线性近似？请说明论文中的依据。",
+      "contextChars": 13798,
+      "timing": {
+        "queryRewriteLatencyMs": 2404,
+        "retrievalLatencyMs": 2426,
+        "answerGenerationLatencyMs": 3537,
+        "queryEndToEndLatencyMs": 5963
+      },
+      "llmCalls": 2
+    },
+    {
+      "id": "wave-missing-fact",
+      "query": "作者训练这个模型用了多少张 GPU，训练了多少小时？",
+      "answer": "提供的参考文献中没有相关信息——该论文是关于波浪引起的垂向混合的数值模拟（波浪水槽模型、温度场演化），并未涉及机器学习模型训练，因此无法从现有内容确定 GPU 数量或训练时长。",
+      "sources": [
+        "Results and discussion > Evolution of a temperature field · 第 10–14 页",
+        "Results and discussion > Numerical test cases · 第 6–6 页",
+        "Review statement · 第 15–15 页",
+        "Results and discussion > Further discussions · 第 14–15 页",
+        "Results and discussion > Phase-averaged velocity distribution · 第 6–10 页"
+      ],
+      "retrievalQuery": "作者训练这个模型用了多少张 GPU，训练了多少小时？",
+      "contextChars": 22653,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 13,
+        "answerGenerationLatencyMs": 1267,
+        "queryEndToEndLatencyMs": 1280
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "long-index",
+      "pages": 30,
+      "elapsedMs": 737,
+      "groups": [
+        {
+          "path": "Few-shot Controllable Style Transfer for",
+          "chars": 41
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > Deepak Nathani",
+          "chars": 19
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > Xavier Garcia",
+          "chars": 16
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > Bidisha Samanta",
+          "chars": 18
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > Partha Talukdar",
+          "chars": 18
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > University of Massachusetts Amherst,",
+          "chars": 41
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > Google Research",
+          "chars": 18
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > kalpesh@cs.umass.edu",
+          "chars": 21
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > {xgarcia, dnathani, bidishasamanta, partha}@google.com",
+          "chars": 55
+        },
+        {
+          "path": "Low-Resource Multilingual Settings > Kalpesh Krishna > Abstract",
+          "chars": 1430
+        },
+        {
+          "path": "Introduction",
+          "chars": 4432
+        },
+        {
+          "path": "The Universal Rewriter ( > UR ) model",
+          "chars": 2513
+        },
+        {
+          "path": "The Universal Rewriter ( > Shortcomings of the Universal Rewriter",
+          "chars": 434
+        },
+        {
+          "path": "Random token noise leads to unnatural in-",
+          "chars": 869
+        },
+        {
+          "path": "Style vectors may not capture the precise",
+          "chars": 730
+        },
+        {
+          "path": "No translation data for several languages: > Style-Controlled Backtranslation (+",
+          "chars": 2219
+        },
+        {
+          "path": "No translation data for several languages: > Using Paraphrase Vector Differences for",
+          "chars": 2239
+        },
+        {
+          "path": "Subtracting style vectors between a sentence",
+          "chars": 377
+        },
+        {
+          "path": "The vector difference focuses on the precise",
+          "chars": 124
+        },
+        {
+          "path": "The length of",
+          "chars": 380
+        },
+        {
+          "path": "Indic Models ( UR - INDIC , DIFFUR - INDIC )",
+          "chars": 657
+        },
+        {
+          "path": "Multitask Learning (",
+          "chars": 545
+        },
+        {
+          "path": "Evaluation > Indic Formality Transfer Dataset",
+          "chars": 1133
+        },
+        {
+          "path": "Evaluation > Transfer Accuracy (r-",
+          "chars": 1295
+        },
+        {
+          "path": "Evaluation > Semantic Similarity (",
+          "chars": 969
+        },
+        {
+          "path": "Evaluation > Other Metrics ( LANG , COPY , 1-g)",
+          "chars": 340
+        },
+        {
+          "path": "Evaluation > Aggregated Score (r-",
+          "chars": 977
+        },
+        {
+          "path": "Evaluation > Evaluating Control (",
+          "chars": 1278
+        },
+        {
+          "path": "Evaluation > Human Evaluation > Model > Model",
+          "chars": 812
+        },
+        {
+          "path": "Main Experiments > Experimental Setup",
+          "chars": 1073
+        },
+        {
+          "path": "Our dataset from Section 5.1 has already been used for",
+          "chars": 1276
+        },
+        {
+          "path": "से , अथार्वित इस योजना के",
+          "chars": 2671
+        },
+        {
+          "path": "Conclusion > Acknowledgements > Ethical Considerations",
+          "chars": 1396
+        },
+        {
+          "path": "Conclusion > Acknowledgements > References",
+          "chars": 17652
+        },
+        {
+          "path": "Conclusion > Acknowledgements > Appendices for “Few-shot Controllable",
+          "chars": 38
+        },
+        {
+          "path": "Conclusion > Acknowledgements > Style Transfer for Low-Resource",
+          "chars": 32
+        },
+        {
+          "path": "Conclusion > Acknowledgements > Multilingual Settings”",
+          "chars": 23
+        },
+        {
+          "path": "Conclusion > Acknowledgements > A Model training details",
+          "chars": 1017
+        },
+        {
+          "path": "Conclusion > Acknowledgements > B More Related Work",
+          "chars": 1490
+        },
+        {
+          "path": "Conclusion > Acknowledgements > More details on the translation-specific",
+          "chars": 43
+        },
+        {
+          "path": "Conclusion > Acknowledgements > Universal Rewriter objectives",
+          "chars": 1121
+        },
+        {
+          "path": "Conclusion > Acknowledgements > Choice of Exemplars",
+          "chars": 39
+        },
+        {
+          "path": "This was a remarkably thought-provoking read.",
+          "chars": 49
+        },
+        {
+          "path": "It is certainly amongst my favorites.",
+          "chars": 41
+        },
+        {
+          "path": "We humbly request your presence at our gala in",
+          "chars": 120
+        },
+        {
+          "path": "Its def one of my favs > Gendered Exemplars",
+          "chars": 103
+        },
+        {
+          "path": "Its def one of my favs > Gender-neutral Exemplars",
+          "chars": 170
+        },
+        {
+          "path": "The static charges remain on an object until they",
+          "chars": 123
+        },
+        {
+          "path": "It is particularly famous for the cultivation of",
+          "chars": 63
+        },
+        {
+          "path": "Notably absent from the city are fortifications",
+          "chars": 93
+        },
+        {
+          "path": "Static charges last until they are grounded or",
+          "chars": 62
+        },
+        {
+          "path": "This area is known for growing kiwifruit.",
+          "chars": 45
+        },
+        {
+          "path": "Some things important missing from the city are",
+          "chars": 487
+        },
+        {
+          "path": "PII का आधार नंबर है PII",
+          "chars": 27
+        },
+        {
+          "path": "PII को मैंने PII पर ͪ विज़ट ͩ कया और IP PII से",
+          "chars": 100
+        },
+        {
+          "path": "PII PII में PII की टीम में काम करता है",
+          "chars": 42
+        },
+        {
+          "path": "PII PII साल का है",
+          "chars": 21
+        },
+        {
+          "path": "PII PII में रहता है",
+          "chars": 225
+        },
+        {
+          "path": "The most comfortable bed I’ve ever slept on, I",
+          "chars": 71
+        },
+        {
+          "path": "I loved it.",
+          "chars": 15
+        },
+        {
+          "path": "The movie was fantastic.",
+          "chars": 57
+        },
+        {
+          "path": "The most uncomfortable bed I’ve ever slept on,",
+          "chars": 78
+        },
+        {
+          "path": "I hated it.",
+          "chars": 15
+        },
+        {
+          "path": "The movie was awful. > E Evaluation Appendix > Method > Model",
+          "chars": 6644
+        },
+        {
+          "path": "The movie was awful. > E Evaluation Appendix > F More Controllability Evaluations",
+          "chars": 138
+        },
+        {
+          "path": "Style Transfer Performance",
+          "chars": 151
+        },
+        {
+          "path": "Average Style Score Increase",
+          "chars": 305
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > H Analysis Experiments > Model",
+          "chars": 1377
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > H Analysis Experiments > Model",
+          "chars": 416
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > Full Breakdown of Results",
+          "chars": 304
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > J More Model Outputs",
+          "chars": 125
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model",
+          "chars": 815
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model",
+          "chars": 1796
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model",
+          "chars": 1923
+        },
+        {
+          "path": "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model",
+          "chars": 6259
+        }
+      ],
+      "firstPage": "Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics\nVolume 1: Long Papers , pages 7439 - 7468\nMay 22-27, 2022 c © 2022 Association for Computational Linguistics\nFew-shot Controllable Style Transfer for\nLow-Resource Multilingual Settings\nKalpesh Krishna\n♠ ∗\nDeepak Nathani\n♦\nXavier Garcia\n♦\nBidisha Samanta\n♦\nPartha Talukdar\n♦\n♠\nUniversity of Massachusetts Amherst,\n♦\nGoogle Research\nkalpesh@cs.umass.edu\n{xgarcia, dnathani, bidishasamanta, partha}@google.com\nAbstract\nStyle transfer is the task of rewriting a sen-\ntence into a target style while approximately\npreserving content. While most prior litera-\nture assumes access to a large style-labelled\ncorpus, recent work (Riley et al., 2021) has at-\ntempted “few-shot” style transfer using just 3-\n10 sentences at inference for style extraction.\nIn this work, we study a relevant low-resource\nsetting: style transfer for languages where no\nstyle-labelled corpora are available. We notice\nthat existing few-shot methods perform this\ntask poorly, often copying inputs verbatim .\nWe push the state-of-the-art for few-shot\nstyle transfer with a new method modeling\nthe stylistic difference between paraphrases.\nWhen compared to prior work, our model\nachieves 2-3x better performance in formal-\nity transfer and code-mixing addition across\nseven languages. Moreover, our method is bet-\nter at controlling the style transfer magnitude\nusing an input scalar knob. We report promis-\ning qualitative results for several attribute\ntransfer tasks (sentiment transfer, simplifica-\ntion, gender neutralization, text anonymiza-\ntion) all without retraining the model . Finally,\nwe find model evaluation to be difficult due\nto the lack of datasets and metrics for many\nlanguages. To facilitate future research we\ncrowdsource formality annotations for 4000\nsentence pairs in four Indic languages, and use\nthis data to design our automatic evaluations.\n1\n1 Introduction\nStyle transfer is a natural language generation task\nin which input sentences need to be re-written into\na target style, while preserving semantics. It has\nmany applications such as writing assistance (Hei-\ndorn, 2000), controlling generation for attributes\n1\nPlease visit the project page for the paper resources:\nhttps://martiansideofthemoon.github.io/\n2022/03/03/acl22.html .\n*Work done during a Google Research India internship.\nDiffUR\nStyle Vector\nExtractor\n-\nTarget (Formal)\nIt is certainly\namongst my\nfavorites.\nSource (Informal)\nIts def one of\nmy favs\nStyle Vector\nExtractor\nअपनी वाली जॉब\nमुझे मत बताओ.\n(don’t tell me\nabout your job)\ntransfer\namount 𝜆\nआपकी\n2\nतۻߤनयुߠ\n3\nके बारे में मुझे ना बताएं।\n4\nअपनी वाली नौकरी\n1\nमुझे मत बताओ।\n𝜆 = 0.5\n𝜆 = 1.5\nhonorifics,\n2,4\nSanskrit\n3\n/ Persian\n1\nwords for “job” in formal Hindi\nFigure 1: An illustration of our few-shot style trans-\nfer system during inference. Our model extracts style\nvectors from exemplar English sentences as input (in\nthis case formal/informal sentences) and uses their vec-\ntor difference to guide style transfer in other languages\n(Hindi). λ is used to control the magnitude of transfer:\nin this example our model produces more high Sanskrit\nwords & honorifics (more formal) with higher λ .\nlike simplicity, formality or persuasion (Xu et al.,\n2015; Smith et al., 2020; Niu and Carpuat, 2020),\ndata augmentation (Xie et al., 2020; Lee et al.,\n2021), and author obfuscation (Shetty et al., 2018).\nMost prior work either assumes access to su-\npervised data with parallel sentences between the\ntwo styles (Jhamtani et al., 2017), or access to a\nlarge corpus of unpaired sentences with style la-\nbels (Prabhumoye et al., 2018; Subramanian et al.,\n2019). Models built are style-specific and cannot\ngeneralize to new styles during inference, which\nis needed for applications like real-time adaptation\nto a user’s style in a dialog or writing application.\nMoreover, access to a large unpaired corpus with\nstyle labels is a strong assumption. Most standard\n“unpaired” style transfer datasets have been care-\nfully curated (Shen et al., 2017) or were originally\nparallel (Xu et al., 2012; Rao and Tetreault, 2018).\nThis is especially relevant in settings outside En-\n7439"
+    },
+    {
+      "id": "long-zh-summary",
+      "query": "请概括这篇论文的研究任务、方法、主要实验结果和局限，并给出对应页码。",
+      "answer": "根据提供的片段，可概括如下：\n\n**研究任务**\n- 面向印度语言（Hindi、Bengali、Kannada、Telugu、Gujarati 等）的文本属性/风格迁移任务，包括 formality transfer、code-mixing addition、sentiment、simplicity、anonymity、gender neutrality 等；通过 $\\lambda$ 控制迁移幅度。（p.9、p.25–26）\n\n**方法**\n- 比较基线 UR 及其变体与提出的 DIFFUR 模型族：DIFFUR、DIFFUR-INDIC、DIFFUR-MLT，并包含 +BT（back-translation）变体。\n- 使用 DIFFUR 设计、解码方案和风格编码器 $f_{\\text{style}}$。\n- 评估指标包括 COPY、1-g、LANG SIM、语义相似度（LaBSE，阈值 0.85）、r-ACC、a-ACC、r-AGG、a-AGG。（p.9、p.25–26）\n\n**主要实验结果**\n- DIFFUR 与 INDIC 变体优于其他竞争方法，DIFFUR-MLT 最佳。（p.25–26）\n- Hindi formality transfer：Table 20 中 DIFFUR-MLT 在 $\\lambda=2.5$ 时 r-AGG 78.1、a-AGG 27.5，COPY 4.4，LANG SIM 97.2，SIM 89.7；Figure 12 显示其在 $\\lambda$ 范围内更优且控制更好。（p.25）\n- Bengali formality transfer：Table 21 与 Figure 13 呈现相同趋势，DIFFUR-MLT 最佳。（p.26）\n- 跨语言结果：在 LaBSE 阈值 0.85 下，绝对数值降低但趋势相似，DIFFUR/INDIC 变体仍更优。（p.25）\n- COPY 在提出模型中降低（DIFFUR-MLT 为 4.4%），提升整体表现；+BT 的 COPY 和 1-g 最低（约 1%），但两步翻译降低语义相似度和总体分数（60.0 vs 78.1）。（p.9）\n\n**局限**\n- 对 ** 标记的风格（图中为 Anonymized、Gender Neutral）定性质量较低；更多输出见 Appendix J。（p.9）\n- +BT 虽降低 COPY/1-g，但牺牲语义相似度和总体分数。（p.9）\n- 第 14 页仅有 “C More details on the translation-specific” 标题，未提供足够内容说明翻译相关细节。（p.14）",
+      "sources": [
+        "से , अथार्वित इस योजना के · 第 9–9 页",
+        "Conclusion > Acknowledgements > More details on the translation-specific · 第 14–14 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 25–25 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 25–25 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 26–26 页"
+      ],
+      "retrievalQuery": "请概括这篇论文的研究任务、方法、主要实验结果和局限，并给出对应页码。",
+      "contextChars": 7909,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 18,
+        "answerGenerationLatencyMs": 17852,
+        "queryEndToEndLatencyMs": 17870
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "multi-paper",
+      "query": "请分别概括两篇论文的研究对象、方法和结论，明确标注每个结论来自哪一篇。",
+      "answer": "## 论文一：Wave-Mixing-16pages（Paprota & Sulisz, *Earth Syst. Dynam.*, 14, 1261–1276, 2023）\n\n**研究对象**：强非线性对波浪引起的垂向混合（wave-induced vertical mixing）的影响。具体为数值水槽中由单色造波机生成的非破碎规则波，深度参数 $kh = 0.5,\\ 1,\\ 2$，波陡参数 $H/h = 0.05,\\ 0.1,\\ 0.2$；比较弱非线性模型与全非线性模型对时均速度场、次表层混合强度及海表温度的预测差异。\n\n**方法**：将对流–扩散方程的半解析解与非线性造波机模型耦合。采用伪谱法（源于 Dommermuth & Yue, 1987；West et al., 1987）的全非线性波模型，既满足非线性自由水面边界条件，也满足造波机运动学边界条件（因此包含回流）。造波机冲程前五个周期施加斜坡函数；波浪充分发展后取定常速度场 $U, W$ 代入方程 (30) 预测温度演化。此外提出新的欧拉时均流程，与既有的拉格朗日粒子追踪法对比（论文原文结论）。\n\n**主要结论（均出自该论文）**：\n- 波陡较大时，增强的混合会影响水柱次表层（摘要）。\n- 全非线性模型捕捉了弱非线性解忽略的高阶项，给出可靠的时均速度场；修正后的波浪质量输运速度改进了次表层混合强度和海表温度的估计（摘要）。\n- 线性理论无波浪质量输运，即沿波传播方向无热交换，故至少需弱非线性理论；要更高精度则需包含高阶效应的非线性波模型（3.4 节）。\n- 对于 $kh > \\pi$ 的深水条件，在所取时间范围内混合会把较暖水体完全扫出所分析区域，因此该情形未纳入本研究（3.1 节）。\n- 该模型是唯一同时满足非线性自由水面条件与造波机运动学边界条件的数值解，可量化并分离回流对波浪混合的影响；并建议借助波浪水槽实验来分离波浪混合与其他过程（如破碎）（3.4 节）。\n\n## 论文二：Long-Paper-30pages\n\n⚠️ **注意**：所提供的该论文内容为零散片段（页面残缺、标题为印地语乱码），其题目与完整研究目标无法从现有证据确定。以下仅能依据片段概括。\n\n**研究对象**：面向印度语言的文本属性/风格迁移（attribute transfer）任务，包括正式度迁移、语码混合（code-mixing）添加、情感、简洁性、匿名化（PII 替换）与性别中立化；并以此为背景处理文本匿名化任务。\n\n**方法**：提出 DIFFUR 系列模型（含 DIFFUR - MLT）。将用于训练 Universal Rewriter 的 OPUS 翻译数据替换为 Samanantar（覆盖 11 种印度语言的最大公开平行语料），得到 UR - INDIC 与 DIFFUR - INDIC 变体；并考察反向翻译（+ BT）等设计；附录中还分析了风格编码器 $f_{\\text{style}}$、解码方案及按 $\\lambda$（迁移幅度）的变化。\n\n**主要结论**：\n- 使用 Samanantar 显著上采样了英语/印度语之间的平行数据，带来更好性能（Table 1）和更低的复制率，对没有 OPUS 翻译数据的语言尤为明显（第 4.3 节）。\n- 所提模型中 COPY 下降（DIFFUR - MLT 为 4.4%），提升了总体表现（第 5 节附近）。\n- 带 + BT 的模型 COPY 最低（1%，1-g 也最低），但这是两步翻译所致；同时语义相似度下降，使总体得分低于 DIFFUR - MLT（60.0 对 78.1）。\n- 附录 H 的分析发现风格编码器 $f_{\\text{style}}$ 是一个有效的风格分类器。\n- 定性分析（图 4）显示，在性别中立、匿名化等标注为 ** 的风格上输出质量较低。\n\n**结论归属说明**：上述第一组结论全部来自 Wave-Mixing-16pages（该论文为海洋/波浪混合方向，其结构与数据表 1 明确对应）；第二组结论全部来自 Long-Paper-30pages 的片段证据，但该论文的整体研究问题与结论主轴无法由现有片段完整确立。",
+      "sources": [
+        "Results and discussion > Numerical test cases · 第 6–6 页",
+        "Abstract · 第 1–1 页",
+        "Results and discussion > Further discussions · 第 14–15 页",
+        "References · 第 15–16 页",
+        "Introduction · 第 1–2 页",
+        "PII PII में PII की टीम में काम करता है · 第 15–15 页",
+        "से , अथार्वित इस योजना के · 第 9–9 页",
+        "PII PII में रहता है · 第 15–15 页",
+        "Indic Models ( UR - INDIC , DIFFUR - INDIC ) · 第 5–5 页",
+        "Conclusion > Acknowledgements > More details on the translation-specific · 第 14–14 页"
+      ],
+      "retrievalQuery": "请分别概括两篇论文的研究对象、方法和结论，明确标注每个结论来自哪一篇。",
+      "contextChars": 24809,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 18,
+        "answerGenerationLatencyMs": 11487,
+        "queryEndToEndLatencyMs": 11505
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "budget-guard",
+      "query": "请概括这篇论文的研究任务、方法、主要实验结果和局限。",
+      "answer": "**注意**：以下概括仅基于所提供的零散证据（多为图表片段和附录标题），论文正文的完整设定、数据与结论无法从这些内容中完全确定。\n\n**研究任务**\n多属性（多风格）文本属性迁移（attribute transfer）/风格迁移，涉及具体属性包括：正式度迁移（formality transfer）、语码混合添加（code-mixing addition）、情感（Li et al., 2018）、简化（Xu et al., 2015）、匿名化（Anandan et al., 2012）和性别中立化（Reddy and Knight, 2016）。数据以印地语/多语言为主（例示中含 Devanagari 文本的渲染噪声）。\n\n**方法**\n- 提出 **DIFFUR-MLT** 模型，并研究其加装回译（+ BT）的变体；`λ` 为迁移强度（transfer magnitude）。\n- 使用某种解码方案（decoding scheme），并在附录 G 给出论证 DIFFUR 设计的消融研究。\n- 使用风格编码器 `f_style`，附录 H 的分析表明它可作为一个有效的风格分类器。\n- 附录 I 给出其他语言的分项指标及随 `λ` 的变化；附录 C 提供\"翻译相关\"的更多细节。\n- 定性示例（图 4）显示各属性迁移的输出，包括把实体替换为 PII 标签以实现匿名化、把性别词（महिलाओं）替换为中性词（खिलाड़ियों）等。\n\n**主要实验结果**\n- 所提模型中 COPY 指标下降（DIFFUR-MLT 下降 4.4%），从而提升整体表现。\n- 加 + BT 的模型 COPY 最低、1-g 最低（1%），原因是包含两步翻译；但这降低了语义相似度，使总体得分低于 DIFFUR-MLT（60.0 vs 78.1）。\n- DIFFUR-MLT 在若干属性迁移任务上的输出见图 4，并做了定性分析。\n\n**局限**\n- 对带 ** 标记的风格（匿名化 anonymized 与性别中立 gender neutral），输出质量在定性上更低；更多输出见附录 J。\n- + BT 虽降低 COPY/1-g，但以牺牲语义相似度为代价，导致总体得分下降（60.0 vs 78.1）。\n- 证据中未给出超出上述范围的其他局限（如语言覆盖、数据规模、评测范围等），无法据此判断。",
+      "sources": [
+        "से , अथार्वित इस योजना के · 第 9–9 页",
+        "PII PII में रहता है · 第 15–15 页",
+        "PII PII में PII की टीम में काम करता है · 第 15–15 页",
+        "PII को मैंने PII पर ͪ विज़ट ͩ कया और IP PII से · 第 15–15 页",
+        "Conclusion > Acknowledgements > More details on the translation-specific · 第 14–14 页"
+      ],
+      "retrievalQuery": "请概括这篇论文的研究任务、方法、主要实验结果和局限。",
+      "contextChars": 3574,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 28,
+        "answerGenerationLatencyMs": 6554,
+        "queryEndToEndLatencyMs": 6582
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "selected-passage",
+      "query": "解释这段原文，并给出其中最关键的结论。",
+      "answer": "这段原文研究的核心是：**强非线性对非破碎表面波引起的垂向混合有何影响**。\n\n它说明：作者把一个平流–扩散方程的半解析解与非线性造波机模型耦合起来，用来计算波浪造成的混合；再与弱非线性模型的预测比较。背景上，波致质量输运会影响海洋水体混合和海气热交换，表面波把能量转入湍流，改变上层海洋混合强度；把波致混合参数化纳入海洋环流模型能改善模拟可靠性。由于现场观测困难，实验室水槽/水池被用来评估波致混合系数并校准模型。该研究扩展了 Sulisz and Paprota (2019) 的弱非线性工作，主要改进是用**全非线性模型更精确地计算波浪速度场**。\n\n最关键结论是：\n\n> 对较高陡度的波，强非线性会增强次表层水体的混合；弱非线性解会忽略高阶项，而全非线性模型能提供更可靠的时均速度场。经过校正的波致质量输运速度可以改善对**次表层混合强度**和**海洋表面温度**的估计。\n\n换句话说，**当波浪非线性较强时，必须考虑全非线性效应；忽略高阶项会偏差地估计波致质量输运和垂向混合，进而影响海表温度估计。**",
+      "sources": [],
+      "retrievalQuery": "解释这段原文，并给出其中最关键的结论。",
+      "contextChars": 3996,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 0,
+        "answerGenerationLatencyMs": 10392,
+        "queryEndToEndLatencyMs": 10392
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "broken-pdf",
+      "error": "InvalidPDFException: Invalid PDF structure."
+    },
+    {
+      "id": "long-en-summary",
+      "query": "Please summarize this paper’s research task, method, main experimental results, and limitations, with page numbers.",
+      "answer": "- **Research task**: Low-resource multilingual style transfer for languages without style-labelled corpora, using few-shot style extraction from just 3–10 sentences at inference. Evaluated on formality transfer and code-mixing addition across seven languages (p. 1; p. 7).\n- **Method**: Proposes **DIFFUR**, which models the stylistic difference between paraphrases via paraphrase vector differences. Variants include **UR-INDIC**, **DIFFUR-INDIC**, **DIFFUR-MLT** (multitask training between UR-INDIC and DIFFUR-INDIC), and **+BT** (style-controlled backtranslation at inference), with **UR** as the main baseline. It also uses inference-time scalar control of style-transfer magnitude, with reported better controllability after fixes (p. 1; p. 7; p. 14).\n- **Main results**: Achieves 2–3x better performance than prior work on formality transfer and code-mixing addition across seven languages; better scalar control of transfer magnitude; promising qualitative results for sentiment transfer, simplification, gender neutralization, and anonymization without retraining (p. 1; p. 20). Under a stricter LaBSE threshold of 0.85, DIFFUR and Indic variants outperform competing methods, with trends similar to Table 1; DIFFUR-MLT shows the strongest numbers across the listed languages (p. 25).\n- **Limitations**: Evaluation is difficult due to the lack of datasets and metrics for many languages; the authors crowdsource formality annotations for 4,000 sentence pairs in four Indic languages to design automatic evaluations (p. 1). They lack access to a formality evaluation dataset and hold out 22K Samanantar sentences per Indic language; they do not use GYAFC/XFORMAL (p. 7), and note XFORMAL does not cover Indian languages and is restricted by Yahoo! L6 corpus rules (p. 14). Multilingual style transfer remains largely unexplored, especially for Indic languages (p. 14).",
+      "sources": [
+        "Main Experiments > Experimental Setup · 第 7–7 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 25–25 页",
+        "Style Calibration to > G Ablation Studies > J More Model Outputs · 第 20–20 页",
+        "Conclusion > Acknowledgements > B More Related Work · 第 14–14 页",
+        "Low-Resource Multilingual Settings > Kalpesh Krishna > Abstract · 第 1–1 页"
+      ],
+      "retrievalQuery": "Please summarize this paper’s research task, method, main experimental results, and limitations, with page numbers.",
+      "contextChars": 5530,
+      "timing": {
+        "queryRewriteLatencyMs": 0,
+        "retrievalLatencyMs": 18,
+        "answerGenerationLatencyMs": 16373,
+        "queryEndToEndLatencyMs": 16392
+      },
+      "llmCalls": 1
+    },
+    {
+      "id": "actual-budget-guard",
+      "query": "这篇论文解决了什么问题？请概括它的核心贡献。",
+      "error": "Error: 所选论文的参考内容超出上下文预算，请减少论文数量、划选原文提问，或在设置中提高参考内容上限。"
+    },
+    {
+      "id": "paired-wave-zh",
+      "query": "这篇论文解决了什么问题？请概括它的核心贡献。",
+      "sources": [
+        "Results and discussion > Numerical test cases · 第 6–6 页",
+        "Results and discussion > Further discussions · 第 14–15 页",
+        "References · 第 15–16 页",
+        "Results and discussion > Evolution of a temperature field · 第 10–14 页",
+        "Author contributions · 第 15–15 页"
+      ],
+      "contextChars": 19568
+    },
+    {
+      "id": "paired-wave-en",
+      "query": "What problem does this paper address, and what are its core contributions?",
+      "sources": [
+        "Author contributions · 第 15–15 页",
+        "Introduction · 第 1–2 页",
+        "Results and discussion > Further discussions · 第 14–15 页",
+        "Results and discussion > Evolution of a temperature field · 第 10–14 页",
+        "Materials and methods > Wave-induced vertical mixing intensity · 第 5–6 页"
+      ],
+      "contextChars": 22080
+    },
+    {
+      "id": "paired-long-zh",
+      "query": "请概括这篇论文的研究任务、方法、主要实验结果和局限，并给出对应页码。",
+      "sources": [
+        "से , अथार्वित इस योजना के · 第 9–9 页",
+        "Conclusion > Acknowledgements > More details on the translation-specific · 第 14–14 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 25–25 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 25–25 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 26–26 页"
+      ],
+      "contextChars": 7909
+    },
+    {
+      "id": "paired-long-en",
+      "query": "Please summarize this paper’s research task, method, main experimental results, and limitations, with page numbers.",
+      "sources": [
+        "Main Experiments > Experimental Setup · 第 7–7 页",
+        "Style Calibration to > G Ablation Studies > K Paraphrase Diversity > Model > Model > Model · 第 25–25 页",
+        "Style Calibration to > G Ablation Studies > J More Model Outputs · 第 20–20 页",
+        "Conclusion > Acknowledgements > B More Related Work · 第 14–14 页",
+        "Low-Resource Multilingual Settings > Kalpesh Krishna > Abstract · 第 1–1 页"
+      ],
+      "contextChars": 5530
+    }
+  ]
+}

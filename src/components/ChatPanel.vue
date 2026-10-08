@@ -52,7 +52,8 @@
         <div class="msg-avatar" aria-hidden="true"><img :src="paperMindMarkLight" alt="" /></div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
-          <div class="typing" role="status" aria-label="正在生成回答"><span /><span /><span /></div>
+          <div class="typing" role="status" :aria-label="preparationLabel"><span /><span /><span /></div>
+          <p v-if="preparationLabel !== '正在生成回答'" class="preparation-status">{{ preparationLabel }}</p>
         </div>
       </div>
     </div>
@@ -128,6 +129,13 @@ const loading = ref(false)
 const messagesRef = ref<HTMLElement>()
 const pendingContext = ref<string[]>([])
 /** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
+const preparationLabel = computed(() => {
+  const preparing = props.conversation?.paperIds.some(id => chatStore.indexingPapers.has(id))
+  if (!preparing) return '正在生成回答'
+  return chatStore.vectorModelState === 'loading'
+    ? '正在加载本地检索模型，首次使用需要下载…'
+    : '正在准备论文索引…'
+})
 const hasStreamingBubble = computed(() => props.conversation?.messages.some(m => m.streaming) ?? false)
 const showAbstractCommand = computed(() => {
   const value = input.value.trim().toLowerCase()
