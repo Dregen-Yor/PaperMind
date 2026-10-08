@@ -1,3 +1,4 @@
+vi.mock('../utils/pdfDocument', () => ({ extractPdfDocument: vi.fn(async () => (await import('./fixtures/ek5')).ek5Doc) }))
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 
@@ -6,7 +7,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ default: {}, GlobalWorkerOpt
 // 旧路径（v1 平面索引）会在后台触发 indexPaper 重建，而它一进来就 `void ensureEmbedder()`：
 // 真实实现会动态 import transformers 并在 jsdom 里尝试加载权重。单测里模型一律缺席。
 vi.mock('../utils/transformersEmbedder', () => ({
-  createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('测试不加载向量模型')),
+  createTransformersEmbedder: vi.fn(async () => (await import('./fixtures/ek5')).ek5Embedder),
 }))
 
 import { useChatStore } from '../stores/chat'
@@ -33,6 +34,8 @@ const INDEX_JSON = JSON.stringify({
 
 describe('来源芯片与跳转一致性（#1）', () => {
   beforeEach(() => {
+    vi.mocked(window.db.paper.readFile).mockResolvedValue('PDF')
+    vi.mocked(window.db.paper.list).mockResolvedValue([])
     setActivePinia(createPinia())
     mockDb().chat.listConversations.mockResolvedValue([])
     mockDb().chat.addMessage.mockClear()
@@ -43,7 +46,6 @@ describe('来源芯片与跳转一致性（#1）', () => {
 
   it('芯片文本页区间与 startPage 一致，且带 paperId', async () => {
     global.fetch = vi.fn()
-      .mockResolvedValueOnce(llm('[{"id":0,"score":9},{"id":1,"score":2}]')) // 打分
       .mockResolvedValueOnce(sse('答案')) // 生成
     const store = useChatStore()
     await store.init()
@@ -53,7 +55,7 @@ describe('来源芯片与跳转一致性（#1）', () => {
     const assistant = conv.messages.find(m => m.role === 'assistant')!
     expect(assistant.sources!.length).toBeGreaterThan(0)
     for (const ref of assistant.sources!) {
-      const match = /^Pages (\d+)/.exec(ref.label)
+      const match = /第 (\d+)/.exec(ref.label)
       if (match && ref.startPage !== undefined) expect(Number(match[1])).toBe(ref.startPage + 1)
       expect(ref.paperId).toBe('p1')
       expect(typeof ref.endPage).toBe('number')

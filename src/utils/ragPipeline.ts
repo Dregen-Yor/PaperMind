@@ -1,3 +1,4 @@
+import { retrieveEk5, type Ek5Index } from './ek5/index'
 import { collectLeafNodes, scoreAndSelect, type IndexNode, type RetrievalResult, type ScoreOptions } from './pageIndex'
 import { rewriteQuery, type ChatTurn } from './queryRewrite'
 import {
@@ -67,6 +68,8 @@ export type PipelineRetrieval = RetrievalResult & {
 
 /** 已建好索引的单篇论文。 */
 export interface IndexedPaper {
+  ek5?: Ek5Index
+  paperLabel?: string
   tree: IndexNode
   pages: string[]
   /**
@@ -82,6 +85,8 @@ export interface IndexedPaper {
 }
 
 export interface RagOptions extends ScoreOptions {
+  /** Product path: reject legacy retrieval instead of silently switching methods. */
+  retrievalMode?: 'ek5'
   /** 是否启用查询改写，默认 true（仍需历史轮数达标才实际触发） */
   enableRewrite?: boolean
   /**
@@ -215,7 +220,8 @@ export interface RagResult {
 /**
  * 检索阶段（纯函数）：查询改写 → 逐篇评分多选 → 合并上下文。
  *
- * 逐篇检索按论文手上已有的索引分派：`paper.passageIndex` → 段落混合检索（本地打分，
+ * 正式应用指定 retrievalMode=ek5，仅接受 E-k5 索引；整组超预算报错而非截断。
+ * 以下兼容分支保留给历史评测：`paper.passageIndex` → 段落混合检索（本地打分，
  * 检索阶段零 LLM 调用）；否则 `paper.semantic` → 语义树路由；都没有 → 平面 scoreAndSelect。
  * 后两路与接入段落路径之前逐字一致。
  *
@@ -235,7 +241,7 @@ export async function retrieveRagContext(
 ): Promise<RagRetrievalStage> {
   const now = deps.now ?? Date.now
   const pipelineStartedAt = now()
-  const { enableRewrite = true, externalContext, maxContextChars, ...scoreOpts } = opts
+  const { enableRewrite = true, externalContext, maxContextChars, retrievalMode, ...scoreOpts } = opts
   if (maxContextChars !== undefined && (!Number.isInteger(maxContextChars) || maxContextChars <= 0)) {
     throw new Error('maxContextChars must be a positive integer')
   }
@@ -265,12 +271,18 @@ export async function retrieveRagContext(
   if (!skipRetrieval) {
     const passageEmbedder = deps.passage?.embedder ? requestScopedEmbedder(deps.passage.embedder) : undefined
     for (const paper of papers) {
-      // 分派优先级：段落索引（零 LLM 调用）→ 语义树（一次判断）→ 平面 scoreAndSelect。
+      // 产品 E-k5 优先且禁止回退；旧分支仅供兼容评测。
       // 后两路的判据与选项逐字不变，不带 `passageIndex` 的论文行为与接入前逐字一致。
       //
       // 有语义树时整棵小树在一次判断里用掉，调用数与平面路径相同（§10.1）。
       // 平面叶节点一并交给树路由打分：树取不到证据时才能在同一次调用里就地回落（§9）。
-      const result = paper.passageIndex
+      if (retrievalMode === 'ek5' && !paper.ek5) throw new Error('章节索引未就绪，请重试。')
+      const result = paper.ek5
+        ? await retrieveEk5(paper.ek5, retrievalQuery, (() => {
+            if (!passageEmbedder) throw new Error('本地检索模型未就绪，请重试。')
+            return passageEmbedder
+          })())
+        : paper.passageIndex
         ? await retrievePassageContext(paper.passageIndex, retrievalQuery, {
             ...(passageEmbedder ? { embedder: passageEmbedder } : {}),
             ...(deps.passage?.countTokens ? { countTokens: deps.passage.countTokens } : {}),
@@ -312,7 +324,11 @@ export async function retrieveRagContext(
   } else {
     const unboundedContext = skipRetrieval
       ? (externalContext as string)
-      : retrievals.map(r => r.context).join(CONTEXT_GROUP_SEPARATOR)
+      : retrievals.map((r, i) => papers[i]?.paperLabel
+        ? `[Paper: ${papers[i].paperLabel!.replace(/[\r\n]/g, ' ')}]\n${r.context}` : r.context).join(CONTEXT_GROUP_SEPARATOR)
+    if (retrievalMode === 'ek5' && maxContextChars !== undefined && unboundedContext.length > maxContextChars) {
+      throw new Error('所选论文的参考内容超出上下文预算，请减少论文数量、划选原文提问，或在设置中提高参考内容上限。')
+    }
     contextTruncated = maxContextChars !== undefined && unboundedContext.length > maxContextChars
     context = contextTruncated ? unboundedContext.slice(0, maxContextChars) : unboundedContext
   }

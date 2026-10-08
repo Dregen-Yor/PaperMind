@@ -48,14 +48,13 @@ function assetSize(path: string): number {
 }
 
 function warnOrt(message: string): void {
-  // 静默失败是这里最坏的结局：四个资源是一套完整运行时，缺一个产品就永远只跑词法路，
-  // 而 Node bench 仍跑完整混合路——两侧口径分叉却没有任何信号。所以逐项点名。
-  console.warn(`[ort] ${message}；向量模型将不可用，段落检索退化为阶段①（词法）`)
+  // E-k5 依赖完整向量运行时；逐项报告缺失资源，避免到首次提问时才发现问题。
+  console.warn(`[ort] ${message}；本地向量模型将不可用，E-k5 论文检索无法运行，请修复依赖后重试`)
 }
 
 /**
  * 逐项复制 + 逐项核对（存在且非空）。依赖缺失仍**不阻断** dev / build
- * （向量模型不可用是受支持的降级态），但每个失败都要能被看见：
+ * （界面和划选文本问答仍可使用），但每个失败都要能被看见：
  * 上游改名、发布残缺产物、复制中途失败都会在这里留下一条具名告警。
  */
 function copyOrtAssets(): void {
@@ -89,7 +88,7 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['src/tests/setup.ts'],
-    exclude: ['**/node_modules/**', 'dist', 'dist-electron', 'release', 'electron/**', 'scripts/tests/**', '**/.worktrees/**'],
+    exclude: ['**/node_modules/**', 'dist', 'dist-electron', 'release', 'electron/**', 'scripts/tests/**', 'bench/results/**', '**/.worktrees/**'],
   },
   plugins: [
     vue(),
