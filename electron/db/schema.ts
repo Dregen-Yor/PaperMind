@@ -87,6 +87,24 @@ CREATE TABLE IF NOT EXISTS paper_trees (
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
 );
 
+-- Immutable source image bytes survive reparse while their paper exists.
+CREATE TABLE IF NOT EXISTS document_parses (
+  paper_id TEXT PRIMARY KEY,
+  source_hash TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS document_assets (
+  id TEXT PRIMARY KEY,
+  paper_id TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_assets_paper ON document_assets(paper_id);
+
 CREATE INDEX IF NOT EXISTS idx_papers_kb ON papers(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_paper ON highlights(paper_id);

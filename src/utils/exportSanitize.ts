@@ -11,7 +11,7 @@ export function stripApiKeysFromSettings(rows: Array<{ key: string; value: strin
         )
         return { ...row, value: JSON.stringify(redacted) }
       }
-      if (row.key === 'llm_config') {
+      if (row.key === 'llm_config' || row.key === 'docling_config') {
         const config = JSON.parse(row.value)
         if (typeof config !== 'object' || config === null || Array.isArray(config)) return row
         return { ...row, value: JSON.stringify({ ...config, apiKey: '' }) }

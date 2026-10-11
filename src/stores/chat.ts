@@ -19,9 +19,11 @@ import {
 } from '../utils/semanticTree'
 import type { PaperTreeRecord } from '../types/db'
 import type { SourceRef } from '../utils/sourceRef'
+import { DEFAULT_DOCLING_SETTINGS, DOCLING_SETTINGS_KEY, normalizeDoclingSettings, type DoclingSettings } from '../utils/doclingDocument'
+import { prepareDoclingPaper } from '../utils/doclingPdf'
+import { generateDoclingAbstract } from '../utils/doclingAbstract'
 import {
   ABSTRACT_MODEL,
-  summarizeAcademicText,
 } from '../utils/abstractSummarizer'
 
 export interface LLMProfile {
@@ -49,7 +51,7 @@ export interface Message {
   error?: string
   /** finish_reason=length：回答被截断（#3） */
   truncated?: boolean
-  /** 用户划选原文（externalContext）：重试时按原上下文重放，不退回检索（#2） */
+  /** 用户划选原文；/abstract 的助手消息保存带类型的续写状态。 */
   context?: string
   /** 流式渲染中的占位气泡标记（仅内存态，不落库）（#6） */
   streaming?: boolean
@@ -61,6 +63,22 @@ export interface Conversation {
   paperIds: string[]
   messages: Message[]
   createdAt: number
+}
+
+interface AbstractResume {
+  kind: 'docling-abstract'
+  paperIds: string[]
+  index: number
+  previous: string
+}
+function readAbstractResume(context?: string): AbstractResume | undefined {
+  try {
+    const state = JSON.parse(context || '')
+    if (state?.kind === 'docling-abstract' && Array.isArray(state.paperIds) && state.paperIds.length
+      && state.paperIds.every((id: unknown) => typeof id === 'string' && id.length > 0)
+      && Number.isInteger(state.index) && state.index >= 0 && state.index < state.paperIds.length
+      && typeof state.previous === 'string') return state
+  } catch { /* Older messages do not have continuation metadata. */ }
 }
 
 /** 单次 LLM 请求上限：超时即失败，避免无声挂死（#2）。 */
@@ -353,6 +371,9 @@ export const useChatStore = defineStore('chat', () => {
   const indexingPapers = ref<Set<string>>(new Set())
   const indexedPapers = ref<Set<string>>(new Set())
   const abstractToken = ref('')
+  const doclingConfig = ref<DoclingSettings>({ ...DEFAULT_DOCLING_SETTINGS })
+  const doclingConfigError = ref('')
+  const abstractProgress = ref<Record<string, string>>({})
   /**
    * 轻量语义树总开关；默认关闭（方案 §6.3：语义树退出默认检索路径）。
    * 仅保留旧数据维护 API，不参与产品检索，设置页不再提供开关。
@@ -449,6 +470,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     indexedPapers.value = new Set(currentIds)
     abstractToken.value = (await window.db.settings.get('huggingface_token')) ?? ''
+    try { doclingConfig.value = normalizeDoclingSettings(await window.db.settings.get(DOCLING_SETTINGS_KEY)) }
+    catch (error) { doclingConfigError.value = error instanceof Error ? error.message : 'Docling 配置无效' }
     // 语义树默认关闭（方案 §6.3）：只有显式存过「开」才开启，未存过一律保持关闭。
     // 值经 IPC 边界 JSON 往返（settings.get 是 JSON.parse(row.value)），设置页写入的是
     // 布尔、历史或外部来源可能是字符串，两种编码都认——只认其中一种会把用户的开启吞掉
@@ -511,6 +534,13 @@ export const useChatStore = defineStore('chat', () => {
     await window.db.settings.set('llm_profile_index', id)
     // 保留旧配置兼容接口，不重建 E-k5 索引。
     await refreshTreeReadyPapers()
+  }
+
+  async function setDoclingConfig(value: DoclingSettings) {
+    const config = normalizeDoclingSettings(value)
+    await window.db.settings.set(DOCLING_SETTINGS_KEY, { ...config })
+    doclingConfig.value = config
+    doclingConfigError.value = ''
   }
 
   async function setAbstractToken(token: string) {
@@ -1033,40 +1063,40 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---------- /abstract ----------
 
-  async function readPaperPages(paperId: string): Promise<string[]> {
-    const stored = await window.db.index.get(paperId)
-    if (stored) return JSON.parse(stored.pagesJson)
-
-    const base64 = await window.db.paper.readFile(paperId)
-    if (!base64) throw new Error('找不到论文 PDF 文件')
-    return extractPages(base64)
-  }
-
-  /**
-   * `/abstract` 的来源只有论文标题与 id（摘要没有页码，芯片不可跳页）。
-   */
-  async function generateAbstract(conv: Conversation): Promise<{ content: string; sources: SourceRef[] }> {
-    if (conv.paperIds.length === 0) throw new Error('请先在当前对话中选择至少一篇论文')
-    if (!abstractToken.value) throw new Error('请先在设置中填写 Hugging Face Token')
-
+  async function generateAbstract(conv: Conversation, resume?: AbstractResume): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
+    const paperIds = [...(resume?.paperIds ?? conv.paperIds)]
+    if (!paperIds.length) throw new Error('请先在当前对话中选择至少一篇论文')
+    if (doclingConfigError.value) throw new Error(doclingConfigError.value)
+    if (!doclingConfig.value.baseUrl) throw new Error('请先在设置中填写 Docling 服务地址')
+    const profile = { ...chatProfile.value }
+    if (!profile.model.trim()) throw new Error('请先配置当前对话模型')
     const sections: string[] = []
     const sources: SourceRef[] = []
-    for (const paperId of conv.paperIds) {
-      const [paper, pages] = await Promise.all([
-        window.db.paper.get(paperId),
-        readPaperPages(paperId),
-      ])
-      const title = paper?.title || `论文 ${sources.length + 1}`
-      const text = pages.join('\n\n')
-      const summary = await summarizeAcademicText(text, abstractToken.value)
-      sections.push(conv.paperIds.length > 1 ? `## ${title}\n\n${summary}` : summary)
-      sources.push({ label: title, paperId })
-    }
-
-    return {
-      content: sections.join('\n\n---\n\n'),
-      sources,
-    }
+    let truncated = false
+    let context = ''
+    const progress = (label: string) => { abstractProgress.value[conv.id] = label }
+    try {
+      for (let index = resume?.index ?? 0; index < paperIds.length; index++) {
+        const paperId = paperIds[index]
+        const previous = resume?.index === index ? resume.previous : ''
+        const paper = await window.db.paper.get(paperId)
+        const title = paper?.title || paperId
+        const document = await prepareDoclingPaper(paperId, progress)
+        const result = await generateDoclingAbstract(document, paperId, title, messages => {
+          const configured = messages.map(message => ({ ...message }))
+          configured[0].content = profile.systemPrompt + '\n\n' + configured[0].content
+          return requestCompletion(configured, profile)
+        }, progress, previous)
+        sections.push(paperIds.length > 1 && !previous ? `## ${title}\n\n${result.content}` : result.content)
+        sources.push(...(result.sources.length ? result.sources.map(ref => ({ ...ref, label: `${title} · ${ref.label}` })) : [{ label: title, paperId }]))
+        truncated ||= result.truncated
+        if (result.truncated) {
+          context = JSON.stringify({ kind: 'docling-abstract', paperIds, index, previous: (previous + '\n\n' + result.content).slice(-9000) } satisfies AbstractResume)
+          break
+        }
+      }
+      return { content: sections.join('\n\n---\n\n'), sources, truncated, context }
+    } finally { delete abstractProgress.value[conv.id] }
   }
 
   // ---------- Send Message (RAG 3-call pipeline) ----------
@@ -1201,7 +1231,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       if (normalized === '/abstract') {
         const result = await generateAbstract(conv)
-        await addMessage(convId, 'assistant', result.content, result.sources)
+        await addMessage(convId, 'assistant', result.content, result.sources, { truncated: result.truncated, context: result.context })
         return result.content
       }
       await generateReply(conv, userMessage, context)
@@ -1223,7 +1253,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       if (userMessage.content.trim().toLowerCase() === '/abstract') {
         const result = await generateAbstract(conv)
-        await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '' })
+        await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '', truncated: result.truncated, context: result.context })
         return
       }
       // 单次写回：成功才落内容，失败由 catch 保持失败态，中途崩溃不留空窗。
@@ -1244,6 +1274,14 @@ export const useChatStore = defineStore('chat', () => {
     const target = conv.messages[index]
     const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
     if (!userMessage) return
+    if (userMessage.content.trim().toLowerCase() === '/abstract') {
+      const paperIds = [...new Set((target.sources ?? []).map(source => source.paperId).filter((id): id is string => !!id))]
+      const resume = readAbstractResume(target.context) ?? { kind: 'docling-abstract', paperIds: paperIds.length ? paperIds : conv.paperIds, index: 0, previous: target.content }
+      const result = await generateAbstract(conv, resume)
+      const sources = [...new Map([...(target.sources ?? []), ...result.sources].map(ref => [`${ref.paperId}:${ref.startPage}`, ref])).values()]
+      await updateMessage(convId, messageId, { content: target.content + '\n\n' + result.content, sources, truncated: result.truncated, context: result.context })
+      return
+    }
 
     // 划选提问的原文已随用户消息持久化：与重试同构，直接重放该上下文并跳过
     // 论文收集/改写/评分——否则续写会换一个问题继续写，与首答语义分叉（#2）
@@ -1278,7 +1316,7 @@ export const useChatStore = defineStore('chat', () => {
     retrievalContextChars, setRetrievalContextChars, rebuildEk5Indexes, vectorModelState,
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
-    loaded, indexingPapers, indexedPapers, abstractToken,
+    loaded, indexingPapers, indexedPapers, abstractToken, doclingConfig, doclingConfigError, abstractProgress, setDoclingConfig,
     treeEnabled, treeReadyPapers, treeIndexingPapers,
     init,
     addProfile, updateProfile, removeProfile,

@@ -84,25 +84,30 @@
         </div>
       </section>
 
-      <!-- ── 论文摘要模型 ── -->
       <section class="settings-card">
-        <h3>论文摘要模型</h3>
-        <p class="card-desc">
-          对话中输入 <code>/abstract</code> 时，使用
-          <code>{{ chatStore.ABSTRACT_MODEL }}</code> 为当前所选论文生成摘要。
-          Token 仅保存在本地。
-        </p>
-        <div class="abstract-token-row">
-          <el-input
-            v-model="abstractTokenLocal"
-            type="password"
-            show-password
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="hf_…"
-          />
-          <el-button type="primary" @click="saveAbstractToken">保存 Token</el-button>
-        </div>
+        <h3>Docling 文档解析</h3>
+        <p class="card-desc">输入 <code>/abstract</code> 生成详细图文解读。PDF 将发送到下方服务，解读使用当前对话模型；原文图片保存在本地。</p>
+        <p v-if="chatStore.doclingConfigError" class="card-desc" role="alert">{{ chatStore.doclingConfigError }}</p>
+        <el-form label-position="top">
+          <el-form-item label="Docling 服务根地址">
+            <el-input v-model="doclingLocal.baseUrl" type="url" autocomplete="off" placeholder="http://localhost:5001（可稍后填写）" />
+          </el-form-item>
+          <el-form-item label="API Key（可选）">
+            <el-input v-model="doclingLocal.apiKey" type="password" show-password autocomplete="off" placeholder="服务启用认证时填写" />
+          </el-form-item>
+          <el-form-item label="解析超时（秒）">
+            <el-input-number v-model="doclingLocal.timeoutSeconds" :min="30" :max="1800" :step="30" />
+          </el-form-item>
+          <div class="action-row">
+            <el-checkbox v-model="doclingLocal.ocr">扫描文档 OCR</el-checkbox>
+            <el-checkbox v-model="doclingLocal.formula">公式识别</el-checkbox>
+          </div>
+          <p class="card-desc">公式识别需要服务端相应模型。更改解析选项后，下次摘要会重新解析论文。</p>
+          <div class="action-row">
+            <el-button type="primary" :loading="savingDocling" @click="saveDocling">保存设置</el-button>
+            <el-button :loading="testingDocling" @click="testDocling">测试连接</el-button>
+          </div>
+        </el-form>
       </section>
 
       <!-- ── 数据管理 ── -->
@@ -125,7 +130,7 @@
 
       <!-- ── 导出备份 Dialog ── -->
       <el-dialog v-model="exportDialogVisible" title="导出备份" width="460px">
-        <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、对话与消息、高亮、索引与语义树、全部设置。</p>
+        <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、对话与消息、高亮、索引与语义树、Docling 解析与原图、全部设置。</p>
         <el-checkbox v-model="exportIncludeApiKey">包含 API Key / Token（明文，分享前请谨慎）</el-checkbox>
         <template #footer>
           <el-button @click="exportDialogVisible = false">取消</el-button>
@@ -247,12 +252,15 @@ import { storeToRefs } from 'pinia'
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
 
 const chatStore = useChatStore()
-const { profiles, chatProfileId, abstractToken } =
+const { profiles, chatProfileId, doclingConfig } =
   storeToRefs(chatStore)
 
 // 本地绑定，避免直接修改 store ref（select @change 时再写入）
 const chatProfileIdLocal = ref(chatProfileId.value)
-const abstractTokenLocal = ref(abstractToken.value)
+const doclingLocal = reactive({ ...doclingConfig.value })
+const savingDocling = ref(false)
+const testingDocling = ref(false)
+watch(doclingConfig, config => Object.assign(doclingLocal, config))
 const rebuildingTrees = ref(false)
 
 // 本地镜像必须跟着 store 走：视图挂载时 store 往往还没 init（init 在 App 的 onMounted 里），
@@ -337,9 +345,17 @@ async function doRemove(id: string) {
   ElMessage.success('已删除')
 }
 
-async function saveAbstractToken() {
-  await chatStore.setAbstractToken(abstractTokenLocal.value)
-  ElMessage.success('Hugging Face Token 已保存')
+async function saveDocling() {
+  savingDocling.value = true
+  try { await chatStore.setDoclingConfig({ ...doclingLocal }); ElMessage.success('Docling 设置已保存') }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '保存失败') }
+  finally { savingDocling.value = false }
+}
+async function testDocling() {
+  testingDocling.value = true
+  try { ElMessage.success(await window.db.docling.testConnection({ ...doclingLocal })) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '连接失败') }
+  finally { testingDocling.value = false }
 }
 
 async function onContextLimitChange(value: number | undefined) {

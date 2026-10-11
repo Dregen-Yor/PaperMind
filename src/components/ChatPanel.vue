@@ -20,7 +20,7 @@
         </div>
         <div class="msg-body">
           <div v-if="msg.role === 'assistant'" class="msg-author">PaperMind</div>
-          <div v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" v-html="renderMarkdown(msg.content)" />
+          <MarkdownContent v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" :content="msg.content" @open-source="emit('open-source', $event)" />
           <div v-if="msg.error" class="msg-error" role="alert">
             <div class="msg-error-text">{{ msg.error }}</div>
             <div class="msg-error-actions">
@@ -48,7 +48,7 @@
         </div>
       </div>
 
-      <div v-if="loading && !hasStreamingBubble" class="message assistant">
+      <div v-if="(loading || (conversation && chatStore.abstractProgress[conversation.id])) && !hasStreamingBubble" class="message assistant">
         <div class="msg-avatar" aria-hidden="true"><img :src="paperMindMarkLight" alt="" /></div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
@@ -100,7 +100,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
-import { renderMarkdown } from '../utils/markdown'
+import MarkdownContent from './MarkdownContent.vue'
 import { isJumpable, type SourceRef } from '../utils/sourceRef'
 
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
@@ -130,6 +130,8 @@ const messagesRef = ref<HTMLElement>()
 const pendingContext = ref<string[]>([])
 /** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
 const preparationLabel = computed(() => {
+  const abstract = props.conversation && chatStore.abstractProgress[props.conversation.id]
+  if (abstract) return abstract
   const preparing = props.conversation?.paperIds.some(id => chatStore.indexingPapers.has(id))
   if (!preparing) return '正在生成回答'
   return chatStore.vectorModelState === 'loading'

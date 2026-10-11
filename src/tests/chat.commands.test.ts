@@ -37,16 +37,16 @@ describe('命令识别（#8）', () => {
     expect(assistant.content).toContain('/abstract')
   })
 
-  it('/ABSTRACT 大小写不敏感仍按命令处理；缺 token 的失败文案只有一句', async () => {
+  it('/ABSTRACT 大小写不敏感仍按命令处理；缺服务地址 的失败文案只有一句', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('should not be called')) as any
     const store = useChatStore()
     await store.init()
-    // 必须带论文才会走到「缺 token」守卫：无论文时先报「请先在当前对话中选择至少一篇论文」
+    // 必须带论文才会走到「缺服务地址」守卫：无论文时先报「请先在当前对话中选择至少一篇论文」
     const conv = await store.newConversation('t', ['paper-1'])
 
-    await expect(store.sendMessage(conv.id, '/ABSTRACT')).rejects.toThrow('请先在设置中填写 Hugging Face Token')
+    await expect(store.sendMessage(conv.id, '/ABSTRACT')).rejects.toThrow('请先在设置中填写 Docling 服务地址')
     const assistant = conv.messages.find(m => m.role === 'assistant')!
-    expect(assistant.error).toBe('请先在设置中填写 Hugging Face Token')
+    expect(assistant.error).toBe('请先在设置中填写 Docling 服务地址')
     expect(assistant.error).not.toContain('请检查设置中的 API 配置')
   })
 })

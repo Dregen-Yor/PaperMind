@@ -3,6 +3,7 @@ import { app } from 'electron'
 import { join } from 'path'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
 import { SCHEMA } from './schema'
+import { createDoclingRepository } from './docling'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
@@ -316,6 +317,8 @@ export const treeApi = {
   remove: (paperId: string) => db.prepare('DELETE FROM paper_trees WHERE paper_id = ?').run(paperId),
 }
 
+export const getDoclingRepository = () => createDoclingRepository(db)
+
 /** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
 export function exportAll(opts: { includeApiKey?: boolean } = {}) {
   const paperRows = db.prepare('SELECT * FROM papers ORDER BY added_at DESC').all() as any[]
@@ -333,6 +336,7 @@ export function exportAll(opts: { includeApiKey?: boolean } = {}) {
     highlights: db.prepare('SELECT * FROM highlights').all(),
     paperIndexes: db.prepare('SELECT paper_id, index_json, pages_json FROM paper_indexes').all(),
     paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
+    docling: getDoclingRepository().exportBackup(),
     settings: opts.includeApiKey ? settingsRows : stripApiKeysFromSettings(settingsRows),
   }
 }
@@ -365,7 +369,7 @@ export function importAll(data: any) {
 
   // 2) DB 事务：清空旧行并按依赖顺序写入
   const insert = db.transaction(() => {
-    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -417,6 +421,8 @@ export function importAll(data: any) {
           t.build_latency_ms ?? t.buildLatencyMs ?? 0, t.created_at ?? t.createdAt ?? Date.now(),
         )
     }
+
+    getDoclingRepository().importBackup(data.docling)
 
     for (const s of settings) {
       db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(s.key, s.value)

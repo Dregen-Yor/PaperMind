@@ -27,7 +27,7 @@ export async function convertPdf(bytes: Uint8Array, fileName: string, value: Doc
   const body = new FormData()
   body.append('files', new Blob([new Uint8Array(bytes).buffer], { type: 'application/pdf' }), fileName)
   const options = {
-    from_formats: 'pdf', to_formats: 'json', image_export_mode: 'embedded',
+    from_formats: 'pdf', to_formats: 'json', target_type: 'inbody', image_export_mode: 'embedded',
     include_images: 'true', images_scale: '2', do_table_structure: 'true', table_mode: 'accurate',
     do_ocr: String(settings.ocr), do_formula_enrichment: String(settings.formula),
     document_timeout: String(settings.timeoutSeconds),

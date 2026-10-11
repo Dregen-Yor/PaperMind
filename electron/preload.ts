@@ -2,6 +2,12 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db = {
+  docling: {
+    convert: (paperId: string) => ipcRenderer.invoke('docling:convert', paperId),
+    save: (paperId: string, record: unknown) => ipcRenderer.invoke('docling:save', paperId, record),
+    readAsset: (id: string) => ipcRenderer.invoke('docling:readAsset', id),
+    testConnection: (settings: unknown) => ipcRenderer.invoke('docling:testConnection', settings),
+  },
   kb: {
     list: () => ipcRenderer.invoke('kb:list'),
     create: (kb: unknown) => ipcRenderer.invoke('kb:create', kb),

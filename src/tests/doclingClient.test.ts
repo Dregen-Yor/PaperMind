@@ -11,6 +11,7 @@ describe('Docling HTTP boundary', () => {
     expect(url).toBe('http://localhost:5001/prefix/v1/convert/file')
     expect(init.headers['X-Api-Key']).toBe('test-key')
     expect(init.body.get('to_formats')).toBe('json')
+    expect(init.body.get('target_type')).toBe('inbody')
     expect(init.body.get('image_export_mode')).toBe('embedded')
     expect(init.body.get('do_formula_enrichment')).toBe('true')
     expect(init.body.get('files').name).toBe('paper.pdf')

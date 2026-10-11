@@ -224,40 +224,19 @@ describe('useChatStore', () => {
     expect(firstRoundCalls).toBe(1)
   })
 
-  it('/abstract summarizes the selected paper with the dedicated Hugging Face model', async () => {
-    ;(globalThis as any).mockDb.settings.get.mockImplementation((key: string) => {
-      if (key === 'huggingface_token') return Promise.resolve('hf-test')
-      return Promise.resolve(null)
-    })
-    ;(globalThis as any).mockDb.paper.get.mockResolvedValue({
-      id: 'paper-1',
-      title: 'Attention Is All You Need',
-    })
-    ;(globalThis as any).mockDb.index.get.mockResolvedValue({
-      indexJson: '{}',
-      pagesJson: JSON.stringify(['A short academic paper about transformer networks and attention.']),
-    })
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve([{ summary_text: 'A transformer paper summary.' }]),
-    }) as any
-
+  it('/abstract uses Docling evidence with the current chat model', async () => {
+    const document = (await import('../utils/doclingDocument')).normalizeDoclingDocument({ texts: [{ text: 'Transformer evidence' }] })
+    vi.mocked(window.db.docling.convert).mockResolvedValue({ document, sourceHash: 'a'.repeat(64), configHash: 'b'.repeat(64), cached: true })
+    vi.mocked(window.db.paper.get).mockResolvedValue({ id: 'paper-1', title: 'Attention Is All You Need' })
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: 'A transformer paper summary.' }, finish_reason: 'stop' }] }) })
     const store = useChatStore()
     await store.init()
+    await store.setDoclingConfig({ ...(await import('../utils/doclingDocument')).DEFAULT_DOCLING_SETTINGS, baseUrl: 'http://localhost:5001' })
     const conv = await store.newConversation('Summary', ['paper-1'])
-    const reply = await store.sendMessage(conv.id, '/abstract')
-
-    expect(reply).toBe('A transformer paper summary.')
-    expect(conv.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(await store.sendMessage(conv.id, '/abstract')).toBe('A transformer paper summary.')
     expect(conv.messages[1].sources).toEqual([{ label: 'Attention Is All You Need', paperId: 'paper-1' }])
     expect(global.fetch).toHaveBeenCalledOnce()
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://api-inference.huggingface.co/models/Bashaarat1/t5-small-arxiv-summarizer',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer hf-test' }),
-      }),
-    )
+    expect(vi.mocked(global.fetch).mock.calls[0][0]).toContain('/chat/completions')
   })
 
   it('/abstract requires a selected paper', async () => {

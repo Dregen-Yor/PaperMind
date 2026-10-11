@@ -53,14 +53,17 @@ npm run build
 - 可以创建多套配置并指定**对话模型**；E-k5 索引使用本地 `Xenova/bge-small-en-v1.5` q8 模型，首次使用需要联网下载，随后复用缓存。
 - 设置页的「论文检索」提供模型状态、索引重建和参考内容上限。默认参考上限 120000 字符，多篇共用；超限会提示调整范围，不截断章节。模型不可用或 PDF 无可用章节时明确报错，不切换旧检索方式。
 - `maxTokens = 0` 表示**不限制**回答长度（OpenAI 兼容端点与 Ollama 不发上限参数；Anthropic 因接口必填会退到兜底值）。
-- 对话中输入 `/abstract` 需要额外的 Hugging Face Access Token（设置页填写），摘要走 HF 推理接口。
+- 对话中输入 `/abstract` 可生成详细中文图文解读：原文图片/表格截图、关键公式和可跳转页码引用。解析使用设置页中的 Docling 服务，生成使用当前对话模型；不需要 Hugging Face Token。
+- 在设置的「Docling 文档解析」中填写服务根地址（如 `http://localhost:5001`）和可选 API Key，保存并测试连接。支持 OCR、公式识别和解析超时设置；地址可以留空，后续部署好服务再填写。
+- Docling 服务需要由你单独部署，桌面应用不打包 Python 或模型。PDF 会上传至该服务，原图和解析缓存保存在本地 SQLite，重复摘要复用解析；摘要模型只接收正文、图注、表格数据和公式。
+- 具体服务要求与联调步骤见 [Docling 图文摘要验收](docs/testing/docling-abstract.md)。
 - ⚠️ API Key 以明文存于本地 SQLite 的 `settings` 表，纯单机场景可接受；如需加固可改用 Electron `safeStorage`。
 
 ## 数据存储
 
 全部位于系统 userData 目录（macOS `~/Library/Application Support/PaperMind/`，Linux `~/.config/PaperMind/`）：
 
-- `papermind.db` — SQLite（WAL 模式），知识库、论文、对话、消息、高亮、设置、索引均在单文件内
+- `papermind.db` — SQLite（WAL 模式），知识库、论文、对话、消息、高亮、设置、索引、Docling 解析和原文图片均在单文件内
 - `papers/<id>.pdf` — 论文 PDF 原文件
 
 ## 目录结构

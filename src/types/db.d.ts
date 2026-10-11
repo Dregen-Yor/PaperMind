@@ -1,5 +1,13 @@
+import type { DoclingRecord, DoclingSettings } from '../utils/doclingDocument'
+
 // Renderer-side type declaration for the db API exposed via preload contextBridge.
 export interface DbApi {
+  docling: {
+    convert: (paperId: string) => Promise<DoclingRecord>
+    save: (paperId: string, record: DoclingRecord) => Promise<DoclingRecord>
+    readAsset: (id: string) => Promise<string | null>
+    testConnection: (settings: DoclingSettings) => Promise<string>
+  }
   kb: {
     list: () => Promise<any[]>
     create: (kb: any) => Promise<any>
