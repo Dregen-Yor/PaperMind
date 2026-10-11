@@ -22,6 +22,8 @@
     "icons:check": "node scripts/check-icons.mjs",
     "bench": "tsx bench/src/cli.ts",
     "bench:trees": "tsx bench/src/treeInspectCli.ts",
+    "bench:peerqa:import": "tsx bench/datasets/peerqa/import.ts",
+    "bench:peerqa:score": "tsx bench/datasets/peerqa/score.ts",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },

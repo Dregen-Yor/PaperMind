@@ -10,8 +10,9 @@ import { assertSpeedAnswerClient } from '../speed/policy'
 import { aggregateSpeedMetrics } from '../speed/metrics'
 import { speedContractMeta } from '../speed/contract'
 import { generateSpeedAnswer, type SpeedRunnerOptions } from '../speed/generate'
-import { executedQuestions } from '../evaluationContract'
+import { buildEvaluationContract, executedQuestions } from '../evaluationContract'
 import { finalizeQaQuality } from '../metrics/qaQuality'
+import { finalizePeerQaQuality } from '../metrics/peerqaQuality'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { newSampleRecord } from './support'
 
@@ -44,6 +45,8 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
   const qualityQuestions = executedQuestions(args.samples, args.limit)
     .filter(({ sample }) => sample.source === 'qasper')
     .map(({ question }) => question)
+  const peerqaQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'peerqa').map(({ question }) => question)
+  const peerqaContract = peerqaQuestions.length ? buildEvaluationContract(args.samples, args.limit) : undefined
   let qasperEvidenceQuestions = 0; let mappedEvidenceQuestions = 0; let ambiguousEvidenceQuestions = 0; let unmappedEvidenceQuestions = 0
   const language = args.answerLanguageInstruction ? `\n\n${args.answerLanguageInstruction}` : ''
 
@@ -63,7 +66,7 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
         ? startQueryTimeline(args.speed.now ?? now, speedClient.tokenSnapshot())
         : undefined
       const questionStartedMs = now()
-      const record = newSampleRecord(sample, question)
+      const record = newSampleRecord(sample, question, false)
       records.push(record)
       // 与其他最终回答路径共用 builder；每题只构造一次报文。
       const messages = buildAnswerMessages(paper, question.question, [], baseSystemPrompt)
@@ -156,9 +159,11 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
   }
   const finishedAt = new Date().toISOString()
   const quality = qualityQuestions.length > 0 ? finalizeQaQuality(records, qualityQuestions) : undefined
+  const peerqaQuality = peerqaQuestions.length ? finalizePeerQaQuality(records, peerqaQuestions) : undefined
   const qualityMetrics = {
     ...withPercentiles(withLatencyStats(renameQaRates(aggregate(records)), args.client.latencies()), timingValues),
     ...quality?.metrics,
+    ...peerqaQuality?.metrics,
   }
   if (args.speed) Object.assign(qualityMetrics, aggregateSpeedMetrics(records, { evidenceRequired: false }))
   return {
@@ -176,6 +181,8 @@ export async function runFullContextQaTask(args: FullContextQaArgs): Promise<Ben
       refusalPatternVersion: REFUSAL_PATTERN_VERSION, rubricVersion: RUBRIC_VERSION,
       ...(args.speed ? speedContractMeta(args.speed.contract, records, { evidenceRequired: false }) : {}),
       ...quality?.meta,
+      ...peerqaQuality?.meta,
+      ...(peerqaContract ? { datasetFingerprint: peerqaContract.datasetFingerprint, peerqaPreparation: peerqaContract.peerqaPreparation } : {}),
       ...(qasperEvidenceQuestions ? { evidenceMappingCoverage: mappedEvidenceQuestions / qasperEvidenceQuestions, ambiguousEvidenceRate: ambiguousEvidenceQuestions / qasperEvidenceQuestions, unmappedEvidenceRate: unmappedEvidenceQuestions / qasperEvidenceQuestions } : {}),
       ...(judgeState.sawUnanswerable ? { unanswerableMethod: (args.judgeClient && !judgeState.usedPatternFallback ? 'judge' : 'pattern') as 'judge' | 'pattern' } : {}),
     },

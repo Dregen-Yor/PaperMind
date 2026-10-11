@@ -34,6 +34,7 @@ import type {
 } from '../types'
 import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { applyRetrievalMetrics, estimateTokens, expandPages } from '../metrics/retrieval'
+import { applySentenceRetrieval } from '../metrics/sentenceRetrieval'
 import { executedQuestions, isRetrievalEligible, type EvaluationContract } from '../evaluationContract'
 import { REFUSAL_PATTERN_VERSION } from '../metrics/answerF1'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
@@ -155,6 +156,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
   const qualityQuestions = executedQuestions(samples, limit)
     .filter(({ sample }) => sample.source === 'qasper')
     .map(({ question }) => question)
+  const peerqaQuestions = executedQuestions(samples, limit).filter(({ sample }) => sample.source === 'peerqa').map(({ question }) => question)
   // 语言覆盖指令追加在调用方 systemPrompt 之后；未传时 prompt 原样透传
   const systemPrompt = args.answerLanguageInstruction
     ? `${args.systemPrompt}\n\n${args.answerLanguageInstruction}`
@@ -351,6 +353,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
         evidencePages: question.evidencePages,
         context: retrieval.context,
       })
+      applySentenceRetrieval(record, sample, question, retrieval.contextPieces)
 
       // 树诊断（§11.4）：本篇根本没建出树时记 treeDegraded，与「有树但没被选中」区分开。
       // 降级有两种来源，漏掉任何一种都会把失败路由统计成成功：
@@ -512,6 +515,7 @@ export async function runQaTask(args: QaTaskArgs): Promise<BenchResult> {
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
     ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
+    ...(peerqaQuestions.length > 0 ? { peerqaQuestions } : {}),
     // 段落配置下 extraMetrics 换成冷启动成本（树诊断在段落路径上恒为空：hook 接管后不再建树）
     extraMetrics: args.passage
       ? { ...summarizeColdStart(perPaper), passageDegradedQuestionRate }

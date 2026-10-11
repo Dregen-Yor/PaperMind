@@ -19,6 +19,7 @@ import type { EvaluationContract } from '../evaluationContract'
 import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import { MATH_FORMAT_INSTRUCTION } from '../../../src/utils/ragPipeline'
 import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
+import { applySentenceRetrieval, SentenceContractViolation } from '../metrics/sentenceRetrieval'
 import { executedQuestions, isRetrievalEligible } from '../evaluationContract'
 import { judgeSample, type JudgeSampleState } from '../metrics/judge'
 import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
@@ -195,6 +196,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
   })
   const now = args.now ?? Date.now
   const qualityQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'qasper').map(({ question }) => question)
+  const peerqaQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'peerqa').map(({ question }) => question)
   const started = now()
   const signature = checkpointSignature(args)
   const checkpoint = readCheckpoint(args.checkpointPath, signature)
@@ -342,6 +344,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
             const retrievalLatencyMs = Math.max(0, now() - retrievalStart)
             // 最终 token 预算由注入的物化器施加；上下文文本与页序同源产出（§3.1）
             context = args.materialize(outcome.contextGroups)
+            applySentenceRetrieval(record, sample, question, context.pieces)
             timeline?.markEvidenceReady()
             const metrics = record.metrics
             metrics.llmCalls = 1 + (outcome.retrievalLlmCalls ?? 0)
@@ -376,6 +379,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
             entryById.set(record.id, entry)
             saveCheckpoint()
           } catch (e) {
+            if (e instanceof SentenceContractViolation) throw e
             if (timeline && speedClient) record.speed = timeline.partial(speedClient.tokenSnapshot())
             // 检索失败：有效题补四个零观测，整题记 retrieve 错误；不登记断点，续跑时整题重试
             skipSampleRecord(record, eligible, eligible ? 'failed' : 'ineligible')
@@ -498,6 +502,7 @@ export async function runStrongBaselineQaTask(args: StrongBaselineQaArgs): Promi
     unmappedEvidenceQuestions,
     extraMeta: { baselineFamily: args.meta.baselineFamily, candidateGranularity: args.retrieval.granularity },
     ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
+    ...(peerqaQuestions.length > 0 ? { peerqaQuestions } : {}),
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }

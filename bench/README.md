@@ -4,6 +4,8 @@
 
 设计文档：[docs/superpowers/specs/2026-09-02-benchmark-design.md](../docs/superpowers/specs/2026-09-02-benchmark-design.md)
 
+PeerQA 单篇论文评测见 [datasets/peerqa/README.md](datasets/peerqa/README.md)：原生 TypeScript 导入官方数据，分别报告句子级检索、回答质量和 TTFT / Full Answer P50/P95。使用 `--task qa --dataset peerqa --speed`；默认 `--dataset all` 仍为 QASPER + smoke。
+
 ## 准备
 
 ### 1. 环境变量

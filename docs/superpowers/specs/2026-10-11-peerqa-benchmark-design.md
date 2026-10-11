@@ -6,7 +6,7 @@
 
 ## 1. 数据与应用场景
 
-PeerQA 包含 208 篇论文、579 个标注问答，支持证据检索、可回答性和自由回答评测。
+PeerQA 包含 208 篇论文、579 个问题，支持证据检索、可回答性和自由回答评测。
 官方提供原文句子、段落位置和句子级 qrels；没有证据或自由回答的题不能假装拥有这些标注。
 
 首版原生 TypeScript 导入作者发布的 `qa.jsonl` 与 `papers.jsonl`。按官方段落组织
@@ -101,3 +101,9 @@ PeerQA 报告包含独立的句子检索、回答质量、查询速度表和分�
 - [PeerQA 论文](https://aclanthology.org/2025.naacl-long.22/)
 - [官方数据字段与句子 qrels](https://huggingface.co/datasets/UKPLab/PeerQA)
 - [官方实验代码](https://github.com/UKPLab/PeerQA)
+
+## 8. 实现中确认的数据情况（2026-10-11）
+
+官方 v1.0 包含 579 道问题，其中 53 道 `answerable: null`。原生导入排除这些未标注问题，并以 `unlabeledQuestions` 单独计数；已标注但缺论文文本的题计入 `missingPaperQuestions`。公开文本子集得到 85 篇 / 194 道已标注问题，不代表完整 PeerQA 切片。空提取内容保留原始顺序，但不产生句子。包内一对公式／图注共用 `(paper_id, pidx, sidx)`，原文保留、歧义身份排除，引用它的问题标记 ambiguous；归一化数据加载时拒绝重复句 ID、越界或重叠跨度。
+
+原生回答口径为 `peerqa-native-rouge-refusal-v1`，复用项目 ROUGE-L 归一化，识别 `No Answer` 和现有拒答模式；它是应用评测口径，不能冒充论文 rouge_score 的复现分数。拒答规则版本变化时回答质量定义同步变化。两类 Macro-F1 使用固定类别集合，失败题只加真实类 FN。

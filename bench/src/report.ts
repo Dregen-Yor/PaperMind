@@ -3,6 +3,7 @@ import { REFUSAL_PATTERN_VERSION } from './metrics/answerF1'
 import { aggregate } from './metrics/aggregate'
 import { MRR_DEFINITION } from './evaluationContract'
 import { SPEED_DEFINITION, speedComparisonIssues } from './speed/contract'
+import { isPeerQaResult, renderPeerQaComparison, renderPeerQaReport } from './peerqaReport'
 
 /** 各任务的主指标，用于在矩阵报表中标出最优行（legacy 历史表按此加粗）。 */
 export const PRIMARY_METRIC: Record<'qa' | 'summary', string> = {
@@ -169,6 +170,12 @@ export function renderReport(
   opts: { primaryMetric?: string } = {},
 ): string {
   if (results.length === 0) return '## 评测报表\n\n无结果。\n'
+  const peerqaResults = results.filter(isPeerQaResult)
+  if (peerqaResults.length) {
+    const otherResults = results.filter(result => !isPeerQaResult(result))
+    return renderPeerQaReport(peerqaResults, renderSpeedSection(peerqaResults))
+      + (otherResults.length ? '\n' + renderReport(otherResults, opts) : '')
+  }
 
   const first = results[0]
   const primary = opts.primaryMetric ?? PRIMARY_METRIC[first.task]
@@ -870,6 +877,12 @@ export function retrievalComparisonIssues(a: BenchResult, b: BenchResult): strin
 }
 
 export function renderComparison(a: BenchResult, b: BenchResult): string {
+  if (isPeerQaResult(a) || isPeerQaResult(b)) {
+    const speedLines = isRetrievalSpeedResult(a) && isRetrievalSpeedResult(b)
+      ? renderSpeedComparison(a, b)
+      : ['> 速度差值要求两侧均为 query-timeline-v2 检索方法；full-context 独立展示。']
+    return renderPeerQaComparison(a, b, speedLines)
+  }
   const issues = retrievalComparisonIssues(a, b)
   const gated = issues.length > 0
   const names = collectMetricNames([a, b]).filter(name => !SPEED_SECTION_METRICS.has(name))

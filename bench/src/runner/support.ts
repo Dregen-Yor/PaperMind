@@ -16,6 +16,8 @@ import type { SpeedRunContract } from '../speed/contract'
 import { speedContractMeta } from '../speed/contract'
 import { aggregateSpeedMetrics } from '../speed/metrics'
 import { finalizeQaQuality } from '../metrics/qaQuality'
+import { finalizePeerQaQuality } from '../metrics/peerqaQuality'
+import { assertSentenceDenominator, isSentenceRetrievalEligible, SENTENCE_METRICS, ZERO_SENTENCE_METRICS } from '../metrics/sentenceRetrieval'
 
 /** 统一错误消息抽取：`Error` 取 message，其余转字符串。 */
 export function errorMessage(e: unknown): string {
@@ -26,12 +28,12 @@ export function errorMessage(e: unknown): string {
  * 新入列的逐样本记录：先建好底稿并立即入列，任何后续阶段的失败都只更新状态、
  * 不整条丢弃（§6.3）。检索指标与诊断在记录对象上原地补齐。
  */
-export function newSampleRecord(sample: EvalSample, question: QaQuestion): PerSampleRecord {
+export function newSampleRecord(sample: EvalSample, question: QaQuestion, sentenceRetrieval = true): PerSampleRecord {
   return {
     id: question.id,
     paperId: sample.paperId,
     source: sample.source,
-    metrics: {},
+    metrics: sentenceRetrieval && sample.source === 'peerqa' && isSentenceRetrievalEligible(question) ? { ...ZERO_SENTENCE_METRICS } : {},
     evidencePages: question.evidencePages,
   }
 }
@@ -142,6 +144,7 @@ export interface FinalizeQaArgs {
   speed?: { contract: SpeedRunContract }
   /** Exact versioned QASPER questions selected by the original samples/limit execution slice. */
   qualityQuestions?: QaQuestion[]
+  peerqaQuestions?: QaQuestion[]
 }
 
 /**
@@ -151,6 +154,9 @@ export interface FinalizeQaArgs {
  * `runWallClockMs` 由调用方用各自时钟算好传入（Task 8 的断点续跑需自行调整该口径）。
  */
 export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
+  const peerqaQuality = args.peerqaQuestions?.length
+    ? finalizePeerQaQuality(args.records, args.peerqaQuestions)
+    : undefined
   const quality = args.qualityQuestions && args.qualityQuestions.length > 0
     ? finalizeQaQuality(args.records, args.qualityQuestions)
     : undefined
@@ -169,6 +175,10 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
   const raw = aggregate(args.records)
   const counts = metricSampleCounts(args.records)
   emitMetricSampleCounts(raw, counts)
+  assertSentenceDenominator(counts, args.contract)
+  if (args.contract.sentenceRetrievalDefinition) {
+    for (const key of SENTENCE_METRICS) raw[`${key}SampleCount`] = counts[key] ?? 0
+  }
   // 固定分母的另一半（§7）：契约声明的有效题数随指标一并落盘，供比较门按
   // contextPageMrrSampleCount === contextPageMrrEligibleCount 判定
   raw.contextPageMrrEligibleCount = args.contract.eligibleRetrievalQuestionCount
@@ -196,6 +206,7 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
       ...args.extraMetrics,
       // Fixed-denominator quality fields are contract-owned and cannot be spoofed by callers.
       ...quality?.metrics,
+      ...peerqaQuality?.metrics,
     },
     values,
   )
@@ -208,6 +219,7 @@ export function finalizeQaResult(args: FinalizeQaArgs): BenchResult {
     ...contractMeta(args.contract),
     ...speedMeta,
     ...quality?.meta,
+    ...peerqaQuality?.meta,
   }
   const extraMeta = { ...args.extraMeta }
   for (const [key, value] of Object.entries(ownedContractMeta)) {

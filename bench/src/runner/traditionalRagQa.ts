@@ -3,6 +3,7 @@ import type { LlmClient, StreamingLlmClient } from '../llmClient'
 import type { ContextGroup, MaterializedContext } from '../../../src/utils/contextTrace'
 import type { EvaluationContract } from '../evaluationContract'
 import { applyRetrievalMetrics, expandPages } from '../metrics/retrieval'
+import { applySentenceRetrieval } from '../metrics/sentenceRetrieval'
 import { executedQuestions, isRetrievalEligible } from '../evaluationContract'
 import { errorMessage, finalizeQaResult, newSampleRecord, recordIndexFailure, skipSampleRecord } from './support'
 import { chunkPages } from '../traditionalRag/chunker'
@@ -42,6 +43,7 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
   if (args.speed) assertSpeedAnswerClient(args.client as StreamingLlmClient)
   const now = args.now ?? Date.now; const startedAt = new Date().toISOString(); const runStartedMs = now(); const contract = args.evaluationContract; const records: PerSampleRecord[] = []; const perPaper: PaperTimingRecord[] = []; const errors: SampleError[] = []; let total = 0
   const qualityQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'qasper').map(({ question }) => question)
+  const peerqaQuestions = executedQuestions(args.samples, args.limit).filter(({ sample }) => sample.source === 'peerqa').map(({ question }) => question)
   // judge 阶段累计口径状态：sawUnanswerable 决定 meta.unanswerableMethod 是否落盘，
   // usedPatternFallback（judge 不可用/失败而回落正则）决定该标注为 judge 还是 pattern
   const judgeState: JudgeSampleState = { sawUnanswerable: false, usedPatternFallback: false }
@@ -135,6 +137,7 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
       // 物化页序非可选（MaterializedContext.pageOrder 恒为数组），本路径不会产出 undefined 页序，
       // 故共享守卫在此不触发；有效题一律有观测
       applyRetrievalMetrics(metrics, { eligible, pageOrder: context.pageOrder, questionId: question.id, evidencePages: question.evidencePages, context: context.text })
+      applySentenceRetrieval(record, sample, question, context.pieces)
 
       // ---------- 生成阶段 ----------
       const systemPrompt = `${baseSystemPrompt}\n\n${MATH_FORMAT_INSTRUCTION}` + (context.text ? `\n\n参考内容：\n${context.text}` : '')
@@ -228,6 +231,7 @@ export async function runTraditionalRagQaTask(args: TraditionalRagQaArgs): Promi
     ambiguousEvidenceQuestions,
     unmappedEvidenceQuestions,
     ...(qualityQuestions.length > 0 ? { qualityQuestions } : {}),
+    ...(peerqaQuestions.length > 0 ? { peerqaQuestions } : {}),
     ...(args.speed ? { speed: { contract: args.speed.contract } } : {}),
   })
 }

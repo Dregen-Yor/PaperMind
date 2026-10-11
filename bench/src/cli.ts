@@ -12,6 +12,7 @@ import { loadConfigs, configLabel } from './config'
 import { createLlmClient, resolveEnvConfig } from './llmClient'
 import { loadQasperDataset } from './datasets/qasper'
 import { loadSmokeDataset } from './datasets/smoke'
+import { loadPeerQaDataset } from './datasets/peerqa'
 import { runQaTask, DEFAULT_SYSTEM_PROMPT, type QaTaskArgs } from './runner/qa'
 import { runFullContextQaTask } from './runner/fullContextQa'
 import { runTraditionalRagQaTask } from './runner/traditionalRagQa'
@@ -80,8 +81,9 @@ function gitSha(): string {
   }
 }
 
-async function loadDatasets(which: string): Promise<EvalSample[]> {
+async function loadDatasets(which: string, datasetPath?: string): Promise<EvalSample[]> {
   const out: EvalSample[] = []
+  if (which === 'peerqa') out.push(...await loadPeerQaDataset(datasetPath))
   if (which === 'qasper' || which === 'all') out.push(...await loadQasperDataset())
   if (which === 'smoke' || which === 'all') out.push(...await loadSmokeDataset())
   if (out.length === 0) {
@@ -191,7 +193,7 @@ if (args.mode === 'full-context' && configs.some(config => 'passage' in config &
 if (args.mode === 'full-context' && configs.some(config => config.kind !== undefined && config.kind !== 'papermind')) {
   throw new Error('--mode full-context 只接受 PaperMind 配置；检索型基线请直接用对应 --config')
 }
-const samples = await loadDatasets(args.dataset)
+const samples = await loadDatasets(args.dataset, args.datasetPath)
 mkdirSync(RESULTS_DIR(), { recursive: true })
 
 // 缓存目录在 createLlmClient 内部决定（bench/cache/），CLI 层打印解析结果并检查可写性，
@@ -295,7 +297,7 @@ for (const config of configs) {
     // 时无法一次传入，故按 source 分组各跑一次、结果分别落盘（文件名带 source 后缀）
     for (const [source, group] of groupBySource(samples)) {
       const env = resolveEnvConfig(process.env)
-      const promptLanguage = source === 'qasper' ? QASPER_LANGUAGE_INSTRUCTION : undefined
+      const promptLanguage = (source === 'qasper' || source === 'peerqa') ? QASPER_LANGUAGE_INSTRUCTION : undefined
       const answerSystemPrompt = composeBaseSystemPrompt(DEFAULT_SYSTEM_PROMPT, promptLanguage)
       // Speed needs the same dataset identity even in full-context mode. Ordinary full-context
       // keeps its prior path and does not build an otherwise-unused retrieval contract.
@@ -372,7 +374,7 @@ for (const config of configs) {
           cacheDir: MODEL_CACHE_DIR(),
         })
         const materialize = (groups: ContextGroup[]) =>
-          materializeContext(groups, contractTokenizer, CONTEXT_BUDGET_TOKENS)
+          materializeContext(groups, contractTokenizer, CONTEXT_BUDGET_TOKENS, source === 'peerqa')
         // 检索路径自带的那份 BGE-M3 与契约同源时才把这一份注入 deps：分块与受控物化共用同一实例，
         // 词表不重复加载。配置 pin 了别的 model/revision 时**绝不注入**——那份实例不属于契约身份，
         // 拿它物化会让结果 meta 断言一份本次运行并未真正使用的 tokenizer（差值照样算得出来，只是不可信）

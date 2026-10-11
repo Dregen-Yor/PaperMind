@@ -154,6 +154,8 @@ export interface RagRetrievalStage {
   context: string
   /** 最终上下文的来源页首次出现顺序；仅在注入 `materialize` 时产出（§3.1） */
   contextPageOrder?: number[]
+  /** Exact final emitted fragments for sentence-level benchmark tracing. */
+  contextPieces?: import('./contextTrace').ContextPiece[]
   /** 最终上下文的实际 token 数；仅在注入 `materialize` 时产出 */
   contextTokenCount?: number
   /** 上下文是否被预算截断：字符预算路径按 maxContextChars 判定，materializer 路径取自物化结果 */
@@ -312,6 +314,7 @@ export async function retrieveRagContext(
 
   let context: string
   let contextPageOrder: number[] | undefined
+  let contextPieces: import('./contextTrace').ContextPiece[] | undefined
   let contextTokenCount: number | undefined
   let contextTruncated: boolean
   if (!skipRetrieval && deps.materialize) {
@@ -319,6 +322,7 @@ export async function retrieveRagContext(
     const materialized = deps.materialize(retrievals.flatMap(r => r.contextGroups))
     context = materialized.text
     contextPageOrder = materialized.pageOrder
+    contextPieces = materialized.pieces
     contextTokenCount = materialized.tokenCount
     contextTruncated = materialized.truncated
   } else {
@@ -341,6 +345,7 @@ export async function retrieveRagContext(
     rewritten,
     context,
     ...(contextPageOrder !== undefined ? { contextPageOrder } : {}),
+    ...(contextPieces !== undefined ? { contextPieces } : {}),
     ...(contextTokenCount !== undefined ? { contextTokenCount } : {}),
     contextTruncated,
     sources,

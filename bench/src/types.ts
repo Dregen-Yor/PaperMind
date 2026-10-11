@@ -2,7 +2,16 @@ import type { IndexOptions } from '../../src/utils/pageIndex'
 import type { RagOptions } from '../../src/utils/ragPipeline'
 
 /** 数据来源，用于报表中分开统计语义分块指标 */
-export type SampleSource = 'qasper' | 'smoke'
+export type SampleSource = 'qasper' | 'smoke' | 'peerqa'
+
+/** Official sentence identity and offsets in normalized source-page text. */
+export interface EvidenceSentence {
+  id: string
+  page: number
+  text: string
+  start: number
+  end: number
+}
 
 /** 失败阶段，用于区分「网络问题」与「代码问题」 */
 export type SampleStage = 'load' | 'index' | 'retrieve' | 'generate' | 'stream' | 'summarize' | 'judge'
@@ -17,6 +26,9 @@ export interface QaQuestion {
   unanswerable: boolean
   /** QASPER free-text evidence may not map uniquely to a source paragraph. */
   evidenceMapping?: 'mapped' | 'ambiguous' | 'unmapped'
+  evidenceSentenceIds?: string[]
+  sentenceEvidenceMapping?: 'mapped' | 'ambiguous' | 'unmapped'
+  hasSentenceEvidence?: boolean
   /** Versioned references used only by the all-question QASPER quality metric. */
   qualityAnswers?: string[]
   qualityDefinition?: 'qasper-all-questions-v1'
@@ -33,6 +45,12 @@ export interface EvalSample {
   referenceAbstract?: string
   /** 数据来源，用于报表中分开统计语义分块指标 */
   source: SampleSource
+  sentences?: EvidenceSentence[]
+  peerqaPreparation?: {
+    missingPaperQuestions: number
+    inputQuestions: number
+    unlabeledQuestions: number
+  }
 }
 
 /**
@@ -283,6 +301,7 @@ export interface PerSampleRecord {
   answer?: string
   /** Versioned references used to score this record; absent from historical result JSON. */
   referenceAnswers?: string[]
+  contextSentenceIds?: string[]
   /** 摘要专有 */
   summary?: string
 }
@@ -361,6 +380,21 @@ export interface BenchResult {
     /** Versioned all-question QASPER quality provenance. */
     qaQualityDefinition?: 'qasper-all-questions-v1'
     qaExpectedQuestionIds?: string[]
+    sentenceRetrievalDefinition?: string
+    sentenceEvidenceMappingVersion?: string
+    eligibleSentenceQuestionIdsHash?: string
+    eligibleSentenceQuestionCount?: number
+    sentenceEvidenceQuestionCount?: number
+    mappedSentenceEvidenceQuestionCount?: number
+    peerqaQualityDefinition?: string
+    peerqaExpectedQuestionIds?: string[]
+    peerqaReferenceQuestionIds?: string[]
+    peerqaPreparation?: EvalSample['peerqaPreparation']
+    peerqaModelScoring?: {
+      sourceResultSha256: string
+      alignScoreModel?: string
+      prometheusModel?: string
+    }
   }
   metrics: Record<string, number>
   perSample: PerSampleRecord[]

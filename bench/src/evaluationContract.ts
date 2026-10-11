@@ -7,6 +7,7 @@
  */
 import { createHash } from 'node:crypto'
 import type { EvalSample, QaQuestion } from './types'
+import { isSentenceRetrievalEligible, SENTENCE_MAPPING_VERSION, SENTENCE_RETRIEVAL_DEFINITION } from './metrics/sentenceRetrieval'
 
 /** 指标 schema 版本。2 = Context Page MRR（最终页序）取代候选排序 MRR。 */
 export const METRIC_SCHEMA_VERSION = 2 as const
@@ -29,6 +30,13 @@ export interface EvaluationContract {
   datasetFingerprint: string
   eligibleRetrievalQuestionIdsHash: string
   eligibleRetrievalQuestionCount: number
+  sentenceRetrievalDefinition?: string
+  sentenceEvidenceMappingVersion?: string
+  eligibleSentenceQuestionIdsHash?: string
+  eligibleSentenceQuestionCount?: number
+  sentenceEvidenceQuestionCount?: number
+  mappedSentenceEvidenceQuestionCount?: number
+  peerqaPreparation?: EvalSample['peerqaPreparation']
 }
 
 /**
@@ -92,10 +100,19 @@ export function buildEvaluationContract(samples: EvalSample[], limit?: number): 
     evidenceMapping: question.evidenceMapping ?? null,
     qualityAnswers: question.qualityAnswers ?? null,
     qualityDefinition: question.qualityDefinition ?? null,
+    ...(sample.source === 'peerqa' ? {
+      sentences: sample.sentences,
+      evidenceSentenceIds: question.evidenceSentenceIds,
+      sentenceEvidenceMapping: question.sentenceEvidenceMapping,
+      hasSentenceEvidence: question.hasSentenceEvidence,
+      peerqaPreparation: sample.peerqaPreparation,
+    } : {}),
   }))
   const eligibleIds = executed
     .filter(({ question }) => isRetrievalEligible(question))
     .map(({ question }) => question.id)
+  const peerqa = executed.filter(({ sample }) => sample.source === 'peerqa')
+  const sentenceEligibleIds = peerqa.filter(({ question }) => isSentenceRetrievalEligible(question)).map(({ question }) => question.id)
 
   return {
     metricSchemaVersion: METRIC_SCHEMA_VERSION,
@@ -107,6 +124,15 @@ export function buildEvaluationContract(samples: EvalSample[], limit?: number): 
     datasetFingerprint: sha256(canonical),
     eligibleRetrievalQuestionIdsHash: sha256(eligibleIds),
     eligibleRetrievalQuestionCount: eligibleIds.length,
+    ...(peerqa.length > 0 ? {
+      sentenceRetrievalDefinition: SENTENCE_RETRIEVAL_DEFINITION,
+      sentenceEvidenceMappingVersion: SENTENCE_MAPPING_VERSION,
+      eligibleSentenceQuestionIdsHash: sha256(sentenceEligibleIds),
+      eligibleSentenceQuestionCount: sentenceEligibleIds.length,
+      sentenceEvidenceQuestionCount: peerqa.filter(({ question }) => !question.unanswerable && question.hasSentenceEvidence).length,
+      mappedSentenceEvidenceQuestionCount: sentenceEligibleIds.length,
+      peerqaPreparation: peerqa[0].sample.peerqaPreparation,
+    } : {}),
   }
 }
 
@@ -125,6 +151,15 @@ export function contractMeta(contract: EvaluationContract): EvaluationContract {
     datasetFingerprint: contract.datasetFingerprint,
     eligibleRetrievalQuestionIdsHash: contract.eligibleRetrievalQuestionIdsHash,
     eligibleRetrievalQuestionCount: contract.eligibleRetrievalQuestionCount,
+    ...(contract.sentenceRetrievalDefinition ? {
+      sentenceRetrievalDefinition: contract.sentenceRetrievalDefinition,
+      sentenceEvidenceMappingVersion: contract.sentenceEvidenceMappingVersion,
+      eligibleSentenceQuestionIdsHash: contract.eligibleSentenceQuestionIdsHash,
+      eligibleSentenceQuestionCount: contract.eligibleSentenceQuestionCount,
+      sentenceEvidenceQuestionCount: contract.sentenceEvidenceQuestionCount,
+      mappedSentenceEvidenceQuestionCount: contract.mappedSentenceEvidenceQuestionCount,
+      peerqaPreparation: contract.peerqaPreparation,
+    } : {}),
   }
 }
 

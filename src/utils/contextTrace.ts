@@ -18,6 +18,8 @@ export interface MaterializedContext {
   pageOrder: number[]
   tokenCount: number
   truncated: boolean
+  /** Exact emitted source fragments, excluding synthetic group separators. */
+  pieces?: ContextPiece[]
 }
 
 const renderToken = (token: string) => token.replaceAll('▁', ' ')
@@ -31,11 +33,13 @@ export function materializeContext(
   groups: ContextGroup[],
   tokenizer: ContextTokenizer,
   maxTokens: number,
+  traceSources = false,
 ): MaterializedContext {
   if (!Number.isInteger(maxTokens) || maxTokens <= 0) throw new Error('maxTokens 必须为正整数')
   const pageOrder: number[] = []
   const seen = new Set<number>()
   let text = ''
+  const pieces: ContextPiece[] = []
   let tokenCount = 0
   let truncated = false
   let separatorTokens: string[] | undefined
@@ -46,7 +50,9 @@ export function materializeContext(
       if (tokens.length > 0) truncated = true
       return false
     }
-    text += tokens.slice(0, take).map(renderToken).join('')
+    const emitted = tokens.slice(0, take).map(renderToken).join('')
+    text += emitted
+    if (traceSources && page !== undefined) pieces.push({ page, text: emitted })
     tokenCount += take
     if (page !== undefined && take > 0 && !seen.has(page)) {
       seen.add(page)
@@ -83,5 +89,5 @@ export function materializeContext(
       break
     }
   }
-  return { text: text.trim(), pageOrder, tokenCount, truncated }
+  return { text: text.trim(), pageOrder, tokenCount, truncated, ...(traceSources ? { pieces } : {}) }
 }

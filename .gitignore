@@ -48,6 +48,8 @@ bench/results/
 bench/minibatch/
 papermind-speed-demo*.json
 bench/datasets/qasper/*.jsonl
+bench/datasets/peerqa/*.jsonl
+bench/datasets/peerqa/*.metadata.json
 **/__pycache__/
 bench/datasets/smoke/papers/
 !bench/datasets/smoke/papers/

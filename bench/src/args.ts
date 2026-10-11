@@ -1,6 +1,7 @@
 export interface BenchArgs {
   task: 'qa' | 'summary' | 'all'
-  dataset: 'qasper' | 'smoke' | 'all'
+  dataset: 'qasper' | 'smoke' | 'peerqa' | 'all'
+  datasetPath?: string
   config: string
   limit?: number
   judge: boolean
@@ -13,7 +14,7 @@ export interface BenchArgs {
 }
 
 const TASKS = ['qa', 'summary', 'all'] as const
-const DATASETS = ['qasper', 'smoke', 'all'] as const
+const DATASETS = ['qasper', 'smoke', 'peerqa', 'all'] as const
 
 /**
  * 结果文件名时间戳部分：ISO 时间转文件名安全格式。
@@ -55,9 +56,15 @@ export function parseArgs(argv: string[]): BenchArgs {
       case '--dataset': {
         const v = argv[++i]
         if (!DATASETS.includes(v as never)) {
-          throw new Error(`--dataset 取值非法：${v}（合法值：qasper / smoke / all）`)
+          throw new Error(`--dataset 取值非法：${v}（合法值：qasper / smoke / peerqa / all）`)
         }
         args.dataset = v as BenchArgs['dataset']
+        break
+      }
+      case '--dataset-path': {
+        const v = argv[++i]
+        if (!v || v.startsWith('--')) throw new Error('--dataset-path 需要一个文件路径')
+        args.datasetPath = v
         break
       }
       case '--config': {
@@ -114,6 +121,8 @@ export function parseArgs(argv: string[]): BenchArgs {
         throw new Error(`未知参数：${flag}`)
     }
   }
+  if (args.dataset === 'peerqa' && args.task !== 'qa') throw new Error('--dataset peerqa 仅支持显式选择 --task qa')
+  if (args.datasetPath && args.dataset !== 'peerqa') throw new Error('--dataset-path 仅支持 --dataset peerqa')
   if (args.speed && args.task !== 'qa') {
     throw new Error('--speed 仅支持显式选择 --task qa')
   }
