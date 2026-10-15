@@ -221,6 +221,26 @@ describe('illustrated abstract evidence and references', () => {
     expect(buildEvidenceChunks(doc).join('\n')).not.toContain('An unrelated journal citation.')
     expect(materializeAbstract('{{cite:text-2-s1}}', doc, 'paper').sources).toEqual([])
   })
+  it('keeps benchmark findings while excluding appendix prompt templates', () => {
+    const doc = document()
+    doc.items.push(
+      { id: 'heading-1', kind: 'heading', text: 'A Benchmarks', caption: '', pages: [2], regions: [], images: [] },
+      { id: 'text-2', kind: 'text', text: 'The benchmark evaluates visual reasoning.', caption: '', pages: [2], regions: [], images: [] },
+      { id: 'heading-2', kind: 'heading', text: 'B Evaluation Prompts', caption: '', pages: [3], regions: [], images: [] },
+      { id: 'heading-3', kind: 'heading', text: 'B.1 STEM & Puzzle', caption: '', pages: [3], regions: [], images: [] },
+      { id: 'text-3', kind: 'text', text: 'Respond with the option letter and tool_call JSON.', caption: '', pages: [3], regions: [], images: [] },
+      { id: 'heading-4', kind: 'heading', text: 'C Additional Results', caption: '', pages: [4], regions: [], images: [] },
+      { id: 'text-4', kind: 'text', text: 'The additional results improve accuracy.', caption: '', pages: [4], regions: [], images: [] },
+    )
+    const chunks = buildEvidenceChunks(doc).join('\n')
+    expect(chunks).toContain('The benchmark evaluates visual reasoning.')
+    expect(chunks).not.toContain('Respond with the option letter')
+    expect(chunks).toContain('The additional results improve accuracy.')
+    const result = materializeAbstract('{{cite:text-3-s1}} {{cite:text-4-s1}}', doc, 'paper')
+    const links = documentElement(renderMarkdown(result.content)).querySelectorAll('a.paper-source')
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute('data-quote')).toBe('The additional results improve accuracy.')
+  })
   it('keeps a long source sentence intact for PDF sentence framing', () => {
     const doc = document()
     const sentence = `The method ${'improves reasoning across complex tasks '.repeat(9).trim()}.`
