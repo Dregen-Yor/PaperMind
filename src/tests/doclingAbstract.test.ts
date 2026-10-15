@@ -194,6 +194,33 @@ describe('illustrated abstract evidence and references', () => {
     expect(chunks.join('\n')).toContain('[text-1-s1; text; p2]\nThe first result is strong.')
     expect(chunks.join('\n')).toContain('[text-1-s2; text; p2]\nThe second result is weaker.')
   })
+  it('excludes the references list but keeps appendix evidence after it', () => {
+    const doc = document()
+    doc.items.push(
+      { id: 'heading-1', kind: 'heading', text: 'References', caption: '', pages: [2], regions: [], images: [] },
+      { id: 'text-2', kind: 'text', text: 'NeurIPS 37:95963-95910. DOI:10.48550/ARXIV.2502.14739.', caption: '', pages: [2], regions: [], images: [] },
+      { id: 'heading-2', kind: 'heading', text: 'A Benchmarks', caption: '', pages: [3], regions: [], images: [] },
+      { id: 'text-3', kind: 'text', text: 'The benchmark compares vision models.', caption: '', pages: [3], regions: [], images: [] },
+    )
+    const chunks = buildEvidenceChunks(doc).join('\n')
+    expect(chunks).toContain('Research evidence')
+    expect(chunks).not.toContain('95963-95910')
+    expect(chunks).not.toContain('References')
+    expect(chunks).toContain('The benchmark compares vision models.')
+    const result = materializeAbstract('{{cite:text-2-s1}} {{cite:text-3-s1}}', doc, 'paper')
+    const links = documentElement(renderMarkdown(result.content)).querySelectorAll('a.paper-source')
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute('data-quote')).toBe('The benchmark compares vision models.')
+  })
+  it('excludes a terminal bibliography when there is no appendix', () => {
+    const doc = document()
+    doc.items.push(
+      { id: 'heading-1', kind: 'heading', text: 'Bibliography', caption: '', pages: [2], regions: [], images: [] },
+      { id: 'text-2', kind: 'text', text: 'An unrelated journal citation.', caption: '', pages: [2], regions: [], images: [] },
+    )
+    expect(buildEvidenceChunks(doc).join('\n')).not.toContain('An unrelated journal citation.')
+    expect(materializeAbstract('{{cite:text-2-s1}}', doc, 'paper').sources).toEqual([])
+  })
   it('keeps a long source sentence intact for PDF sentence framing', () => {
     const doc = document()
     const sentence = `The method ${'improves reasoning across complex tasks '.repeat(9).trim()}.`
