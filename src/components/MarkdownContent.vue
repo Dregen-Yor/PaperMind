@@ -13,6 +13,7 @@ import { ElDialog } from 'element-plus'
 import { renderMarkdown } from '../utils/markdown'
 import { IMAGE_DATA_PATTERN, MAX_IMAGE_BYTES } from '../utils/doclingDocument'
 import type { SourceRef } from '../utils/sourceRef'
+import { validEvidenceRegion } from '../utils/sourceRef'
 
 const props = defineProps<{ content: string }>()
 const emit = defineEmits<{ (event: 'open-source', source: SourceRef): void }>()
@@ -63,7 +64,10 @@ function activate(event: Event) {
     event.preventDefault()
     const page = Number(source.dataset.page)
     if (source.dataset.paperId && Number.isSafeInteger(page) && page >= 0) {
-      emit('open-source', { label: source.textContent || `p${page + 1}`, paperId: source.dataset.paperId, startPage: page, endPage: page })
+      const values = source.dataset.region?.split(',').map(Number)
+      const region = values?.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : undefined
+      emit('open-source', { label: source.textContent || `p${page + 1}`, paperId: source.dataset.paperId, startPage: page, endPage: page,
+        ...(validEvidenceRegion(region) ? { region } : {}), ...(source.dataset.quote ? { quote: source.dataset.quote } : {}) })
     }
     return
   }

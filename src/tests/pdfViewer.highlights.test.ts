@@ -42,6 +42,7 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     return this.classList.contains('selection-popup') ? new DOMRect(0, 0, 192, 38) : new DOMRect(0, 0, 600, 800)
   })
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
   // jsdom has no layout engine. Supply glyph geometry at the browser boundary.
   Object.defineProperty(Range.prototype, 'getClientRects', {
     configurable: true,
@@ -72,6 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   delete (Range.prototype as any).getClientRects
   delete (Range.prototype as any).getBoundingClientRect
+  delete (HTMLElement.prototype as any).scrollIntoView
 })
 
 async function openViewer() {
@@ -104,6 +106,36 @@ function button(label: string) {
 }
 
 describe('PDF highlight cancellation', () => {
+  it('frames the quoted sentence instead of the whole Docling paragraph region', async () => {
+    await openViewer()
+    await (wrapper!.vm as any).scrollToEvidence({ label: 'p1', paperId: 'p1', startPage: 0, endPage: 0,
+      region: { x: 0, y: 0.1, width: 0.9, height: 0.1 }, quote: 'First line of text' })
+    const frame = wrapper!.get('.pdf-evidence-outline').element as HTMLElement
+    expect(frame.style.left).toBe('20px')
+    expect(frame.style.width).toBe('180px')
+    expect(wrapper!.findAll('.pdf-evidence-outline')).toHaveLength(1)
+  })
+
+  it('frames the table region when an exact value cannot be found in the text layer', async () => {
+    await openViewer()
+    await (wrapper!.vm as any).scrollToEvidence({ label: 'p1', paperId: 'p1', startPage: 0, endPage: 0,
+      region: { x: 0.2, y: 0.5, width: 0.6, height: 0.2 }, quote: '74.7' })
+    const frame = wrapper!.get('.pdf-evidence-outline').element as HTMLElement
+    expect(frame.style.left).toBe('120px')
+    expect(frame.style.top).toBe('400px')
+    expect(frame.style.width).toBe('360px')
+  })
+  it('keeps the evidence frame after a zoom redraw and clears it for an old page-only source', async () => {
+    await openViewer()
+    await (wrapper!.vm as any).scrollToEvidence({ label: 'p1', paperId: 'p1', startPage: 0,
+      region: { x: 0.2, y: 0.5, width: 0.6, height: 0.2 } })
+    expect(wrapper!.findAll('.pdf-evidence-outline')).toHaveLength(1)
+    await wrapper!.get('[aria-label="放大论文"]').trigger('click')
+    await flushPromises()
+    expect(wrapper!.findAll('.pdf-evidence-outline')).toHaveLength(1)
+    await (wrapper!.vm as any).scrollToEvidence({ label: 'p1', paperId: 'p1', startPage: 0 })
+    expect(wrapper!.findAll('.pdf-evidence-outline')).toHaveLength(0)
+  })
   it('cancels only the clicked record and restores the same record on undo, without rerendering the PDF', async () => {
     await openViewer()
     const canvas = wrapper!.get('canvas').element

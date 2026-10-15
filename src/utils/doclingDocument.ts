@@ -7,6 +7,7 @@ export interface DoclingSettings {
   formula: boolean
 }
 export interface SourceRegion { page: number; x: number; y: number; width: number; height: number }
+export interface DocumentCell { text: string; region: SourceRegion }
 export interface DocumentImage { page?: number; data?: string; assetId?: string }
 export interface DocumentItem {
   id: string
@@ -15,6 +16,7 @@ export interface DocumentItem {
   caption: string
   pages: number[]
   regions: SourceRegion[]
+  cells?: DocumentCell[]
   images: DocumentImage[]
 }
 export interface ParsedDocument { version: 1; items: DocumentItem[]; warnings: string[] }
@@ -65,6 +67,11 @@ export function isParsedDocument(value: unknown): value is ParsedDocument {
         && Array.isArray(i.pages) && i.pages.every((p: unknown) => Number.isInteger(p) && Number(p) >= 0)
         && Array.isArray(i.regions) && i.regions.every((r: SourceRegion) => r && Number.isInteger(r.page) && r.page >= 0
           && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001)
+        && (i.cells === undefined || Array.isArray(i.cells) && i.kind === 'table' && i.cells.every((cell: DocumentCell) =>
+          cell && typeof cell.text === 'string' && cell.region && Number.isInteger(cell.region.page) && cell.region.page >= 0
+          && [cell.region.x, cell.region.y, cell.region.width, cell.region.height].every(Number.isFinite)
+          && cell.region.x >= 0 && cell.region.y >= 0 && cell.region.width > 0 && cell.region.height > 0
+          && cell.region.x + cell.region.width <= 1.00001 && cell.region.y + cell.region.height <= 1.00001))
         && Array.isArray(i.images) && i.images.every((im: DocumentImage) => im && (im.page === undefined || Number.isInteger(im.page) && im.page >= 0)
           && (im.data === undefined || typeof im.data === 'string' && IMAGE_DATA_PATTERN.test(im.data) && im.data.length <= MAX_IMAGE_BYTES * 1.4)
           && (im.assetId === undefined || typeof im.assetId === 'string' && ASSET_ID_PATTERN.test(im.assetId)))
@@ -109,16 +116,24 @@ export function normalizeDoclingDocument(input: unknown): ParsedDocument {
       : path.startsWith('#/tables/') ? 'table' : raw.label === 'formula' ? 'formula'
       : ['section_header', 'title'].includes(raw.label) ? 'heading' : 'text'
     let text = string(raw.text)
+    let cells: DocumentCell[] = []
     if (kind === 'table') {
-      const cells = list(object(raw.data).table_cells).map(c => object(c)).sort((a, b) => (a.start_row_offset_idx ?? 0) - (b.start_row_offset_idx ?? 0) || (a.start_col_offset_idx ?? 0) - (b.start_col_offset_idx ?? 0))
-      text = cells.map(c => `[row ${c.start_row_offset_idx ?? '?'}, col ${c.start_col_offset_idx ?? '?'}] ${string(c.text)}`).join('\n') || text
+      const rawCells = list(object(raw.data).table_cells).map(c => object(c)).sort((a, b) => (a.start_row_offset_idx ?? 0) - (b.start_row_offset_idx ?? 0) || (a.start_col_offset_idx ?? 0) - (b.start_col_offset_idx ?? 0))
+      text = rawCells.map(c => `[row ${c.start_row_offset_idx ?? '?'}, col ${c.start_col_offset_idx ?? '?'}] ${string(c.text)}`).join('\n') || text
+      const tablePages = [...new Set<number>(list(raw.prov).map(p => p?.page_no).filter(p => Number.isInteger(p) && p >= 1))]
+      cells = rawCells.flatMap(cell => {
+        const pageNo = Number.isInteger(cell.page_no) ? cell.page_no : tablePages.length === 1 ? tablePages[0] : null
+        const cellRegions = pageNo ? regions({ prov: [{ page_no: pageNo, bbox: cell.bbox }] }) : []
+        return cellRegions.length && string(cell.text) ? [{ text: string(cell.text), region: cellRegions[0] }] : []
+      })
     }
     const caption = list(raw.captions).map(ref => string(resolve(ref).text)).filter(Boolean).join('\n') || string(raw.caption)
     const pages = [...new Set<number>(list(raw.prov).map(p => p?.page_no).filter(p => Number.isInteger(p) && p >= 1).map(p => p - 1))].sort((a, b) => a - b)
     const uri = string(object(raw.image).uri)
     const images: DocumentImage[] = IMAGE_DATA_PATTERN.test(uri) && uri.length <= MAX_IMAGE_BYTES * 1.4 ? [{ data: uri, ...(pages[0] !== undefined ? { page: pages[0] } : {}) }] : []
     if (!text && !caption && kind === 'text') return
-    items.push({ id: `${kind}-${++counts[kind]}`, kind, text, caption, pages, regions: regions(raw), images })
+    items.push({ id: `${kind}-${++counts[kind]}`, kind, text, caption, pages, regions: regions(raw), images,
+      ...(cells.length ? { cells } : {}) })
   }
   for (const ref of list(object(doc.body).children)) visit(resolve(ref), string(ref?.$ref))
   // Old or partial exports can omit body. Include unreferenced evidence without duplicating references.

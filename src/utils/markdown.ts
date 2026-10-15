@@ -2,6 +2,7 @@ import DOMPurify from 'dompurify'
 import 'katex/dist/katex.min.css'
 import MarkdownIt from 'markdown-it'
 import texmath from 'markdown-it-texmath'
+import { parseEvidenceHref } from './sourceRef'
 
 const markdown = new MarkdownIt({
   html: false,
@@ -35,12 +36,10 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
   const token = tokens[index]
   const href = token.attrGet('href') || ''
   if (href.startsWith('paper-source:')) {
-    const match = /^paper-source:(.+):(\d+)$/.exec(href)
-    if (match && Number.isSafeInteger(Number(match[2]))) {
-      try {
-        const paperId = decodeURIComponent(match[1])
-        return `<a class="paper-source" data-paper-id="${markdown.utils.escapeHtml(paperId)}" data-page="${match[2]}" role="button" tabindex="0">`
-      } catch { /* A malformed source is rendered as a plain label. */ }
+    const source = parseEvidenceHref(href)
+    if (source?.paperId && source.startPage !== undefined) {
+      const box = source.region ? [source.region.x, source.region.y, source.region.width, source.region.height].join(',') : ''
+      return `<a class="paper-source" data-paper-id="${markdown.utils.escapeHtml(source.paperId)}" data-page="${source.startPage}"${box ? ` data-region="${box}"` : ''}${source.quote ? ` data-quote="${markdown.utils.escapeHtml(source.quote)}"` : ''} role="button" tabindex="0">`
     }
     token.attrSet('href', '')
   }

@@ -29,6 +29,15 @@ describe('offline illustrated Markdown', () => {
     await wrapper.find('a').trigger('keydown', { key: 'Enter' })
     expect(wrapper.emitted('open-source')).toEqual([[{ label: 'p2', paperId: 'paper', startPage: 1, endPage: 1 }], [{ label: 'p2', paperId: 'paper', startPage: 1, endPage: 1 }]])
   })
+  it('passes a precise evidence target from a source link to the PDF reader', async () => {
+    const content = '[p2](paper-source:paper:1:0.1,0.2,0.6,0.1:The%20model%20improves)'
+    const wrapper = mount(MarkdownContent, { props: { content }, global: { stubs: { ElDialog: true } } })
+    await wrapper.find('a').trigger('click')
+    expect(wrapper.emitted('open-source')?.[0]?.[0]).toEqual({
+      label: 'p2', paperId: 'paper', startPage: 1, endPage: 1,
+      region: { x: 0.1, y: 0.2, width: 0.6, height: 0.1 }, quote: 'The model improves',
+    })
+  })
   it('opens an accessible image preview and reports missing local assets', async () => {
     const wrapper = mount(MarkdownContent, { props: { content: `![Figure 1](asset:${id})` }, global: { stubs: { ElDialog: { template: '<div v-if="modelValue"><slot /></div>', props: ['modelValue'] } } } })
     await flushPromises()

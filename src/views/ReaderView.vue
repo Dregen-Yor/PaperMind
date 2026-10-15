@@ -83,7 +83,7 @@ import NotesPanel from '../components/NotesPanel.vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
 import { base64ToUrl } from '../utils/pdfUtils'
-import type { SourceRef } from '../utils/sourceRef'
+import { sourceFromRouteQuery, sourceRouteQuery, type SourceRef } from '../utils/sourceRef'
 
 const route = useRoute()
 const router = useRouter()
@@ -108,14 +108,20 @@ async function jumpToPage(page: number) {
   pdfViewerRef.value?.scrollToPage(page)
 }
 
+async function jumpToEvidence(ref: SourceRef) {
+  mobilePane.value = 'paper'
+  await nextTick()
+  await pdfViewerRef.value?.scrollToEvidence(ref)
+}
+
 /** 来源芯片跳页：本页内滚动，跨论文带上 `?page=` 跳进对应阅读页（#1）。 */
 function onOpenSource(ref: SourceRef) {
   if (!ref.paperId || ref.startPage === undefined) return
   if (ref.paperId === paper.value?.id) {
-    void jumpToPage(ref.startPage + 1)
+    void jumpToEvidence(ref)
     return
   }
-  void router.push({ path: '/library/' + ref.paperId, query: { page: String(ref.startPage + 1) } })
+  void router.push({ path: '/library/' + ref.paperId, query: sourceRouteQuery(ref) })
 }
 
 const paperConversations = computed(() =>
@@ -185,10 +191,11 @@ watch([() => paper.value?.id, () => chatStore.loaded], async ([id, chatReady], _
     if (base64) pdfUrl.value = base64ToUrl(base64)
     else fileError.value = '找不到论文文件，请返回文献库重新导入。'
     // 跨论文跳转：`?page=` 定位到目标页（页元素可能尚未渲染完，scrollToPage 内部等待）
-    const targetPage = Number(route.query.page)
-    if (Number.isInteger(targetPage) && targetPage > 0) {
+    const target = sourceFromRouteQuery(id, route.query)
+    if (target) {
       await nextTick()
-      pdfViewerRef.value?.scrollToPage(targetPage)
+      if (target.region || target.quote) void pdfViewerRef.value?.scrollToEvidence(target)
+      else void pdfViewerRef.value?.scrollToPage(target.startPage! + 1)
     }
     if (paper.value?.status === 'unread') await paperStore.updatePaper(id, { status: 'reading' })
     if (cancelled) return

@@ -50,6 +50,8 @@ import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen, Delete } 
 import { usePaperStore, type Highlight } from '../stores/paper'
 import { mergeSegments, type HighlightSegment } from '../utils/highlightMerge'
 import { getHighlightRects, getTextNodes, type HighlightRect } from '../utils/pdfHighlight'
+import { findEvidenceRanges } from '../utils/pdfEvidence'
+import { validEvidenceRegion, type SourceRef } from '../utils/sourceRef'
 
 const props = defineProps<{ src: string; paperId: string }>()
 const paperStore = usePaperStore()
@@ -101,6 +103,7 @@ let undoTimer: ReturnType<typeof setTimeout> | undefined
 let documentGeneration = 0
 let popupGeneration = 0
 let pointerStart: { x: number; y: number; moved: boolean } | null = null
+let activeEvidence: SourceRef | null = null
 
 const highlightSegments = computed<HighlightSegment[]>(() => highlights.value.map(h => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
 
@@ -155,6 +158,38 @@ function restorePageHighlights(pageDiv: HTMLElement, page: number) {
 function repaintHighlights(page: number) {
   const pageDiv = pagesRef.value?.querySelector<HTMLElement>(`[data-page="${page}"]`)
   if (pageDiv?.querySelector('.text-layer span')) restorePageHighlights(pageDiv, page)
+}
+
+function paintEvidence(pageDiv: HTMLElement, source: SourceRef): HTMLElement | null {
+  const layer = pageDiv.querySelector<HTMLElement>('.pdf-evidence-layer')
+  const textLayer = pageDiv.querySelector<HTMLElement>('.text-layer')
+  if (!layer) return null
+  layer.replaceChildren()
+  const width = parseFloat(pageDiv.style.width)
+  const height = parseFloat(pageDiv.style.height)
+  const region = validEvidenceRegion(source.region) ? source.region : undefined
+  const regionRect = region ? {
+    left: region.x * width, top: region.y * height,
+    width: region.width * width, height: region.height * height,
+  } : undefined
+  if (source.quote && textLayer) {
+    const nodes = getTextNodes(textLayer)
+    const boundaries: number[] = []
+    let offset = 0
+    for (const node of nodes) { offset += node.length; boundaries.push(offset) }
+    const text = nodes.map(node => node.data).join('')
+    const matches = findEvidenceRanges(text, source.quote, boundaries)
+      .map(range => getHighlightRects(textLayer, range.start, range.end, pageDiv.getBoundingClientRect()))
+      .filter(rects => rects.length > 0 && (!regionRect || rects.every(rect => {
+        const centerX = rect.left + rect.width / 2
+        const centerY = rect.top + rect.height / 2
+        return centerX >= regionRect.left - 8 && centerX <= regionRect.left + regionRect.width + 8
+          && centerY >= regionRect.top - 8 && centerY <= regionRect.top + regionRect.height + 8
+      })))
+    if (matches.length === 1) drawRects(layer, matches[0], 'pdf-evidence-outline')
+  }
+  if (!layer.childElementCount && regionRect) drawRects(layer, [regionRect], 'pdf-evidence-outline')
+  return layer.firstElementChild as HTMLElement | null
 }
 
 async function renderPdf() {
@@ -213,6 +248,11 @@ async function renderPage(num: number, generation: number) {
   highlightLayerDiv.setAttribute('aria-hidden', 'true')
   pageDiv.appendChild(highlightLayerDiv)
 
+  const evidenceLayerDiv = document.createElement('div')
+  evidenceLayerDiv.className = 'pdf-evidence-layer'
+  evidenceLayerDiv.setAttribute('aria-hidden', 'true')
+  pageDiv.appendChild(evidenceLayerDiv)
+
   // Text layer for selection
   const textLayerDiv = document.createElement('div')
   textLayerDiv.className = 'text-layer'
@@ -238,6 +278,8 @@ async function renderPage(num: number, generation: number) {
   if (generation !== renderGeneration) return
 
   restorePageHighlights(pageDiv, num)
+  pageDiv.dataset.rendered = 'true'
+  if (activeEvidence?.startPage === num - 1) paintEvidence(pageDiv, activeEvidence)
 }
 
 function onScroll() {
@@ -272,6 +314,26 @@ async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
     el.classList.add('page-flash')
     setTimeout(() => el.classList.remove('page-flash'), 1400)
   }
+}
+
+async function scrollToEvidence(source: SourceRef) {
+  if (source.paperId !== props.paperId || source.startPage === undefined) return
+  const page = source.startPage + 1
+  activeEvidence = source.region || source.quote ? source : null
+  pagesRef.value?.querySelectorAll('.pdf-evidence-layer').forEach(layer => layer.replaceChildren())
+  if (!activeEvidence) {
+    await scrollToPage(page)
+    return
+  }
+  await scrollToPage(page, { flash: false })
+  const deadline = Date.now() + 5000
+  let pageDiv = pagesRef.value?.querySelector<HTMLElement>(`[data-page="${page}"][data-rendered="true"]`)
+  while (!pageDiv && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 60))
+    pageDiv = pagesRef.value?.querySelector<HTMLElement>(`[data-page="${page}"][data-rendered="true"]`)
+  }
+  if (!pageDiv || activeEvidence !== source) return
+  paintEvidence(pageDiv, source)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 function prevPage() { if (currentPage.value > 1) scrollToPage(--currentPage.value) }
@@ -510,6 +572,7 @@ async function loadDocument() {
   highlightBusy.value = true
   highlights.value = []
   hitRegions.clear()
+  activeEvidence = null
   fitOnNextRender = fitMode
   try {
     const stored = await paperStore.getHighlights(props.paperId)
@@ -554,7 +617,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeyDown)
 })
 
-defineExpose({ scrollToPage })
+defineExpose({ scrollToPage, scrollToEvidence })
 </script>
 
 <style scoped>
@@ -660,6 +723,20 @@ defineExpose({ scrollToPage })
 :deep(.pdf-highlight-overlay) {
   position: absolute;
   background: #ffe66a;
+}
+:deep(.pdf-evidence-layer) {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+:deep(.pdf-evidence-outline) {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #d4a42e;
+  border-radius: 3px;
+  background: rgb(245 205 105 / 19%);
+  box-shadow: 0 0 0 2px rgb(255 247 220 / 80%);
 }
 :deep(.pdf-highlight-focus) {
   position: absolute;

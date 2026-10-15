@@ -16,7 +16,7 @@ export function createDoclingFacade(deps: Dependencies) {
     const paper = deps.readPaper(paperId)
     if (!paper) throw new Error('找不到论文 PDF 文件')
     const sourceHash = createHash('sha256').update(paper.bytes).digest('hex')
-    const configHash = createHash('sha256').update(JSON.stringify({ version: 1, baseUrl: settings.baseUrl, ocr: settings.ocr, formula: settings.formula, timeoutSeconds: settings.timeoutSeconds })).digest('hex')
+    const configHash = createHash('sha256').update(JSON.stringify({ version: 2, baseUrl: settings.baseUrl, ocr: settings.ocr, formula: settings.formula, timeoutSeconds: settings.timeoutSeconds })).digest('hex')
     return { paper, settings, sourceHash, configHash }
   }
   return {

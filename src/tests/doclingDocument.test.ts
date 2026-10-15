@@ -26,6 +26,14 @@ describe('Docling document boundary', () => {
     expect(document.items[0].regions[0].height).toBeCloseTo(.6)
     expect(document.items[3].regions).toEqual(document.items[0].regions)
   })
+  it('retains table-cell boxes for precise source links when Docling provides them', () => {
+    const input = fixture()
+    Object.assign(input.tables[0].data.table_cells[0], { bbox: { l: 30, r: 50, t: 55, b: 45, coord_origin: 'TOPLEFT' } })
+    const document = normalizeDoclingDocument(input)
+    expect(document.items[2].cells).toMatchObject([{ text: '95.2', region: { page: 1, x: .3, y: .45, width: .2 } }])
+    expect(document.items[2].cells?.[0].region.height).toBeCloseTo(.1)
+    expect(isParsedDocument(document)).toBe(true)
+  })
   it('keeps unlocated text but never creates fake pages or fetches remote images', () => {
     const document = normalizeDoclingDocument({ texts: [{ text: 'Evidence' }], pictures: [{ image: { uri: 'https://example.com/image.png' } }] })
     expect(document.items.map(i => i.id)).toEqual(['text-1', 'picture-1'])

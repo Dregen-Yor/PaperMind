@@ -65,6 +65,37 @@ describe('illustrated abstract evidence and references', () => {
     expect(result.content).not.toContain('invented')
     expect(result.sources).toContainEqual(expect.objectContaining({ paperId: 'paper', startPage: 1 }))
   })
+  it('anchors a verified source sentence and table value to their Docling regions', () => {
+    const doc = document()
+    doc.items[0].text = 'The model improves reasoning accuracy by 12.5 points. Another claim follows.'
+    doc.items[0].regions = [{ page: 1, x: 0.1, y: 0.2, width: 0.75, height: 0.08 }]
+    doc.items.push({ id: 'table-1', kind: 'table', text: '[row 0, col 0] Model\n[row 0, col 1] 74.7', caption: '', pages: [1],
+      regions: [{ page: 1, x: 0.2, y: 0.5, width: 0.6, height: 0.2 }], images: [] })
+    const result = materializeAbstract('提升 {{cite:text-1|The model improves reasoning accuracy by 12.5 points.}}；表中为 {{cite:table-1|74.7}}。', doc, 'paper')
+    const html = documentElement(renderMarkdown(result.content))
+    const links = Array.from(html.querySelectorAll<HTMLAnchorElement>('a.paper-source'))
+    expect(links).toHaveLength(2)
+    expect(links[0].dataset.region).toBe('0.1,0.2,0.75,0.08')
+    expect(links[0].dataset.quote).toBe('The model improves reasoning accuracy by 12.5 points.')
+    expect(links[1].dataset.region).toBe('0.2,0.5,0.6,0.2')
+    expect(links[1].dataset.quote).toBe('74.7')
+  })
+  it('never trusts an invented quotation as a precise source anchor', () => {
+    const doc = document()
+    doc.items[0].regions = [{ page: 1, x: 0.1, y: 0.2, width: 0.6, height: 0.1 }]
+    const result = materializeAbstract('{{cite:text-1|Invented sentence}}', doc, 'paper')
+    const html = documentElement(renderMarkdown(result.content))
+    expect(html.querySelector('a.paper-source')?.getAttribute('data-quote')).toBeNull()
+    expect(html.querySelector('a.paper-source')?.getAttribute('data-region')).toBe('0.1,0.2,0.6,0.1')
+  })
+  it('uses a uniquely matched table cell box rather than the whole table box', () => {
+    const doc = document()
+    doc.items.push({ id: 'table-1', kind: 'table', text: '[row 1, col 2] 74.7', caption: '', pages: [1],
+      regions: [{ page: 1, x: .1, y: .3, width: .8, height: .4 }], images: [],
+      cells: [{ text: '74.7', region: { page: 1, x: .5, y: .4, width: .1, height: .05 } }] })
+    const html = documentElement(renderMarkdown(materializeAbstract('{{cite:table-1|74.7}}', doc, 'paper').content))
+    expect(html.querySelector('a.paper-source')?.getAttribute('data-region')).toBe('0.5,0.4,0.1,0.05')
+  })
   it('omits a repeated uncaptioned page header while keeping a substantive uncaptioned figure', () => {
     const doc = document()
     doc.items[1].caption = ''
