@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { ASSET_ID_PATTERN, IMAGE_DATA_PATTERN, MAX_IMAGE_BYTES, isParsedDocument, type DoclingRecord } from '../../src/utils/doclingDocument'
+import { ASSET_ID_PATTERN, IMAGE_DATA_PATTERN, MAX_IMAGE_BYTES, assignTypedDocumentIds, isParsedDocument, type DoclingRecord } from '../../src/utils/doclingDocument'
 
 export function imageIdentity(paperId: string, data: string): string {
   const { mime, bytes } = decodeImage(data)
@@ -30,13 +30,14 @@ export function createDoclingRepository(db: Database.Database) {
       for (const item of document.items) for (const image of item.images) {
         if (!image.assetId || image.data || !db.prepare('SELECT id FROM document_assets WHERE id = ? AND paper_id = ?').get(image.assetId, paperId)) return null
       }
-      return { document, sourceHash, configHash, cached: true }
+      return { document: assignTypedDocumentIds(document), sourceHash, configHash, cached: true }
     } catch { return null }
   }
   const save = (paperId: string, record: DoclingRecord): DoclingRecord => {
     if (!record || !ASSET_ID_PATTERN.test(record.sourceHash) || !ASSET_ID_PATTERN.test(record.configHash) || !isParsedDocument(record.document)) throw new Error('Docling 解析缓存格式无效')
     const document = JSON.parse(JSON.stringify(record.document)) as DoclingRecord['document']
     if (new Set(document.items.map(i => i.id)).size !== document.items.length) throw new Error('Docling 素材编号重复')
+    assignTypedDocumentIds(document)
     db.transaction(() => {
       for (const item of document.items) for (const image of item.images) {
         if (image.data) {

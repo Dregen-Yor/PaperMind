@@ -8,6 +8,10 @@ const mockDb = {
     readAsset: vi.fn().mockResolvedValue(null),
     testConnection: vi.fn().mockResolvedValue('Docling 连接成功'),
   },
+  abstractCheckpoint: {
+    get: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockResolvedValue(undefined),
+  },
   kb: {
     list: vi.fn().mockResolvedValue([{ id: 'default', name: '默认知识库', description: '', color: '#409EFF', createdAt: 0 }]),
     create: vi.fn().mockImplementation(kb => Promise.resolve(kb)),

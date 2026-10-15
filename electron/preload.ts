@@ -8,6 +8,10 @@ const db = {
     readAsset: (id: string) => ipcRenderer.invoke('docling:readAsset', id),
     testConnection: (settings: unknown) => ipcRenderer.invoke('docling:testConnection', settings),
   },
+  abstractCheckpoint: {
+    get: (paperId: string, runKey: string, stage: string, position: number) => ipcRenderer.invoke('abstractCheckpoint:get', paperId, runKey, stage, position),
+    save: (paperId: string, runKey: string, stage: string, position: number, content: string) => ipcRenderer.invoke('abstractCheckpoint:save', paperId, runKey, stage, position, content),
+  },
   kb: {
     list: () => ipcRenderer.invoke('kb:list'),
     create: (kb: unknown) => ipcRenderer.invoke('kb:create', kb),

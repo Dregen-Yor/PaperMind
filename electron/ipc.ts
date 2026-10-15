@@ -1,7 +1,7 @@
 import { app, dialog, ipcMain } from 'electron'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
-import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, exportAll, clearAll, importAll } from './db'
+import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, exportAll, clearAll, importAll } from './db'
 import { createDoclingFacade } from './docling'
 import { testDoclingConnection } from './doclingClient'
 import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
@@ -18,11 +18,14 @@ export function registerIpc() {
       return data ? { bytes: Buffer.from(data, 'base64'), name: paperApi.get(id)?.fileName || 'paper.pdf' } : null
     },
   })
+  const abstractCheckpoint = getAbstractCheckpointRepository()
   const handlers: Record<string, (...args: any[]) => any> = {
     'docling:convert': (_e, id) => docling.convert(id),
     'docling:save': (_e, id, record) => docling.save(id, record),
     'docling:readAsset': (_e, id) => docling.readAsset(id),
     'docling:testConnection': (_e, settings) => testDoclingConnection(settings),
+    'abstractCheckpoint:get': (_e, paperId, runKey, stage, position) => abstractCheckpoint.get(paperId, runKey, stage, position),
+    'abstractCheckpoint:save': (_e, paperId, runKey, stage, position, content) => abstractCheckpoint.save(paperId, runKey, stage, position, content),
     // knowledge bases
     'kb:list': () => kbApi.list(),
     'kb:create': (_e, kb) => kbApi.create(kb),

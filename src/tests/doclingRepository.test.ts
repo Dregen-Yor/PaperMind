@@ -55,6 +55,16 @@ describe('native Docling cache and asset persistence', () => {
       expect(repo.save('paper', record).document.items[1].images[0].assetId).toBe(id)
     } finally { db.close() }
   })
+  it('upgrades legacy item numbers from an existing cache without reparsing the PDF', () => {
+    const { db, repo, record } = fixture()
+    try {
+      const saved = repo.save('paper', record)
+      const legacy = structuredClone(saved.document)
+      legacy.items.forEach((item, index) => { item.id = `item-${index}` })
+      db.prepare('UPDATE document_parses SET document_json = ? WHERE paper_id = ?').run(JSON.stringify(legacy), 'paper')
+      expect(repo.get('paper', record.sourceHash, record.configHash)?.document.items.map(item => item.id)).toEqual(['text-1', 'picture-1'])
+    } finally { db.close() }
+  })
   it('rejects remote images or a manifest referring to nonexistent assets atomically', () => {
     const { db, repo, record } = fixture()
     try {

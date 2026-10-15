@@ -105,6 +105,17 @@ CREATE TABLE IF NOT EXISTS document_assets (
 );
 CREATE INDEX IF NOT EXISTS idx_document_assets_paper ON document_assets(paper_id);
 
+CREATE TABLE IF NOT EXISTS abstract_checkpoints (
+  paper_id TEXT NOT NULL,
+  run_key TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (paper_id, run_key, stage, position),
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_papers_kb ON papers(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_paper ON highlights(paper_id);

@@ -146,4 +146,10 @@ describe('问答失败路径（#2）', () => {
     const failed = conv.messages.find(m => m.role === 'assistant')!
     expect(failed.error).toBe('请求超时，请检查网络后重试')
   })
+  it('response body is aborted after headers and still reports a readable timeout', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => { throw new Error('The user aborted a request.') } }) as any
+    const store = useChatStore()
+    await store.init()
+    await expect(store.requestCompletion([{ role: 'user', content: '你好' }])).rejects.toThrow('请求超时，请检查网络后重试')
+  })
 })

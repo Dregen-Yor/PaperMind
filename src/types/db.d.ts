@@ -8,6 +8,10 @@ export interface DbApi {
     readAsset: (id: string) => Promise<string | null>
     testConnection: (settings: DoclingSettings) => Promise<string>
   }
+  abstractCheckpoint: {
+    get: (paperId: string, runKey: string, stage: string, position: number) => Promise<string | null>
+    save: (paperId: string, runKey: string, stage: string, position: number, content: string) => Promise<void>
+  }
   kb: {
     list: () => Promise<any[]>
     create: (kb: any) => Promise<any>

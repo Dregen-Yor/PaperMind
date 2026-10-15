@@ -86,11 +86,11 @@
 
       <section class="settings-card">
         <h3>Docling 文档解析</h3>
-        <p class="card-desc">输入 <code>/abstract</code> 生成详细图文解读。PDF 将发送到下方服务，解读使用当前对话模型；原文图片保存在本地。</p>
+        <p class="card-desc">输入 <code>/abstract</code> 生成详细图文解读。默认通过 SSH 自动连接 101.76.222.151 上的 Docling 服务；PDF 将发送到该服务，解读使用当前对话模型，原文图片保存在本地。</p>
         <p v-if="chatStore.doclingConfigError" class="card-desc" role="alert">{{ chatStore.doclingConfigError }}</p>
         <el-form label-position="top">
           <el-form-item label="Docling 服务根地址">
-            <el-input v-model="doclingLocal.baseUrl" type="url" autocomplete="off" placeholder="http://localhost:5001（可稍后填写）" />
+            <el-input v-model="doclingLocal.baseUrl" type="url" autocomplete="off" placeholder="http://127.0.0.1:5001" />
           </el-form-item>
           <el-form-item label="API Key（可选）">
             <el-input v-model="doclingLocal.apiKey" type="password" show-password autocomplete="off" placeholder="服务启用认证时填写" />

@@ -21,7 +21,7 @@ import type { PaperTreeRecord } from '../types/db'
 import type { SourceRef } from '../utils/sourceRef'
 import { DEFAULT_DOCLING_SETTINGS, DOCLING_SETTINGS_KEY, normalizeDoclingSettings, type DoclingSettings } from '../utils/doclingDocument'
 import { prepareDoclingPaper } from '../utils/doclingPdf'
-import { generateDoclingAbstract } from '../utils/doclingAbstract'
+import { abstractRunKey, generateDoclingAbstract } from '../utils/doclingAbstract'
 import {
   ABSTRACT_MODEL,
 } from '../utils/abstractSummarizer'
@@ -570,10 +570,10 @@ export const useChatStore = defineStore('chat', () => {
    *
    * `opts` 供后续流式输出使用（#6），本任务先保留形参。
    */
-  async function requestCompletion(
+  async function requestCompletionRaw(
     messages: { role: string; content: string }[],
     profileOrId?: string | LLMProfile,
-    opts: { onToken?: (token: string) => void } = {},
+    opts: { onToken?: (token: string) => void; timeoutMs?: number } = {},
   ): Promise<{ content: string; truncated: boolean }> {
     const profile = resolveLlmProfile(profileOrId)
     // 落库值可能是备份导入进来的任意数字，发送前统一合法化（0 = 不限制）
@@ -590,7 +590,7 @@ export const useChatStore = defineStore('chat', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+      }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS))
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       if (opts.onToken) return readOllamaStream(res, opts.onToken)
       const data = await res.json()
@@ -631,7 +631,7 @@ export const useChatStore = defineStore('chat', () => {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify(body),
-        }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+        }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS))
         if (res.ok) break
         const detail = await readErrorBody(res)
         // 兜底上限被模型上限拒掉时降级重试：老 Claude（claude-3-opus / haiku）只接受 4096，
@@ -668,13 +668,29 @@ export const useChatStore = defineStore('chat', () => {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-    }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+    }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS))
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
     if (opts.onToken) return readOpenAiStream(res, opts.onToken)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
     if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
     return { content, truncated: data.choices?.[0]?.finish_reason === 'length' }
+  }
+
+  async function requestCompletion(
+    messages: { role: string; content: string }[],
+    profileOrId?: string | LLMProfile,
+    opts: { onToken?: (token: string) => void; timeoutMs?: number } = {},
+  ): Promise<{ content: string; truncated: boolean }> {
+    try { return await requestCompletionRaw(messages, profileOrId, opts) }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const name = error instanceof Error ? error.name : ''
+      if (name === 'AbortError' || name === 'TimeoutError' || /The user aborted a request/i.test(message)) {
+        throw new Error('请求超时，请检查网络后重试')
+      }
+      throw error
+    }
   }
 
   /** 只要文本的调用路径（索引、标题、查询改写等）继续走这个薄包装。 */
@@ -1082,11 +1098,18 @@ export const useChatStore = defineStore('chat', () => {
         const paper = await window.db.paper.get(paperId)
         const title = paper?.title || paperId
         const document = await prepareDoclingPaper(paperId, progress)
+        const profileIdentity = JSON.stringify({ provider: profile.provider, model: profile.model, baseUrl: profile.baseUrl,
+          temperature: profile.temperature, maxTokens: profile.maxTokens, topK: profile.topK, systemPrompt: profile.systemPrompt })
+        const runKey = await abstractRunKey(document, title, profileIdentity, previous)
+        const checkpoint = {
+          load: (stage: string, position: number) => window.db.abstractCheckpoint.get(paperId, runKey, stage, position),
+          save: (stage: string, position: number, content: string) => window.db.abstractCheckpoint.save(paperId, runKey, stage, position, content),
+        }
         const result = await generateDoclingAbstract(document, paperId, title, messages => {
           const configured = messages.map(message => ({ ...message }))
           configured[0].content = profile.systemPrompt + '\n\n' + configured[0].content
-          return requestCompletion(configured, profile)
-        }, progress, previous)
+          return requestCompletion(configured, profile, { timeoutMs: 300_000 })
+        }, progress, previous, checkpoint)
         sections.push(paperIds.length > 1 && !previous ? `## ${title}\n\n${result.content}` : result.content)
         sources.push(...(result.sources.length ? result.sources.map(ref => ({ ...ref, label: `${title} · ${ref.label}` })) : [{ label: title, paperId }]))
         truncated ||= result.truncated

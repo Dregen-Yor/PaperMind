@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeDoclingDocument, normalizeDoclingSettings } from '../utils/doclingDocument'
+import { DEFAULT_DOCLING_SETTINGS, isParsedDocument, normalizeDoclingDocument, normalizeDoclingSettings } from '../utils/doclingDocument'
 
 const prov = (page = 2, origin = 'BOTTOMLEFT') => [{ page_no: page, bbox: { l: 10, r: 90, t: origin === 'BOTTOMLEFT' ? 80 : 20, b: origin === 'BOTTOMLEFT' ? 20 : 80, coord_origin: origin } }]
 const fixture = () => ({
@@ -14,6 +14,7 @@ describe('Docling document boundary', () => {
   it('follows body order and resolves captions without duplicating them', () => {
     const document = normalizeDoclingDocument(fixture())
     expect(document.items.map(i => i.kind)).toEqual(['picture', 'heading', 'table', 'formula'])
+    expect(document.items.map(i => i.id)).toEqual(['picture-1', 'heading-1', 'table-1', 'formula-1'])
     expect(document.items[0].caption).toBe('Figure 1. Original caption')
     expect(document.items[2].text).toContain('95.2')
     expect(document.items[0].images[0].data).toBe('data:image/png;base64,aGVsbG8=')
@@ -27,6 +28,7 @@ describe('Docling document boundary', () => {
   })
   it('keeps unlocated text but never creates fake pages or fetches remote images', () => {
     const document = normalizeDoclingDocument({ texts: [{ text: 'Evidence' }], pictures: [{ image: { uri: 'https://example.com/image.png' } }] })
+    expect(document.items.map(i => i.id)).toEqual(['text-1', 'picture-1'])
     expect(document.items[0].pages).toEqual([])
     expect(document.items[1].images).toEqual([])
   })
@@ -34,8 +36,20 @@ describe('Docling document boundary', () => {
     const input = { ...fixture(), groups: [{ children: [{ $ref: '#/groups/0' }, { $ref: '#/texts/0' }] }], body: { children: [{ $ref: '#/groups/0' }, { $ref: '#/texts/0' }] } }
     expect(normalizeDoclingDocument(input).items.filter(i => i.kind === 'heading')).toHaveLength(1)
   })
-  it('allows an empty deployment setting and rejects invalid timeouts and credential URLs', () => {
-    expect(normalizeDoclingSettings(null).baseUrl).toBe('')
+  it('numbers each kind independently in reading order and validates its type prefix', () => {
+    const input = { ...fixture(), texts: [...fixture().texts, { text: 'Second paragraph', prov: prov() }], body: { children: [
+      { $ref: '#/texts/0' }, { $ref: '#/pictures/0' }, { $ref: '#/texts/3' }, { $ref: '#/texts/2' }, { $ref: '#/tables/0' },
+    ] } }
+    const document = normalizeDoclingDocument(input)
+    expect(document.items.map(i => i.id)).toEqual(['heading-1', 'picture-1', 'text-1', 'formula-1', 'table-1'])
+    expect(isParsedDocument(document)).toBe(true)
+    document.items[0].id = 'picture-2'
+    expect(isParsedDocument(document)).toBe(false)
+  })
+  it('defaults unset deployment settings to the managed Docling endpoint and rejects invalid URLs', () => {
+    expect(DEFAULT_DOCLING_SETTINGS.baseUrl).toBe('http://127.0.0.1:5001')
+    expect(normalizeDoclingSettings(null).baseUrl).toBe(DEFAULT_DOCLING_SETTINGS.baseUrl)
+    expect(normalizeDoclingSettings({ baseUrl: '' }).baseUrl).toBe(DEFAULT_DOCLING_SETTINGS.baseUrl)
     expect(() => normalizeDoclingSettings({ baseUrl: 'file:///tmp/model' })).toThrow('HTTP')
     expect(() => normalizeDoclingSettings({ timeoutSeconds: 2 })).toThrow('超时')
     expect(() => normalizeDoclingSettings({ baseUrl: 'https://user:secret@host' })).toThrow('凭据')

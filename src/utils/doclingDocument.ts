@@ -19,9 +19,14 @@ export interface DocumentItem {
 }
 export interface ParsedDocument { version: 1; items: DocumentItem[]; warnings: string[] }
 export interface DoclingRecord { document: ParsedDocument; sourceHash: string; configHash: string; cached: boolean }
+export function assignTypedDocumentIds(document: ParsedDocument): ParsedDocument {
+  const counts: Record<DocumentItem['kind'], number> = { text: 0, heading: 0, picture: 0, table: 0, formula: 0 }
+  for (const item of document.items) item.id = `${item.kind}-${++counts[item.kind]}`
+  return document
+}
 export const DOCLING_SETTINGS_KEY = 'docling_config'
 export const DEFAULT_DOCLING_SETTINGS: DoclingSettings = {
-  baseUrl: '', apiKey: '', timeoutSeconds: 600, ocr: true, formula: true,
+  baseUrl: 'http://127.0.0.1:5001', apiKey: '', timeoutSeconds: 600, ocr: true, formula: true,
 }
 export const IMAGE_DATA_PATTERN = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024
@@ -34,7 +39,7 @@ const string = (value: unknown): string => typeof value === 'string' ? value : '
 
 export function normalizeDoclingSettings(value: unknown): DoclingSettings {
   const raw = object(value)
-  let baseUrl = string(raw.baseUrl).trim().replace(/\/+$/, '')
+  let baseUrl = (string(raw.baseUrl).trim() || DEFAULT_DOCLING_SETTINGS.baseUrl).replace(/\/+$/, '')
   if (baseUrl) {
     let url: URL
     try { url = new URL(baseUrl) } catch { throw new Error('Docling 服务地址必须是有效的 HTTP/HTTPS 地址') }
@@ -43,6 +48,7 @@ export function normalizeDoclingSettings(value: unknown): DoclingSettings {
     if (url.search || url.hash) throw new Error('请填写 Docling 服务根地址，不包含查询参数或片段')
     baseUrl = url.href.replace(/\/+$/, '')
   }
+  if (baseUrl === 'http://localhost:5001') baseUrl = DEFAULT_DOCLING_SETTINGS.baseUrl
   const timeoutSeconds = raw.timeoutSeconds ?? DEFAULT_DOCLING_SETTINGS.timeoutSeconds
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 1800) throw new Error('Docling 超时必须为 30–1800 秒')
   return { baseUrl, apiKey: string(raw.apiKey).trim(), timeoutSeconds, ocr: raw.ocr !== false, formula: raw.formula !== false }
@@ -53,7 +59,8 @@ export function isParsedDocument(value: unknown): value is ParsedDocument {
   return doc.version === 1 && Array.isArray(doc.items) && Array.isArray(doc.warnings)
     && doc.warnings.every((w: unknown) => typeof w === 'string') && doc.items.every((item: unknown) => {
       const i = object(item)
-      return typeof i.id === 'string' && /^item-\d+$/.test(i.id) && ['text', 'heading', 'picture', 'table', 'formula'].includes(i.kind)
+      return typeof i.id === 'string' && ['text', 'heading', 'picture', 'table', 'formula'].includes(i.kind)
+        && (i.id.startsWith(`${i.kind}-`) && /^[1-9]\d*$/.test(i.id.slice(i.kind.length + 1)) || /^item-\d+$/.test(i.id))
         && typeof i.text === 'string' && typeof i.caption === 'string'
         && Array.isArray(i.pages) && i.pages.every((p: unknown) => Number.isInteger(p) && Number(p) >= 0)
         && Array.isArray(i.regions) && i.regions.every((r: SourceRegion) => r && Number.isInteger(r.page) && r.page >= 0
@@ -67,6 +74,7 @@ export function isParsedDocument(value: unknown): value is ParsedDocument {
 export function normalizeDoclingDocument(input: unknown): ParsedDocument {
   const doc = object(input)
   const items: DocumentItem[] = []
+  const counts: Record<DocumentItem['kind'], number> = { text: 0, heading: 0, picture: 0, table: 0, formula: 0 }
   const warnings: string[] = []
   const visited = new Set<string>()
   const resolve = (ref: unknown): JsonObject => {
@@ -110,7 +118,7 @@ export function normalizeDoclingDocument(input: unknown): ParsedDocument {
     const uri = string(object(raw.image).uri)
     const images: DocumentImage[] = IMAGE_DATA_PATTERN.test(uri) && uri.length <= MAX_IMAGE_BYTES * 1.4 ? [{ data: uri, ...(pages[0] !== undefined ? { page: pages[0] } : {}) }] : []
     if (!text && !caption && kind === 'text') return
-    items.push({ id: `item-${items.length}`, kind, text, caption, pages, regions: regions(raw), images })
+    items.push({ id: `${kind}-${++counts[kind]}`, kind, text, caption, pages, regions: regions(raw), images })
   }
   for (const ref of list(object(doc.body).children)) visit(resolve(ref), string(ref?.$ref))
   // Old or partial exports can omit body. Include unreferenced evidence without duplicating references.

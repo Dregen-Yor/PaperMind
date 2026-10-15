@@ -4,6 +4,7 @@ import { join } from 'path'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
 import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
+import { createAbstractCheckpointRepository } from './abstractCheckpoint'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
@@ -318,6 +319,7 @@ export const treeApi = {
 }
 
 export const getDoclingRepository = () => createDoclingRepository(db)
+export const getAbstractCheckpointRepository = () => createAbstractCheckpointRepository(db)
 
 /** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
 export function exportAll(opts: { includeApiKey?: boolean } = {}) {
@@ -369,7 +371,7 @@ export function importAll(data: any) {
 
   // 2) DB 事务：清空旧行并按依赖顺序写入
   const insert = db.transaction(() => {
-    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
