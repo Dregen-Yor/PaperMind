@@ -9,6 +9,7 @@ export interface SourceRef {
 }
 
 export interface EvidenceRegion { x: number; y: number; width: number; height: number }
+const MAX_EVIDENCE_QUOTE = 2048
 
 export function validEvidenceRegion(value: unknown): value is EvidenceRegion {
   if (!value || typeof value !== 'object') return false
@@ -21,7 +22,7 @@ export function evidenceHref(paperId: string, page: number, region?: EvidenceReg
   const base = `paper-source:${encodeURIComponent(paperId)}:${page}`
   if (!validEvidenceRegion(region) && !quote) return base
   const box = validEvidenceRegion(region) ? [region.x, region.y, region.width, region.height].map(n => Number(n.toFixed(4))).join(',') : '-'
-  return `${base}:${box}:${encodeURIComponent(quote.slice(0, 240))}`
+  return `${base}:${box}:${encodeURIComponent(quote.slice(0, MAX_EVIDENCE_QUOTE))}`
 }
 
 export function parseEvidenceHref(href: string): Pick<SourceRef, 'paperId' | 'startPage' | 'endPage' | 'region' | 'quote'> | null {
@@ -35,7 +36,7 @@ export function parseEvidenceHref(href: string): Pick<SourceRef, 'paperId' | 'st
     const region = values?.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : undefined
     if (match[3] && match[3] !== '-' && !validEvidenceRegion(region)) return null
     const quote = match[4] ? decodeURIComponent(match[4]) : ''
-    if (quote.length > 240 || /[\u0000-\u001f]/.test(quote)) return null
+    if (quote.length > MAX_EVIDENCE_QUOTE || /[\u0000-\u001f]/.test(quote)) return null
     return { paperId, startPage: page, endPage: page, ...(region ? { region } : {}), ...(quote ? { quote } : {}) }
   } catch { return null }
 }
@@ -56,7 +57,7 @@ export function sourceFromRouteQuery(paperId: string, query: Record<string, unkn
     const region = values.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : undefined
     if (validEvidenceRegion(region)) ref.region = region
   }
-  if (typeof query.quote === 'string' && query.quote.length <= 240 && !/[\u0000-\u001f]/.test(query.quote)) ref.quote = query.quote
+  if (typeof query.quote === 'string' && query.quote.length <= MAX_EVIDENCE_QUOTE && !/[\u0000-\u001f]/.test(query.quote)) ref.quote = query.quote
   return ref
 }
 
@@ -77,7 +78,7 @@ export function normalizeSourceList(raw: unknown): SourceRef[] {
         ...(typeof startPage === 'number' ? { startPage } : {}),
         ...(typeof endPage === 'number' ? { endPage } : {}),
         ...(validEvidenceRegion(region) ? { region } : {}),
-        ...(typeof quote === 'string' && quote.length <= 240 && !/[\u0000-\u001f]/.test(quote) ? { quote } : {}),
+        ...(typeof quote === 'string' && quote.length <= MAX_EVIDENCE_QUOTE && !/[\u0000-\u001f]/.test(quote) ? { quote } : {}),
       })
     }
   }

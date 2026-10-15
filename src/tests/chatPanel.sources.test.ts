@@ -23,6 +23,12 @@ async function mountPanel(conversation: Conversation) {
 }
 
 describe('来源芯片交互（#1）', () => {
+  it('hides the redundant source footer for an existing /abstract report', async () => {
+    const conversation = conv([{ label: 'Paper · p1', paperId: 'p1', startPage: 0, endPage: 0 }])
+    conversation.messages.unshift({ id: 'command', role: 'user', content: '/abstract', timestamp: 0 })
+    wrapper = await mountPanel(conversation)
+    expect(wrapper.find('.msg-sources').exists()).toBe(false)
+  })
   it('可跳转芯片点击发出 open-source（含 page 0-based）', async () => {
     wrapper = await mountPanel(conv([{ label: 'Pages 11–15: R1', paperId: 'p1', startPage: 10, endPage: 14 }]))
     const chip = wrapper.find('.source-chip.is-jumpable')

@@ -13,7 +13,7 @@
         <el-button v-if="!conversation" class="start-conversation" @click="$emit('create')">开始新对话</el-button>
       </div>
 
-      <div v-for="msg in conversation?.messages" :key="msg.id" class="message" :class="msg.role">
+      <div v-for="(msg, index) in conversation?.messages" :key="msg.id" class="message" :class="msg.role">
         <div class="msg-avatar" aria-hidden="true">
           <span v-if="msg.role === 'user'">你</span>
           <img v-else :src="paperMindMarkLight" alt="" />
@@ -32,7 +32,7 @@
             <span>回答已达长度上限</span>
             <el-button size="small" text :loading="continuing === msg.id" @click="continueMsg(msg)">继续</el-button>
           </div>
-          <div v-if="msg.sources?.length" class="msg-sources">
+          <div v-if="msg.sources?.length && conversation?.messages[index - 1]?.content.trim().toLowerCase() !== '/abstract'" class="msg-sources">
             <span class="sources-label"><el-icon aria-hidden="true"><Link /></el-icon> 参考来源</span>
             <span
               v-for="(s, i) in msg.sources"
