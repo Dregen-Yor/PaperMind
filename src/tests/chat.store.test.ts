@@ -227,7 +227,10 @@ describe('useChatStore', () => {
   it('/abstract uses Docling evidence with the current chat model', async () => {
     const document = (await import('../utils/doclingDocument')).normalizeDoclingDocument({ texts: [{ text: 'Transformer evidence' }] })
     vi.mocked(window.db.docling.convert).mockResolvedValue({ document, sourceHash: 'a'.repeat(64), configHash: 'b'.repeat(64), cached: true })
-    vi.mocked(window.db.paper.get).mockResolvedValue({ id: 'paper-1', title: 'Attention Is All You Need' })
+    vi.mocked(window.db.paper.get).mockResolvedValue({
+      id: 'paper-1', title: 'Attention Is All You Need', authors: [], abstract: '', year: 2017,
+      tags: [], status: 'unread', fileName: 'paper.pdf', fileHash: '', addedAt: 1, knowledgeBaseId: 'default',
+    })
     global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: 'A transformer paper summary.' }, finish_reason: 'stop' }] }) })
     const store = useChatStore()
     await store.init()

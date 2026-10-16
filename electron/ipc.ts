@@ -8,6 +8,7 @@ import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
 import { backupFileName } from '../src/utils/exportSanitize'
 import { previewControllerForSender } from './webPreview'
 import { paperContentUrl } from './paperProtocol'
+import type { IpcHandlers } from '../src/types/ipcContract'
 
 // Register all IPC handlers. Each channel maps to a db api call.
 // Renderer invokes via window.db.* (see preload.ts).
@@ -22,7 +23,7 @@ export function registerIpc() {
   })
   const abstractCheckpoint = getAbstractCheckpointRepository()
   const paperAbstract = getPaperAbstractRepository()
-  const handlers: Record<string, (...args: any[]) => any> = {
+  const handlers = {
     'docling:convert': (_e, id) => docling.convert(id),
     'docling:save': (_e, id, record) => docling.save(id, record),
     'docling:readAsset': (_e, id) => docling.readAsset(id),
@@ -55,13 +56,13 @@ export function registerIpc() {
     'chat:listConversations': () => chatApi.listConversations(),
     'chat:createConversation': (_e, conv) => chatApi.createConversation(conv),
     'chat:updateConversation': (_e, id, patch) => chatApi.updateConversation(id, patch),
-    'chat:removeConversation': (_e, id) => chatApi.removeConversation(id),
+    'chat:removeConversation': (_e, id) => { chatApi.removeConversation(id) },
     'chat:addMessage': (_e, msg) => chatApi.addMessage(msg),
     'chat:updateMessage': (_e, id, patch) => chatApi.updateMessage(id, patch),
     // highlights
     'highlight:listByPaper': (_e, paperId) => highlightApi.listByPaper(paperId),
     'highlight:create': (_e, h) => highlightApi.create(h),
-    'highlight:remove': (_e, id) => highlightApi.remove(id),
+    'highlight:remove': (_e, id) => { highlightApi.remove(id) },
     'highlight:update': (_e, id, patch) => highlightApi.update(id, patch),
     // settings
     'settings:get': (_e, key) => settingsApi.get(key),
@@ -88,8 +89,8 @@ export function registerIpc() {
     'tree:list': (_e, filter) => treeApi.list(filter),
     'tree:get': (_e, paperId) => treeApi.get(paperId),
     'tree:set': (_e, paperId, record) => treeApi.set(paperId, record),
-    'tree:remove': (_e, paperId) => treeApi.remove(paperId),
-  }
+    'tree:remove': (_e, paperId) => { treeApi.remove(paperId) },
+  } satisfies IpcHandlers<Electron.IpcMainInvokeEvent>
 
   for (const [channel, fn] of Object.entries(handlers)) {
     ipcMain.handle(channel, fn)

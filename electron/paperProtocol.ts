@@ -5,6 +5,10 @@ import { pathToFileURL } from 'url'
 const scheme = 'papermind-paper:'
 const validPaperId = /^[A-Za-z0-9:_-]+$/
 
+export function isSafePaperId(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 128 && validPaperId.test(value)
+}
+
 export function paperContentUrl(id: string): string {
   return `papermind-paper://paper/${encodeURIComponent(id)}`
 }
@@ -16,14 +20,14 @@ export function paperIdFromUrl(value: string): string | null {
     const path = url.pathname.slice(1)
     if (!path || path.includes('/')) return null
     const id = decodeURIComponent(path)
-    return validPaperId.test(id) ? id : null
+    return isSafePaperId(id) ? id : null
   } catch { return null }
 }
 
 // A DB row alone is not permission to serve an arbitrary local path. Serve only
 // an existing PDF under the app's paper directory, with no symlink escape.
 export function storedPaperFilePath(id: string, filePath: string | null | undefined, papersDir: string): string | null {
-  if (!validPaperId.test(id) || !filePath) return null
+  if (!isSafePaperId(id) || !filePath) return null
   const expected = resolve(join(papersDir, `${id}.pdf`))
   if (resolve(filePath) !== expected) return null
   try {

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'path'
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, lstatSync } from 'fs'
 import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
 import { createAbstractCheckpointRepository } from './abstractCheckpoint'
@@ -9,12 +9,25 @@ import { createPaperAbstractRepository, PAPER_ABSTRACT_PIPELINE_VERSION } from '
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
-import { storedPaperFilePath } from '../paperProtocol'
-import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun'
+import { isSafePaperId, storedPaperFilePath } from '../paperProtocol'
 import { migrateChatRuns } from './chatRun'
+import { validateBackupInput, validatePaperCreateInput, validateChatMessageWrite, validateChatMessagePatch } from './backupValidation'
+import type { KnowledgeBase } from '../../src/types/paper'
 
 let db: Database.Database
 let papersDir: string
+
+function checkedPaperDestination(id: unknown, allowExisting: boolean): string {
+  if (!isSafePaperId(id)) throw new Error('论文 ID 无效')
+  const filePath = join(papersDir, `${id}.pdf`)
+  try {
+    const stat = lstatSync(filePath)
+    if (!allowExisting || !stat.isFile()) throw new Error('论文 PDF 目标路径无效')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  return filePath
+}
 
 export function initDb() {
   const userData = app.getPath('userData')
@@ -89,7 +102,7 @@ export function initDb() {
 
 // ---------- Knowledge Bases ----------
 export const kbApi = {
-  list: () => db.prepare('SELECT * FROM knowledge_bases ORDER BY created_at ASC').all(),
+  list: () => db.prepare('SELECT id, name, description, color, created_at AS createdAt FROM knowledge_bases ORDER BY created_at ASC').all() as KnowledgeBase[],
   create: (kb: { id: string; name: string; description: string; color: string; createdAt: number }) => {
     db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(kb.id, kb.name, kb.description, kb.color, kb.createdAt)
@@ -97,8 +110,11 @@ export const kbApi = {
   },
   remove: (id: string) => {
     // delete paper files on disk first
-    const papers = db.prepare('SELECT file_path FROM papers WHERE knowledge_base_id = ?').all(id) as { file_path: string }[]
-    for (const p of papers) if (existsSync(p.file_path)) unlinkSync(p.file_path)
+    const papers = db.prepare('SELECT id, file_path FROM papers WHERE knowledge_base_id = ?').all(id) as { id: string; file_path: string }[]
+    for (const paper of papers) {
+      const file = storedPaperFilePath(paper.id, paper.file_path, papersDir)
+      if (file) unlinkSync(file)
+    }
     db.prepare('DELETE FROM knowledge_bases WHERE id = ?').run(id)
   },
 }
@@ -118,17 +134,25 @@ export const paperApi = {
     return storedPaperFilePath(id, row?.file_path, papersDir)
   },
   // create: fileData is base64; we write it to disk and store only the path
-  create: (paper: any) => {
-    const filePath = join(papersDir, `${paper.id}.pdf`)
+  create: (paper: unknown) => {
+    validatePaperCreateInput(paper)
+    if (!db.prepare('SELECT 1 FROM knowledge_bases WHERE id = ?').get(paper.knowledgeBaseId)) throw new Error('论文知识库不存在')
+    if (db.prepare('SELECT 1 FROM papers WHERE id = ?').get(paper.id)) throw new Error('论文 ID 已存在')
+    const filePath = checkedPaperDestination(paper.id, false)
     writeFileSync(filePath, Buffer.from(paper.fileData, 'base64'))
-    db.prepare(`INSERT INTO papers
-      (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, file_hash, added_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      paper.id, paper.knowledgeBaseId, paper.title, JSON.stringify(paper.authors ?? []),
-      paper.abstract, paper.year, JSON.stringify(paper.tags ?? []), paper.status,
-      paper.fileName, filePath, paper.fileHash ?? '', paper.addedAt,
-    )
-    return { ...paper, filePath }
+    try {
+      db.prepare(`INSERT INTO papers
+        (id, knowledge_base_id, title, authors, abstract, year, tags, status, file_name, file_path, file_hash, added_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        paper.id, paper.knowledgeBaseId, paper.title, JSON.stringify(paper.authors),
+        paper.abstract, paper.year, JSON.stringify(paper.tags), paper.status,
+        paper.fileName, filePath, paper.fileHash ?? '', paper.addedAt,
+      )
+    } catch (error) {
+      if (existsSync(filePath)) unlinkSync(filePath)
+      throw error
+    }
+    return { ...paper, fileHash: paper.fileHash ?? '', filePath }
   },
   update: (id: string, patch: any) => {
     const current = db.prepare('SELECT * FROM papers WHERE id = ?').get(id) as any
@@ -147,7 +171,8 @@ export const paperApi = {
   },
   remove: (id: string) => {
     const row = db.prepare('SELECT file_path FROM papers WHERE id = ?').get(id) as any
-    if (row?.file_path && existsSync(row.file_path)) unlinkSync(row.file_path)
+    const file = storedPaperFilePath(id, row?.file_path, papersDir)
+    if (file) unlinkSync(file)
     db.prepare('DELETE FROM papers WHERE id = ?').run(id)
   },
   // read PDF binary as base64 for the renderer
@@ -199,11 +224,15 @@ export const chatApi = {
       .run(patch.title ?? cur.title, patch.paperIds ? JSON.stringify(patch.paperIds) : cur.paper_ids, id)
   },
   removeConversation: (id: string) => db.prepare('DELETE FROM conversations WHERE id = ?').run(id),
-  addMessage: (msg: ChatMessageWrite) => {
+  addMessage: (input: unknown) => {
+    validateChatMessageWrite(input)
+    const msg = input
     db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, run_id, run_status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.error ?? '', msg.truncated ? 1 : 0, msg.context ?? '', msg.runId ?? '', msg.runStatus ?? '', msg.timestamp)
   },
-  updateMessage: (id: string, patch: ChatMessagePatch) => {
+  updateMessage: (id: string, input: unknown) => {
+    validateChatMessagePatch(input)
+    const patch = input
     const cur = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as any
     if (!cur) return
     db.prepare('UPDATE messages SET content = ?, sources = ?, error = ?, truncated = ?, context = ?, run_id = ?, run_status = ? WHERE id = ?')
@@ -239,7 +268,7 @@ export const highlightApi = {
   create: (h: { id: string; paperId: string; text: string; pageNum: number; color: string; note: string; startOffset?: number; endOffset?: number; createdAt: number }) => {
     db.prepare('INSERT INTO highlights (id, paper_id, text, page_num, color, note, start_offset, end_offset, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(h.id, h.paperId, h.text, h.pageNum, h.color, h.note, h.startOffset ?? 0, h.endOffset ?? 0, h.createdAt)
-    return h
+    return { ...h, startOffset: h.startOffset ?? 0, endOffset: h.endOffset ?? 0 }
   },
   remove: (id: string) => db.prepare('DELETE FROM highlights WHERE id = ?').run(id),
   update: (id: string, patch: { note?: string }) => {
@@ -361,15 +390,19 @@ export function exportAll(opts: { includeApiKey?: boolean } = {}) {
 }
 
 export function clearAll() {
-  const papers = db.prepare('SELECT file_path FROM papers').all() as { file_path: string }[]
-  for (const p of papers) if (existsSync(p.file_path)) unlinkSync(p.file_path)
+  const papers = db.prepare('SELECT id, file_path FROM papers').all() as { id: string; file_path: string }[]
+  for (const paper of papers) {
+    const file = storedPaperFilePath(paper.id, paper.file_path, papersDir)
+    if (file) unlinkSync(file)
+  }
   db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
   db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
     .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
 }
 
-export function importAll(data: any) {
-  if (!data || data.version !== 1) throw new Error('不支持的备份文件格式（version 必须为 1）')
+export function importAll(input: unknown) {
+  validateBackupInput(input)
+  const data = input as Record<string, any>
 
   const kbs = Array.isArray(data.knowledgeBases) ? data.knowledgeBases : []
   const papers = Array.isArray(data.papers) ? data.papers : []
@@ -380,20 +413,16 @@ export function importAll(data: any) {
   const settings = Array.isArray(data.settings) ? data.settings : []
   const paperAbstracts = Array.isArray(data.paperAbstracts) ? data.paperAbstracts : []
 
-  // 1) 先写回备份中的 PDF（幂等覆盖，不影响旧库）
-  for (const p of papers) {
-    if (p && typeof p.id === 'string' && typeof p.fileData === 'string') {
-      writeFileSync(join(papersDir, `${p.id}.pdf`), Buffer.from(p.fileData, 'base64'))
-    }
-  }
+  for (const paper of papers) checkedPaperDestination(paper.id, true)
 
-  // 2) DB 事务：清空旧行并按依赖顺序写入
+  // First validate and insert in one transaction. A nested malformed record
+  // must not overwrite or create any PDF before SQLite rejects the backup.
   const insert = db.transaction(() => {
     db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(kb.id, kb.name, kb.description ?? '', kb.color ?? '#3db8a0', kb.createdAt ?? Date.now())
+        .run(kb.id, kb.name, kb.description ?? '', kb.color ?? '#3db8a0', kb.createdAt ?? kb.created_at ?? Date.now())
     }
 
     for (const p of papers) {
@@ -409,9 +438,11 @@ export function importAll(data: any) {
       db.prepare('INSERT INTO conversations (id, title, paper_ids, created_at) VALUES (?, ?, ?, ?)')
         .run(c.id, c.title, JSON.stringify(c.paperIds ?? []), c.createdAt ?? Date.now())
       for (const m of (c.messages ?? [])) {
-        db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, run_id, run_status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
           .run(m.id, c.id, m.role, m.content, JSON.stringify(m.sources ?? []),
-            m.error ?? '', m.truncated ? 1 : 0, m.context ?? '', m.timestamp ?? Date.now())
+            m.error ?? '', m.truncated ? 1 : 0, m.context ?? '', m.runId ?? '',
+            m.runStatus === 'preparing' || m.runStatus === 'streaming' ? 'interrupted' : m.runStatus ?? '',
+            m.timestamp ?? Date.now())
       }
     }
 
@@ -460,13 +491,20 @@ export function importAll(data: any) {
 
   insert()
 
-  // 3) 清理未被备份引用的孤儿 PDF
+  // The database is now known to accept every record in this backup.
+  for (const p of papers) {
+    if (typeof p.fileData === 'string') {
+      writeFileSync(join(papersDir, `${p.id}.pdf`), Buffer.from(p.fileData, 'base64'))
+    }
+  }
+
+  // 清理未被备份引用的孤儿 PDF
   const wanted = new Set(papers.filter((p: any) => typeof p.id === 'string').map((p: any) => `${p.id}.pdf`))
   for (const name of readdirSync(papersDir)) {
     if (name.endsWith('.pdf') && !wanted.has(name)) unlinkSync(join(papersDir, name))
   }
 
-  // 4) 保证至少一个知识库
+  // 保证至少一个知识库
   const kbCount = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
   if (kbCount === 0) {
     db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
