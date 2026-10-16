@@ -57,6 +57,11 @@ describe('导出脱敏（#5）', () => {
     expect(profiles[1]).toEqual({ name: 'x', apiKey: '' })
   })
 
+  it('redacts Docling credentials while preserving deployment settings', () => {
+    const rows = [{ key: 'docling_config', value: JSON.stringify({ apiKey: 'secret', baseUrl: 'http://localhost:5001', ocr: true }) }]
+    expect(JSON.parse(stripApiKeysFromSettings(rows)[0].value)).toEqual({ apiKey: '', baseUrl: 'http://localhost:5001', ocr: true })
+  })
+
   it('文件名带可读日期', () => {
     expect(backupFileName(new Date(2026, 8, 21, 15, 4))).toBe('papermind-backup-2026-09-21-1504.json')
   })

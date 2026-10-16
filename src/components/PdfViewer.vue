@@ -50,6 +50,8 @@ import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen, Delete } 
 import { usePaperStore, type Highlight } from '../stores/paper'
 import { mergeSegments, type HighlightSegment } from '../utils/highlightMerge'
 import { getHighlightRects, getTextNodes, type HighlightRect } from '../utils/pdfHighlight'
+import { findEvidenceRanges } from '../utils/pdfEvidence'
+import { validEvidenceRegion, type SourceRef } from '../utils/sourceRef'
 
 const props = defineProps<{ src: string; paperId: string }>()
 const paperStore = usePaperStore()
@@ -89,6 +91,17 @@ const resizeObserver = new ResizeObserver(() => {
 const selectedText = ref('')
 
 let pdfDoc: any = null
+let loadingTask: any = null
+interface PageLayout { num: number; top: number; height: number; div: HTMLElement }
+let pageLayouts: PageLayout[] = []
+let pageQueue: number[] = []
+const queuedPages = new Set<number>()
+const renderingPages = new Set<number>()
+const activeRenderTasks = new Set<{ cancel?: () => void }>()
+let queueRunningGeneration = 0
+const PAGE_GAP = 22
+const PAGE_TOP = 24
+const MAX_RENDERED_PAGES = 8
 let selectedRange: Range | null = null
 const selectionPopup = ref({ visible: false, x: 0, y: 0 })
 const highlights = ref<Highlight[]>([])
@@ -101,6 +114,7 @@ let undoTimer: ReturnType<typeof setTimeout> | undefined
 let documentGeneration = 0
 let popupGeneration = 0
 let pointerStart: { x: number; y: number; moved: boolean } | null = null
+let activeEvidence: SourceRef | null = null
 
 const highlightSegments = computed<HighlightSegment[]>(() => highlights.value.map(h => ({ page: h.pageNum, start: h.startOffset, end: h.endOffset })))
 
@@ -157,19 +171,57 @@ function repaintHighlights(page: number) {
   if (pageDiv?.querySelector('.text-layer span')) restorePageHighlights(pageDiv, page)
 }
 
+function paintEvidence(pageDiv: HTMLElement, source: SourceRef): HTMLElement | null {
+  const layer = pageDiv.querySelector<HTMLElement>('.pdf-evidence-layer')
+  const textLayer = pageDiv.querySelector<HTMLElement>('.text-layer')
+  if (!layer) return null
+  layer.replaceChildren()
+  const width = parseFloat(pageDiv.style.width)
+  const height = parseFloat(pageDiv.style.height)
+  const region = validEvidenceRegion(source.region) ? source.region : undefined
+  const regionRect = region ? {
+    left: region.x * width, top: region.y * height,
+    width: region.width * width, height: region.height * height,
+  } : undefined
+  if (source.quote && textLayer) {
+    const nodes = getTextNodes(textLayer)
+    const boundaries: number[] = []
+    let offset = 0
+    for (const node of nodes) { offset += node.length; boundaries.push(offset) }
+    const text = nodes.map(node => node.data).join('')
+    const matches = findEvidenceRanges(text, source.quote, boundaries)
+      .map(range => getHighlightRects(textLayer, range.start, range.end, pageDiv.getBoundingClientRect()))
+      .filter(rects => rects.length > 0 && (!regionRect || rects.every(rect => {
+        const centerX = rect.left + rect.width / 2
+        const centerY = rect.top + rect.height / 2
+        return centerX >= regionRect.left - 8 && centerX <= regionRect.left + regionRect.width + 8
+          && centerY >= regionRect.top - 8 && centerY <= regionRect.top + regionRect.height + 8
+      })))
+    if (matches.length === 1) drawRects(layer, matches[0], 'pdf-evidence-outline')
+  }
+  if (!layer.childElementCount && regionRect) drawRects(layer, [regionRect], 'pdf-evidence-outline')
+  return layer.firstElementChild as HTMLElement | null
+}
+
 async function renderPdf() {
   const generation = ++renderGeneration
   closePopup()
   hitRegions.clear()
+  for (const task of activeRenderTasks) task.cancel?.()
+  activeRenderTasks.clear()
+  pageQueue = []
+  queuedPages.clear()
+  renderingPages.clear()
   if (!pagesRef.value) return
+  const anchorPage = currentPage.value
+  const preservePosition = pageLayouts.length > 0
+  pageLayouts = []
   pagesRef.value.innerHTML = ''
-  const loadedPdf = await pdfjsLib.getDocument({ url: props.src }).promise
-  if (generation !== renderGeneration) return
-  pdfDoc = loadedPdf
+  if (!pdfDoc) return
   totalPages.value = pdfDoc.numPages
+  const firstPage = await pdfDoc.getPage(1)
+  if (generation !== renderGeneration) return
   if (fitOnNextRender && scrollRef.value?.clientWidth) {
-    const firstPage = await pdfDoc.getPage(1)
-    if (generation !== renderGeneration) return
     const pageWidth = firstPage.getViewport({ scale: 1 }).width
     const availableWidth = Math.max(scrollRef.value.clientWidth - 48, 160)
     scale.value = Math.min(availableWidth / pageWidth, 2)
@@ -178,13 +230,92 @@ async function renderPdf() {
     fitOnNextRender = false
   }
 
+  let top = PAGE_TOP
   for (let n = 1; n <= pdfDoc.numPages; n++) {
     if (generation !== renderGeneration) return
-    await renderPage(n, generation)
+    const page = n === 1 ? firstPage : await pdfDoc.getPage(n)
+    if (generation !== renderGeneration) return
+    const viewport = page.getViewport({ scale: scale.value })
+    const pageDiv = document.createElement('div')
+    pageDiv.className = 'pdf-page'
+    pageDiv.dataset.page = String(n)
+    pageDiv.style.width = `${viewport.width}px`
+    pageDiv.style.height = `${viewport.height}px`
+    pagesRef.value.appendChild(pageDiv)
+    pageLayouts.push({ num: n, top, height: viewport.height, div: pageDiv })
+    top += viewport.height + PAGE_GAP
+    // Start the first visible page while dimensions for later pages load.
+    if (n === 1 && !preservePosition) queuePage(1, true)
+  }
+  if (preservePosition && scrollRef.value) {
+    scrollRef.value.scrollTop = pageLayouts[Math.min(anchorPage - 1, pageLayouts.length - 1)]?.top ?? 0
+  }
+  scheduleNearbyPages()
+}
+
+function queuePage(num: number, priority = false) {
+  const layout = pageLayouts[num - 1]
+  if (!layout || layout.div.dataset.rendered === 'true' || renderingPages.has(num)) return
+  if (queuedPages.has(num)) {
+    if (priority) pageQueue = [num, ...pageQueue.filter(value => value !== num)]
+  } else {
+    queuedPages.add(num)
+    if (priority) pageQueue.unshift(num)
+    else pageQueue.push(num)
+  }
+  pumpPageQueue(renderGeneration)
+}
+
+function pumpPageQueue(generation: number) {
+  if (queueRunningGeneration === generation) return
+  queueRunningGeneration = generation
+  void (async () => {
+    try {
+      while (generation === renderGeneration && pageQueue.length) {
+        const num = pageQueue.shift()!
+        queuedPages.delete(num)
+        renderingPages.add(num)
+        try { await renderPage(num, generation) }
+        catch (error) {
+          if (generation === renderGeneration) console.error(`PDF 第 ${num} 页渲染失败`, error)
+        } finally { renderingPages.delete(num) }
+      }
+    } finally {
+      if (queueRunningGeneration === generation) queueRunningGeneration = 0
+    }
+  })()
+}
+
+function scheduleNearbyPages() {
+  const scrollTop = scrollRef.value?.scrollTop ?? 0
+  const viewportHeight = scrollRef.value?.clientHeight || 800
+  const center = scrollTop + viewportHeight / 2
+  const near = pageLayouts
+    .filter(page => page.top + page.height >= scrollTop - viewportHeight
+      && page.top <= scrollTop + viewportHeight * 2)
+    .sort((a, b) => Math.abs(a.top + a.height / 2 - center) - Math.abs(b.top + b.height / 2 - center))
+  for (const page of near) queuePage(page.num)
+}
+
+function trimDistantPages() {
+  const scrollTop = scrollRef.value?.scrollTop ?? 0
+  const center = scrollTop + (scrollRef.value?.clientHeight || 800) / 2
+  const rendered = pageLayouts.filter(page => page.div.dataset.rendered === 'true')
+  if (rendered.length <= MAX_RENDERED_PAGES) return
+  const keep = new Set(rendered
+    .sort((a, b) => Math.abs(a.top + a.height / 2 - center) - Math.abs(b.top + b.height / 2 - center))
+    .slice(0, MAX_RENDERED_PAGES).map(page => page.num))
+  for (const page of rendered) {
+    if (keep.has(page.num)) continue
+    page.div.replaceChildren()
+    delete page.div.dataset.rendered
+    hitRegions.delete(page.num)
   }
 }
 
 async function renderPage(num: number, generation: number) {
+  const pageDiv = pageLayouts[num - 1]?.div
+  if (!pageDiv || generation !== renderGeneration || pageDiv.dataset.rendered === 'true') return
   const page = await pdfDoc.getPage(num)
   if (generation !== renderGeneration) return
   const viewport = page.getViewport({ scale: scale.value })
@@ -192,12 +323,6 @@ async function renderPage(num: number, generation: number) {
   // CSS pixels. Rendering both at the same size makes PDF pages blurry on
   // Retina/high-DPI displays because the browser has to upscale the bitmap.
   const outputScale = window.devicePixelRatio || 1
-
-  const pageDiv = document.createElement('div')
-  pageDiv.className = 'pdf-page'
-  pageDiv.dataset.page = String(num)
-  pageDiv.style.width = `${viewport.width}px`
-  pageDiv.style.height = `${viewport.height}px`
 
   const canvas = document.createElement('canvas')
   canvas.width = Math.floor(viewport.width * outputScale)
@@ -213,18 +338,24 @@ async function renderPage(num: number, generation: number) {
   highlightLayerDiv.setAttribute('aria-hidden', 'true')
   pageDiv.appendChild(highlightLayerDiv)
 
+  const evidenceLayerDiv = document.createElement('div')
+  evidenceLayerDiv.className = 'pdf-evidence-layer'
+  evidenceLayerDiv.setAttribute('aria-hidden', 'true')
+  pageDiv.appendChild(evidenceLayerDiv)
+
   // Text layer for selection
   const textLayerDiv = document.createElement('div')
   textLayerDiv.className = 'text-layer'
   textLayerDiv.style.setProperty('--total-scale-factor', String(viewport.scale))
   pageDiv.appendChild(textLayerDiv)
 
-  pagesRef.value!.appendChild(pageDiv)
-
   const transform = outputScale === 1
     ? undefined
     : [outputScale, 0, 0, outputScale, 0, 0]
-  await page.render({ canvasContext: ctx, viewport, transform }).promise
+  const task = page.render({ canvasContext: ctx, viewport, transform })
+  activeRenderTasks.add(task)
+  try { await task.promise }
+  finally { activeRenderTasks.delete(task) }
   if (generation !== renderGeneration) return
 
   const textContent = await page.getTextContent()
@@ -238,21 +369,20 @@ async function renderPage(num: number, generation: number) {
   if (generation !== renderGeneration) return
 
   restorePageHighlights(pageDiv, num)
+  pageDiv.dataset.rendered = 'true'
+  if (activeEvidence?.startPage === num - 1) paintEvidence(pageDiv, activeEvidence)
 }
 
 function onScroll() {
   closePopup()
   if (!scrollRef.value) return
-  const pages = pagesRef.value?.querySelectorAll('.pdf-page')
-  if (!pages) return
   const scrollTop = scrollRef.value.scrollTop
-  const containerH = scrollRef.value.clientHeight
-  for (const p of Array.from(pages)) {
-    const el = p as HTMLElement
-    if (el.offsetTop <= scrollTop + containerH / 2) {
-      currentPage.value = parseInt(el.dataset.page!)
-    }
+  const center = scrollTop + (scrollRef.value.clientHeight || 800) / 2
+  for (const page of pageLayouts) {
+    if (page.top <= center) currentPage.value = page.num
   }
+  scheduleNearbyPages()
+  trimDistantPages()
 }
 
 async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
@@ -267,11 +397,33 @@ async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
     el = pages.querySelector<HTMLElement>(`[data-page="${num}"]`)
   }
   if (!el) return
+  currentPage.value = num
+  queuePage(num, true)
   el.scrollIntoView({ behavior: 'smooth' })
   if (flash) {
     el.classList.add('page-flash')
     setTimeout(() => el.classList.remove('page-flash'), 1400)
   }
+}
+
+async function scrollToEvidence(source: SourceRef) {
+  if (source.paperId !== props.paperId || source.startPage === undefined) return
+  const page = source.startPage + 1
+  activeEvidence = source.region || source.quote ? source : null
+  pagesRef.value?.querySelectorAll('.pdf-evidence-layer').forEach(layer => layer.replaceChildren())
+  if (!activeEvidence) {
+    await scrollToPage(page)
+    return
+  }
+  await scrollToPage(page, { flash: false })
+  const deadline = Date.now() + 5000
+  let pageDiv = pagesRef.value?.querySelector<HTMLElement>(`[data-page="${page}"][data-rendered="true"]`)
+  while (!pageDiv && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 60))
+    pageDiv = pagesRef.value?.querySelector<HTMLElement>(`[data-page="${page}"][data-rendered="true"]`)
+  }
+  if (!pageDiv || activeEvidence !== source) return
+  paintEvidence(pageDiv, source)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 function prevPage() { if (currentPage.value > 1) scrollToPage(--currentPage.value) }
@@ -505,11 +657,24 @@ async function highlightSelection() {
 async function loadDocument() {
   const generation = ++documentGeneration
   renderGeneration++
+  for (const task of activeRenderTasks) task.cancel?.()
+  activeRenderTasks.clear()
+  const previousTask = loadingTask
+  const previousDocument = pdfDoc
+  loadingTask = null
+  pdfDoc = null
+  void (previousTask?.destroy?.() ?? previousDocument?.destroy?.())
+  pageLayouts = []
+  pageQueue = []
+  queuedPages.clear()
+  pagesRef.value?.replaceChildren()
+  currentPage.value = 1
   closePopup()
   dismissFeedback()
   highlightBusy.value = true
   highlights.value = []
   hitRegions.clear()
+  activeEvidence = null
   fitOnNextRender = fitMode
   try {
     const stored = await paperStore.getHighlights(props.paperId)
@@ -521,7 +686,21 @@ async function loadDocument() {
   }
   if (generation !== documentGeneration) return
   highlightBusy.value = false
-  await renderPdf()
+  try {
+    const task = pdfjsLib.getDocument({ url: props.src })
+    loadingTask = task
+    const loaded = await task.promise
+    if (generation !== documentGeneration) {
+      void task.destroy?.()
+      return
+    }
+    pdfDoc = loaded
+    await renderPdf()
+  } catch (error) {
+    if (generation === documentGeneration) {
+      highlightError.value = `打开 PDF 失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
 }
 
 watch(() => [props.src, props.paperId], () => { void loadDocument() })
@@ -543,6 +722,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   documentGeneration++
   renderGeneration++
+  for (const task of activeRenderTasks) task.cancel?.()
+  activeRenderTasks.clear()
+  void (loadingTask?.destroy?.() ?? pdfDoc?.destroy?.())
+  loadingTask = null
+  pdfDoc = null
   clearUndoTimer()
   resizeObserver.disconnect()
   if (resizeTimer) clearTimeout(resizeTimer)
@@ -554,7 +738,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeyDown)
 })
 
-defineExpose({ scrollToPage })
+defineExpose({ scrollToPage, scrollToEvidence })
 </script>
 
 <style scoped>
@@ -660,6 +844,20 @@ defineExpose({ scrollToPage })
 :deep(.pdf-highlight-overlay) {
   position: absolute;
   background: #ffe66a;
+}
+:deep(.pdf-evidence-layer) {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+:deep(.pdf-evidence-outline) {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #d4a42e;
+  border-radius: 3px;
+  background: rgb(245 205 105 / 19%);
+  box-shadow: 0 0 0 2px rgb(255 247 220 / 80%);
 }
 :deep(.pdf-highlight-focus) {
   position: absolute;

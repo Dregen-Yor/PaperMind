@@ -19,9 +19,14 @@ import {
 } from '../utils/semanticTree'
 import type { PaperTreeRecord } from '../types/db'
 import type { SourceRef } from '../utils/sourceRef'
+import type { ChatRunStatus } from '../types/chatRun'
+import type { Message, Conversation } from '../types/chat'
+import type { PaperAbstractReport } from '../utils/paperAbstract'
+import { DEFAULT_DOCLING_SETTINGS, DOCLING_SETTINGS_KEY, normalizeDoclingSettings, type DoclingSettings } from '../utils/doclingDocument'
+import { prepareDoclingPaper } from '../utils/doclingPdf'
+import { abstractRunKey, generateDoclingAbstract } from '../utils/doclingAbstract'
 import {
   ABSTRACT_MODEL,
-  summarizeAcademicText,
 } from '../utils/abstractSummarizer'
 
 export interface LLMProfile {
@@ -38,33 +43,61 @@ export interface LLMProfile {
   systemPrompt: string
 }
 
-export interface Message {
+export type { Message, Conversation } from '../types/chat'
+
+interface ActiveChatRun {
   id: string
-  role: 'user' | 'assistant'
-  content: string
-  /** 结构化来源：芯片文案 + 跳转所需的论文与页区间（#1） */
-  sources?: SourceRef[]
-  timestamp: number
-  /** 非空表示这一轮失败，渲染失败卡（#2） */
-  error?: string
-  /** finish_reason=length：回答被截断（#3） */
-  truncated?: boolean
-  /** 用户划选原文（externalContext）：重试时按原上下文重放，不退回检索（#2） */
-  context?: string
-  /** 流式渲染中的占位气泡标记（仅内存态，不落库）（#6） */
-  streaming?: boolean
+  conversationId: string
+  assistant: Message
+  controller: AbortController
+  requestedStop: boolean
+  replacing: boolean
+  flushTimer?: ReturnType<typeof setTimeout>
+  lastSavedContent: string
+  writes: Promise<void>
+  writeError?: unknown
 }
 
-export interface Conversation {
-  id: string
-  title: string
+interface AbstractResume {
+  kind: 'docling-abstract'
   paperIds: string[]
-  messages: Message[]
-  createdAt: number
+  index: number
+  previous: string
+}
+function readAbstractResume(context?: string): AbstractResume | undefined {
+  try {
+    const state = JSON.parse(context || '')
+    if (state?.kind === 'docling-abstract' && Array.isArray(state.paperIds) && state.paperIds.length
+      && state.paperIds.every((id: unknown) => typeof id === 'string' && id.length > 0)
+      && Number.isInteger(state.index) && state.index >= 0 && state.index < state.paperIds.length
+      && typeof state.previous === 'string') return state
+  } catch { /* Older messages do not have continuation metadata. */ }
 }
 
 /** 单次 LLM 请求上限：超时即失败，避免无声挂死（#2）。 */
 const LLM_REQUEST_TIMEOUT_MS = 120_000
+
+class RunCancelledError extends Error {
+  constructor() {
+    super('已停止生成')
+    this.name = 'RunCancelledError'
+  }
+}
+
+function throwIfCancelled(signal: AbortSignal) {
+  if (signal.aborted) throw new RunCancelledError()
+}
+
+async function awaitOrCancel<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  throwIfCancelled(signal)
+  let onAbort: () => void = () => {}
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new RunCancelledError())
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try { return await Promise.race([work, cancelled]) }
+  finally { signal.removeEventListener('abort', onAbort) }
+}
 
 /** 输出上限的「不限制」哨兵：0 表示不向上游发送该参数。 */
 export const UNLIMITED_MAX_TOKENS = 0
@@ -207,15 +240,25 @@ async function readErrorBody(res: Response): Promise<string> {
  * 带超时的 fetch。`AbortSignal.timeout` 触发时抛出的是英文 DOMException，
  * 原样落进失败轮的 `error` 会中英混杂，这里统一映射为中文提示（#2）。
  */
-async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: number, userSignal?: AbortSignal): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  const signal = userSignal ? AbortSignal.any([timeoutSignal, userSignal]) : timeoutSignal
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+    return await fetch(url, { ...init, signal })
   } catch (error) {
+    if (userSignal?.aborted) throw error
     if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
       throw new Error('请求超时，请检查网络后重试')
     }
     throw error
   }
+}
+
+function cancelStreamOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): () => void {
+  const cancel = () => { void reader.cancel().catch(() => {}) }
+  signal?.addEventListener('abort', cancel, { once: true })
+  if (signal?.aborted) cancel()
+  return () => signal?.removeEventListener('abort', cancel)
 }
 
 const PROMPT_TEMPLATES = [
@@ -232,91 +275,106 @@ export { PROMPT_TEMPLATES }
 const LLM_STREAM_TIMEOUT_MS = 300_000
 
 /** 解析 OpenAI 兼容 SSE 流：增量回调 + 末尾 finish_reason（#6）。 */
-async function readOpenAiStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+async function readOpenAiStream(res: Response, onToken: (token: string) => void, signal?: AbortSignal): Promise<{ content: string; truncated: boolean }> {
   if (!res.body) throw new Error('流式响应不可用')
   const reader = res.body.getReader()
+  const stopObserving = cancelStreamOnAbort(reader, signal)
   const decoder = new TextDecoder()
   let buffer = ''
   let content = ''
   let truncated = false
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith('data:')) continue
-      const payload = trimmed.slice(5).trim()
-      if (!payload || payload === '[DONE]') continue
-      let parsed: any
-      try { parsed = JSON.parse(payload) } catch { continue }
-      const delta = parsed.choices?.[0]?.delta?.content
-      if (typeof delta === 'string' && delta) { content += delta; onToken(delta) }
-      if (parsed.choices?.[0]?.finish_reason === 'length') truncated = true
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      signal?.throwIfAborted()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        const payload = trimmed.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        let parsed: any
+        try { parsed = JSON.parse(payload) } catch { continue }
+        const delta = parsed.choices?.[0]?.delta?.content
+        if (typeof delta === 'string' && delta) { content += delta; onToken(delta) }
+        if (parsed.choices?.[0]?.finish_reason === 'length') truncated = true
+      }
     }
-  }
+  } finally { stopObserving() }
+  signal?.throwIfAborted()
   if (!content.trim()) throw new Error('模型返回了空响应')
   return { content, truncated }
 }
 
 /** 解析 Anthropic SSE 流（content_block_delta / message_delta）（#6）。 */
-async function readAnthropicStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+async function readAnthropicStream(res: Response, onToken: (token: string) => void, signal?: AbortSignal): Promise<{ content: string; truncated: boolean }> {
   if (!res.body) throw new Error('流式响应不可用')
   const reader = res.body.getReader()
+  const stopObserving = cancelStreamOnAbort(reader, signal)
   const decoder = new TextDecoder()
   let buffer = ''
   let content = ''
   let truncated = false
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith('data:')) continue
-      let parsed: any
-      try { parsed = JSON.parse(trimmed.slice(5).trim()) } catch { continue }
-      if (parsed.type === 'content_block_delta' && typeof parsed.delta?.text === 'string') {
-        content += parsed.delta.text
-        onToken(parsed.delta.text)
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      signal?.throwIfAborted()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        let parsed: any
+        try { parsed = JSON.parse(trimmed.slice(5).trim()) } catch { continue }
+        if (parsed.type === 'content_block_delta' && typeof parsed.delta?.text === 'string') {
+          content += parsed.delta.text
+          onToken(parsed.delta.text)
+        }
+        if (parsed.type === 'message_delta' && parsed.delta?.stop_reason === 'max_tokens') truncated = true
       }
-      if (parsed.type === 'message_delta' && parsed.delta?.stop_reason === 'max_tokens') truncated = true
     }
-  }
+  } finally { stopObserving() }
+  signal?.throwIfAborted()
   if (!content.trim()) throw new Error('模型返回了空响应')
   return { content, truncated }
 }
 
 /** 解析 Ollama NDJSON 流（#6）。 */
-async function readOllamaStream(res: Response, onToken: (token: string) => void): Promise<{ content: string; truncated: boolean }> {
+async function readOllamaStream(res: Response, onToken: (token: string) => void, signal?: AbortSignal): Promise<{ content: string; truncated: boolean }> {
   if (!res.body) throw new Error('流式响应不可用')
   const reader = res.body.getReader()
+  const stopObserving = cancelStreamOnAbort(reader, signal)
   const decoder = new TextDecoder()
   let buffer = ''
   let content = ''
   let truncated = false
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      let parsed: any
-      try { parsed = JSON.parse(trimmed) } catch { continue }
-      if (typeof parsed.message?.content === 'string' && parsed.message.content) {
-        content += parsed.message.content
-        onToken(parsed.message.content)
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      signal?.throwIfAborted()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        let parsed: any
+        try { parsed = JSON.parse(trimmed) } catch { continue }
+        if (typeof parsed.message?.content === 'string' && parsed.message.content) {
+          content += parsed.message.content
+          onToken(parsed.message.content)
+        }
+        if (parsed.done && parsed.done_reason === 'length') truncated = true
       }
-      if (parsed.done && parsed.done_reason === 'length') truncated = true
     }
-  }
+  } finally { stopObserving() }
+  signal?.throwIfAborted()
   if (!content.trim()) throw new Error('模型返回了空响应')
   return { content, truncated }
 }
@@ -353,6 +411,12 @@ export const useChatStore = defineStore('chat', () => {
   const indexingPapers = ref<Set<string>>(new Set())
   const indexedPapers = ref<Set<string>>(new Set())
   const abstractToken = ref('')
+  const doclingConfig = ref<DoclingSettings>({ ...DEFAULT_DOCLING_SETTINGS })
+  const doclingConfigError = ref('')
+  const abstractProgress = ref<Record<string, string>>({})
+  const paperAbstractJobs = new Map<string, Promise<PaperAbstractReport>>()
+  const activeChatRuns = new Map<string, ActiveChatRun>()
+  const startingChatRuns = new Set<string>()
   /**
    * 轻量语义树总开关；默认关闭（方案 §6.3：语义树退出默认检索路径）。
    * 仅保留旧数据维护 API，不参与产品检索，设置页不再提供开关。
@@ -449,6 +513,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     indexedPapers.value = new Set(currentIds)
     abstractToken.value = (await window.db.settings.get('huggingface_token')) ?? ''
+    try { doclingConfig.value = normalizeDoclingSettings(await window.db.settings.get(DOCLING_SETTINGS_KEY)) }
+    catch (error) { doclingConfigError.value = error instanceof Error ? error.message : 'Docling 配置无效' }
     // 语义树默认关闭（方案 §6.3）：只有显式存过「开」才开启，未存过一律保持关闭。
     // 值经 IPC 边界 JSON 往返（settings.get 是 JSON.parse(row.value)），设置页写入的是
     // 布尔、历史或外部来源可能是字符串，两种编码都认——只认其中一种会把用户的开启吞掉
@@ -513,6 +579,13 @@ export const useChatStore = defineStore('chat', () => {
     await refreshTreeReadyPapers()
   }
 
+  async function setDoclingConfig(value: DoclingSettings) {
+    const config = normalizeDoclingSettings(value)
+    await window.db.settings.set(DOCLING_SETTINGS_KEY, { ...config })
+    doclingConfig.value = config
+    doclingConfigError.value = ''
+  }
+
   async function setAbstractToken(token: string) {
     abstractToken.value = token.trim()
     await window.db.settings.set('huggingface_token', abstractToken.value)
@@ -540,10 +613,10 @@ export const useChatStore = defineStore('chat', () => {
    *
    * `opts` 供后续流式输出使用（#6），本任务先保留形参。
    */
-  async function requestCompletion(
+  async function requestCompletionRaw(
     messages: { role: string; content: string }[],
     profileOrId?: string | LLMProfile,
-    opts: { onToken?: (token: string) => void } = {},
+    opts: { onToken?: (token: string) => void; timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<{ content: string; truncated: boolean }> {
     const profile = resolveLlmProfile(profileOrId)
     // 落库值可能是备份导入进来的任意数字，发送前统一合法化（0 = 不限制）
@@ -560,9 +633,9 @@ export const useChatStore = defineStore('chat', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+      }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
-      if (opts.onToken) return readOllamaStream(res, opts.onToken)
+      if (opts.onToken) return readOllamaStream(res, opts.onToken, opts.signal)
       const data = await res.json()
       if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
       return { content: data.message.content, truncated: data.done_reason === 'length' }
@@ -601,7 +674,7 @@ export const useChatStore = defineStore('chat', () => {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify(body),
-        }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+        }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
         if (res.ok) break
         const detail = await readErrorBody(res)
         // 兜底上限被模型上限拒掉时降级重试：老 Claude（claude-3-opus / haiku）只接受 4096，
@@ -615,7 +688,7 @@ export const useChatStore = defineStore('chat', () => {
         requested = ANTHROPIC_LEGACY_MAX_TOKENS
         anthropicTokenCeilings.set(ceilingKey, ANTHROPIC_LEGACY_MAX_TOKENS)
       }
-      if (opts.onToken) return readAnthropicStream(res, opts.onToken)
+      if (opts.onToken) return readAnthropicStream(res, opts.onToken, opts.signal)
       const data = await res.json()
       const content = data.content?.[0]?.text
       if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
@@ -638,21 +711,43 @@ export const useChatStore = defineStore('chat', () => {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-    }, opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS)
+    }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
-    if (opts.onToken) return readOpenAiStream(res, opts.onToken)
+    if (opts.onToken) return readOpenAiStream(res, opts.onToken, opts.signal)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
     if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
     return { content, truncated: data.choices?.[0]?.finish_reason === 'length' }
   }
 
+  async function requestCompletion(
+    messages: { role: string; content: string }[],
+    profileOrId?: string | LLMProfile,
+    opts: { onToken?: (token: string) => void; timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ content: string; truncated: boolean }> {
+    try {
+      const result = await requestCompletionRaw(messages, profileOrId, opts)
+      if (opts.signal?.aborted) throw new RunCancelledError()
+      return result
+    }
+    catch (error) {
+      if (opts.signal?.aborted) throw new RunCancelledError()
+      const message = error instanceof Error ? error.message : String(error)
+      const name = error instanceof Error ? error.name : ''
+      if (name === 'AbortError' || name === 'TimeoutError' || /The user aborted a request/i.test(message)) {
+        throw new Error('请求超时，请检查网络后重试')
+      }
+      throw error
+    }
+  }
+
   /** 只要文本的调用路径（索引、标题、查询改写等）继续走这个薄包装。 */
   async function callLLM(
     messages: { role: string; content: string }[],
     profileOrId?: string | LLMProfile,
+    signal?: AbortSignal,
   ): Promise<string> {
-    return (await requestCompletion(messages, profileOrId)).content
+    return (await requestCompletion(messages, profileOrId, { signal })).content
   }
 
   // ---------- E-k5 model and indexes ----------
@@ -957,30 +1052,107 @@ export const useChatStore = defineStore('chat', () => {
     role: 'user' | 'assistant',
     content: string,
     sources?: SourceRef[],
-    extra?: { error?: string; truncated?: boolean; context?: string },
-  ) {
+    extra?: { error?: string; truncated?: boolean; context?: string; runId?: string; runStatus?: ChatRunStatus },
+  ): Promise<Message | undefined> {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) return
-    if (role === 'assistant' && !content.trim() && !extra?.error) throw new Error('拒绝写入空回答')
+    if (role === 'assistant' && !content.trim() && !extra?.error && extra?.runStatus !== 'preparing') throw new Error('拒绝写入空回答')
     const msg: Message = { id: crypto.randomUUID(), role, content, sources, timestamp: Date.now(), ...extra }
     conv.messages.push(msg)
-    await window.db.chat.addMessage({
-      id: msg.id, conversationId: convId, role, content,
-      sources: sources ?? [], timestamp: msg.timestamp,
-      error: extra?.error, truncated: extra?.truncated, context: extra?.context,
-    })
+    try {
+      await window.db.chat.addMessage({
+        id: msg.id, conversationId: convId, role, content,
+        sources: sources ?? [], timestamp: msg.timestamp,
+        error: extra?.error, truncated: extra?.truncated, context: extra?.context,
+        runId: extra?.runId, runStatus: extra?.runStatus,
+      })
+    } catch (error) {
+      const index = conv.messages.findIndex(item => item.id === msg.id)
+      if (index !== -1) conv.messages.splice(index, 1)
+      throw error
+    }
+    return conv.messages[conv.messages.length - 1]
   }
 
   async function updateMessage(
     convId: string,
     messageId: string,
-    patch: { content?: string; sources?: SourceRef[]; error?: string; truncated?: boolean; context?: string },
+    patch: { content?: string; sources?: SourceRef[]; error?: string; truncated?: boolean; context?: string; runId?: string; runStatus?: ChatRunStatus },
   ) {
     const conv = conversations.value.find(c => c.id === convId)
     const msg = conv?.messages.find(m => m.id === messageId)
     if (!conv || !msg) return
     Object.assign(msg, patch)
     await window.db.chat.updateMessage(messageId, patch)
+  }
+
+  function queueRunPatch(run: ActiveChatRun, patch: Parameters<typeof updateMessage>[2]): Promise<void> {
+    Object.assign(run.assistant, patch)
+    // A failed partial write must not prevent the terminal status from being saved.
+    run.writes = run.writes.catch(() => {}).then(() => window.db.chat.updateMessage(run.assistant.id, patch))
+    return run.writes
+  }
+
+  function persistRunContent(run: ActiveChatRun): Promise<void> {
+    if (run.flushTimer) clearTimeout(run.flushTimer)
+    run.flushTimer = undefined
+    const content = run.assistant.content
+    if (content === run.lastSavedContent) return run.writes.catch(() => {})
+    run.lastSavedContent = content
+    return queueRunPatch(run, { content })
+  }
+
+  function scheduleRunContentSave(run: ActiveChatRun) {
+    if (run.flushTimer) return
+    run.flushTimer = setTimeout(() => {
+      void persistRunContent(run).catch(error => {
+        run.writeError = error
+        run.controller.abort()
+      })
+    }, 350)
+  }
+
+  async function beginChatRun(conv: Conversation, existing?: Message): Promise<ActiveChatRun> {
+    if (activeChatRuns.has(conv.id)) throw new Error('这段对话正在生成回答，请先停止当前任务')
+    const id = crypto.randomUUID()
+    const assistant = existing ?? await addMessage(conv.id, 'assistant', '', undefined, { runId: id, runStatus: 'preparing' })
+    if (!assistant) throw new Error('无法创建回答')
+    const run: ActiveChatRun = {
+      id, conversationId: conv.id, assistant, controller: new AbortController(), requestedStop: false,
+      replacing: !!existing, lastSavedContent: assistant.content, writes: Promise.resolve(),
+    }
+    activeChatRuns.set(conv.id, run)
+    if (existing) {
+      const previous = {
+        runId: assistant.runId, runStatus: assistant.runStatus,
+        error: assistant.error, truncated: assistant.truncated,
+      }
+      try { await queueRunPatch(run, { runId: id, runStatus: 'preparing', error: '', truncated: false }) }
+      catch (error) {
+        Object.assign(assistant, previous)
+        activeChatRuns.delete(conv.id)
+        throw error
+      }
+    }
+    return run
+  }
+
+  async function finishChatRun(run: ActiveChatRun, status: Extract<ChatRunStatus, 'failed' | 'cancelled'>, error: unknown) {
+    await persistRunContent(run)
+    await queueRunPatch(run, {
+      content: run.assistant.content,
+      runStatus: status,
+      error: status === 'failed' ? errorMessageOf(error) : '',
+    })
+    run.assistant.streaming = false
+  }
+
+  async function stopConversationRun(convId: string): Promise<boolean> {
+    const run = activeChatRuns.get(convId)
+    if (!run) return false
+    run.requestedStop = true
+    run.controller.abort()
+    return true
   }
 
   async function removeConversation(id: string) {
@@ -1033,52 +1205,86 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---------- /abstract ----------
 
-  async function readPaperPages(paperId: string): Promise<string[]> {
-    const stored = await window.db.index.get(paperId)
-    if (stored) return JSON.parse(stored.pagesJson)
-
-    const base64 = await window.db.paper.readFile(paperId)
-    if (!base64) throw new Error('找不到论文 PDF 文件')
-    return extractPages(base64)
-  }
-
-  /**
-   * `/abstract` 的来源只有论文标题与 id（摘要没有页码，芯片不可跳页）。
-   */
-  async function generateAbstract(conv: Conversation): Promise<{ content: string; sources: SourceRef[] }> {
-    if (conv.paperIds.length === 0) throw new Error('请先在当前对话中选择至少一篇论文')
-    if (!abstractToken.value) throw new Error('请先在设置中填写 Hugging Face Token')
-
+  async function generateAbstract(conv: Conversation, resume?: AbstractResume): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
+    const paperIds = [...(resume?.paperIds ?? conv.paperIds)]
+    if (!paperIds.length) throw new Error('请先在当前对话中选择至少一篇论文')
+    if (doclingConfigError.value) throw new Error(doclingConfigError.value)
+    if (!doclingConfig.value.baseUrl) throw new Error('请先在设置中填写 Docling 服务地址')
+    const profile = { ...chatProfile.value }
+    if (!profile.model.trim()) throw new Error('请先配置当前对话模型')
     const sections: string[] = []
     const sources: SourceRef[] = []
-    for (const paperId of conv.paperIds) {
-      const [paper, pages] = await Promise.all([
-        window.db.paper.get(paperId),
-        readPaperPages(paperId),
-      ])
-      const title = paper?.title || `论文 ${sources.length + 1}`
-      const text = pages.join('\n\n')
-      const summary = await summarizeAcademicText(text, abstractToken.value)
-      sections.push(conv.paperIds.length > 1 ? `## ${title}\n\n${summary}` : summary)
-      sources.push({ label: title, paperId })
-    }
+    let truncated = false
+    let context = ''
+    const progress = (label: string) => { abstractProgress.value[conv.id] = label }
+    try {
+      for (let index = resume?.index ?? 0; index < paperIds.length; index++) {
+        const paperId = paperIds[index]
+        const previous = resume?.index === index ? resume.previous : ''
+        const paper = await window.db.paper.get(paperId)
+        const title = paper?.title || paperId
+        const document = await prepareDoclingPaper(paperId, progress)
+        const profileIdentity = JSON.stringify({ provider: profile.provider, model: profile.model, baseUrl: profile.baseUrl,
+          temperature: profile.temperature, maxTokens: profile.maxTokens, topK: profile.topK, systemPrompt: profile.systemPrompt })
+        const runKey = await abstractRunKey(document, title, profileIdentity, previous)
+        const checkpoint = {
+          load: (stage: string, position: number) => window.db.abstractCheckpoint.get(paperId, runKey, stage, position),
+          save: (stage: string, position: number, content: string) => window.db.abstractCheckpoint.save(paperId, runKey, stage, position, content),
+        }
+        const result = await generateDoclingAbstract(document, paperId, title, messages => {
+          const configured = messages.map(message => ({ ...message }))
+          configured[0].content = profile.systemPrompt + '\n\n' + configured[0].content
+          return requestCompletion(configured, profile, { timeoutMs: 300_000 })
+        }, progress, previous, checkpoint)
+        sections.push(paperIds.length > 1 && !previous ? `## ${title}\n\n${result.content}` : result.content)
+        sources.push(...(result.sources.length ? result.sources.map(ref => ({ ...ref, label: `${title} · ${ref.label}` })) : [{ label: title, paperId }]))
+        truncated ||= result.truncated
+        if (result.truncated) {
+          context = JSON.stringify({ kind: 'docling-abstract', paperIds, index, previous: (previous + '\n\n' + result.content).slice(-9000) } satisfies AbstractResume)
+          break
+        }
+      }
+      return { content: sections.join('\n\n---\n\n'), sources, truncated, context }
+    } finally { delete abstractProgress.value[conv.id] }
+  }
 
-    return {
-      content: sections.join('\n\n---\n\n'),
-      sources,
-    }
+  /** The summary tab reuses the exact Docling/LLM pipeline without adding chat messages. */
+  async function generatePaperAbstract(paperId: string, force = false): Promise<PaperAbstractReport> {
+    const ongoing = paperAbstractJobs.get(paperId)
+    if (ongoing) return ongoing
+    const task = (async () => {
+      const saved = await window.db.paperAbstract.get(paperId)
+      if (saved && !saved.truncated && !force) return saved
+      const conv: Conversation = { id: `paper-abstract:${paperId}`, title: '', paperIds: [paperId], messages: [], createdAt: 0 }
+      const resume: AbstractResume | undefined = saved?.truncated && !force
+        ? { kind: 'docling-abstract', paperIds: [paperId], index: 0, previous: saved.content.slice(-9000) }
+        : undefined
+      const result = await generateAbstract(conv, resume)
+      const sources = [...new Map([...(resume ? saved?.sources ?? [] : []), ...result.sources]
+        .map(source => [`${source.paperId}:${source.startPage}:${source.label}`, source])).values()]
+      return window.db.paperAbstract.save({ paperId,
+        content: resume ? `${saved!.content}\n\n${result.content}` : result.content,
+        sources, truncated: result.truncated })
+    })()
+    paperAbstractJobs.set(paperId, task)
+    try { return await task } finally { paperAbstractJobs.delete(paperId) }
   }
 
   // ---------- Send Message (RAG 3-call pipeline) ----------
 
-  async function collectIndexedPapers(conv: Conversation): Promise<{ papers: IndexedPaper[]; paperIds: string[] }> {
+  async function collectIndexedPapers(conv: Conversation, signal?: AbortSignal): Promise<{ papers: IndexedPaper[]; paperIds: string[] }> {
     const paperIds = [...conv.paperIds]
     const papers: IndexedPaper[] = []
-    const records = await window.db.paper.list()
+    const records = signal
+      ? await awaitOrCancel(window.db.paper.list(), signal)
+      : await window.db.paper.list()
     for (const paperId of paperIds) {
+      signal && throwIfCancelled(signal)
       indexingPapers.value.add(paperId)
       try {
-        const { index, pages } = await ek5Store.load(paperId)
+        const { index, pages } = signal
+          ? await awaitOrCancel(ek5Store.load(paperId), signal)
+          : await ek5Store.load(paperId)
         indexedPapers.value.add(paperId)
         papers.push({ ek5: index, pages, paperLabel: records.find(p => p.id === paperId)?.title ?? paperId,
           tree: { nodeId: 'root', title: '', summary: '', startPage: 0, endPage: pages.length - 1, nodes: [] } })
@@ -1086,6 +1292,7 @@ export const useChatStore = defineStore('chat', () => {
         throw new Error(`${records.find(p => p.id === paperId)?.title ?? paperId}：${errorMessageOf(e)}`)
       } finally { indexingPapers.value.delete(paperId) }
     }
+    signal && throwIfCancelled(signal)
     return { papers, paperIds }
   }
 
@@ -1100,66 +1307,54 @@ export const useChatStore = defineStore('chat', () => {
   async function generateReply(
     conv: Conversation,
     userMessage: string,
+    run: ActiveChatRun,
     context?: string,
     historyEnd?: number,
-    opts?: { writeBack?: string },
-  ) {
+  ): Promise<{ answer: string; sources: SourceRef[]; truncated: boolean }> {
+    const signal = run.controller.signal
     let papers: IndexedPaper[] = []
     // 保留 paperIds：来源 refs 需要「第 i 篇检索结果」对应的论文 id（ids 与 papers 一一对齐）
     let indexedIds: string[] = []
     if (!context && conv.paperIds.length > 0) {
-      const collected = await collectIndexedPapers(conv)
+      const collected = await collectIndexedPapers(conv, signal)
       papers = collected.papers
       indexedIds = collected.paperIds
     }
     // 历史不含当前提问：默认排除最后一条（刚追加的用户消息）；重试时由调用方给 historyEnd
-    const history = conv.messages.slice(0, historyEnd ?? -1).map(m => ({ role: m.role, content: m.content }))
+    const history = conv.messages.slice(0, historyEnd ?? -2).map(m => ({ role: m.role, content: m.content }))
     // 生成回调负责把 finish_reason 带回来：截断的回答要能提示「已达长度上限」并续写（#3）
     let lastTruncated = false
-    let placeholder: Message | undefined
-    // 重试是原地更新目标消息：直接把它当流式气泡，失败卡先撤下（错误态由外层 catch 兜底写回）
-    const target = opts?.writeBack ? conv.messages.find(m => m.id === opts.writeBack) : undefined
-    const clearStreaming = () => {
-      if (placeholder) {
-        const at = conv.messages.indexOf(placeholder)
-        if (at !== -1) conv.messages.splice(at, 1)
-        placeholder = undefined
-      }
-      if (target) target.streaming = false
-    }
     const generate = async (msgs: { role: string; content: string }[]) => {
-      let sink: Message
-      if (target) {
-        target.content = ''
-        target.error = ''
-        target.streaming = true
-        sink = target
-      } else {
-        conv.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: '', timestamp: Date.now(), streaming: true })
-        // 从数组读回响应式代理再写入：直接改本地原始对象不经代理，逐 token 不会触发渲染
-        placeholder = conv.messages[conv.messages.length - 1]
-        sink = placeholder
-      }
-      try {
-        // 流式增量直接写进气泡；成功后仍走各自的写回分支一次性落库
-        const outcome = await requestCompletion(msgs, undefined, { onToken: token => { sink.content += token } })
-        lastTruncated = outcome.truncated
-        return outcome.content
-      } finally {
-        clearStreaming()
-      }
+      throwIfCancelled(signal)
+      run.assistant.streaming = true
+      await queueRunPatch(run, { runStatus: 'streaming' })
+      const outcome = await requestCompletion(msgs, undefined, {
+        signal,
+        onToken: token => {
+          if (signal.aborted) return
+          if (run.replacing) {
+            run.assistant.content = ''
+            run.replacing = false
+          }
+          run.assistant.content += token
+          scheduleRunContentSave(run)
+        },
+      })
+      lastTruncated = outcome.truncated
+      return outcome.content
     }
-    const result = await runRagPipeline(
+    const result = await awaitOrCancel(runRagPipeline(
       papers,
       userMessage,
       history,
-      (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
+      (prompt: string) => callLLM([{ role: 'user', content: prompt }], undefined, signal),
       generate,
       chatProfile.value.systemPrompt,
       { externalContext: context, retrievalMode: 'ek5', maxContextChars: retrievalContextChars.value },
       // collectIndexedPapers 已等待 E-k5 所需的模型与索引。
       passageDeps(),
-    )
+    ), signal)
+    throwIfCancelled(signal)
     // 来源只在这里构造一次，首次提问与重试两条写回分支共用。
     // `retrievals[i].selected[j]` 与 `retrievals[i].sources[j]` 一一对齐
     // （两条检索路径都是 `sources = selected.map(formatSource)`），缺件时退化为纯标签。
@@ -1172,40 +1367,77 @@ export const useChatStore = defineStore('chat', () => {
             : { label }
         }))
       : []
-    // 重试是原地更新失败轮；首次提问才追加新消息
-    if (opts?.writeBack) {
-      await updateMessage(conv.id, opts.writeBack, {
+    return { answer: result.answer, sources: sourceRefs, truncated: lastTruncated }
+  }
+
+  async function settleChatRun(
+    run: ActiveChatRun,
+    work: () => Promise<{ answer: string; sources?: SourceRef[]; truncated: boolean }>,
+  ): Promise<string> {
+    try {
+      const result = await work()
+      throwIfCancelled(run.controller.signal)
+      await persistRunContent(run)
+      await queueRunPatch(run, {
         content: result.answer,
-        sources: sourceRefs.length ? sourceRefs : undefined,
+        sources: result.sources?.length ? result.sources : undefined,
         error: '',
-        truncated: lastTruncated,
+        truncated: result.truncated,
+        runStatus: 'completed',
       })
-    } else {
-      await addMessage(conv.id, 'assistant', result.answer, sourceRefs.length ? sourceRefs : undefined, { truncated: lastTruncated })
+      return result.answer
+    } catch (error) {
+      const failure = run.writeError ?? error
+      await finishChatRun(run, run.requestedStop ? 'cancelled' : 'failed', failure)
+      if (run.requestedStop) return run.assistant.content
+      throw failure
+    } finally {
+      if (run.flushTimer) clearTimeout(run.flushTimer)
+      run.assistant.streaming = false
+      if (activeChatRuns.get(run.conversationId)?.id === run.id) activeChatRuns.delete(run.conversationId)
     }
+  }
+
+  async function runChatReply(
+    conv: Conversation,
+    userMessage: string,
+    context?: string,
+    historyEnd?: number,
+    existing?: Message,
+  ): Promise<string> {
+    const run = await beginChatRun(conv, existing)
+    return settleChatRun(run, () => generateReply(conv, userMessage, run, context, historyEnd))
   }
 
   async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) throw new Error('Conversation not found')
+    if (activeChatRuns.has(convId) || startingChatRuns.has(convId)) throw new Error('这段对话正在生成回答，请先停止当前任务')
+
+    const normalized = userMessage.trim().toLowerCase()
+    if (!normalized.startsWith('/')) {
+      startingChatRuns.add(convId)
+      try {
+        await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
+        return await runChatReply(conv, userMessage, context)
+      } finally { startingChatRuns.delete(convId) }
+    }
 
     // 划选原文随用户消息持久化：失败轮重试时才能重放同一上下文（#2）
     await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
 
     try {
       // 命令只在本地识别一次：未知的 `/xxx` 直接回提示，不发模型（#8）
-      const normalized = userMessage.trim().toLowerCase()
       if (normalized.startsWith('/') && normalized !== '/abstract') {
         await addMessage(convId, 'assistant', `未识别的命令：${userMessage.trim()}。当前可用命令：/abstract（总结当前所选论文）。`)
         return userMessage
       }
       if (normalized === '/abstract') {
         const result = await generateAbstract(conv)
-        await addMessage(convId, 'assistant', result.content, result.sources)
+        await addMessage(convId, 'assistant', result.content, result.sources, { truncated: result.truncated, context: result.context })
         return result.content
       }
-      await generateReply(conv, userMessage, context)
-      return conv.messages[conv.messages.length - 1].content
+      return userMessage
     } catch (error) {
       await recordFailure(convId, error)
       throw error
@@ -1220,16 +1452,13 @@ export const useChatStore = defineStore('chat', () => {
     const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
     if (!target || !userMessage) return
 
+    if (userMessage.content.trim().toLowerCase() !== '/abstract') {
+      await runChatReply(conv, userMessage.content, userMessage.context || undefined, index - 1, target)
+      return
+    }
     try {
-      if (userMessage.content.trim().toLowerCase() === '/abstract') {
-        const result = await generateAbstract(conv)
-        await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '' })
-        return
-      }
-      // 单次写回：成功才落内容，失败由 catch 保持失败态，中途崩溃不留空窗。
-      // history 截至失败轮的前一条（index-1 即本次提问）：问题只作为 query 出现一次，
-      // 与首答的 slice(0, -1) 口径一致
-      await generateReply(conv, userMessage.content, userMessage.context || undefined, index - 1, { writeBack: messageId })
+      const result = await generateAbstract(conv)
+      await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '', truncated: result.truncated, context: result.context })
     } catch (error) {
       await updateMessage(convId, messageId, { content: '', error: errorMessageOf(error) })
       throw error
@@ -1244,33 +1473,53 @@ export const useChatStore = defineStore('chat', () => {
     const target = conv.messages[index]
     const userMessage = [...conv.messages.slice(0, index)].reverse().find(m => m.role === 'user')
     if (!userMessage) return
+    if (userMessage.content.trim().toLowerCase() === '/abstract') {
+      const paperIds = [...new Set((target.sources ?? []).map(source => source.paperId).filter((id): id is string => !!id))]
+      const resume = readAbstractResume(target.context) ?? { kind: 'docling-abstract', paperIds: paperIds.length ? paperIds : conv.paperIds, index: 0, previous: target.content }
+      const result = await generateAbstract(conv, resume)
+      const sources = [...new Map([...(target.sources ?? []), ...result.sources].map(ref => [`${ref.paperId}:${ref.startPage}`, ref])).values()]
+      await updateMessage(convId, messageId, { content: target.content + '\n\n' + result.content, sources, truncated: result.truncated, context: result.context })
+      return
+    }
 
     // 划选提问的原文已随用户消息持久化：与重试同构，直接重放该上下文并跳过
     // 论文收集/改写/评分——否则续写会换一个问题继续写，与首答语义分叉（#2）
-    const papers = userMessage.context ? [] : conv.paperIds.length > 0 ? (await collectIndexedPapers(conv)).papers : []
-    const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
-    // 改写阶段把「已输出的半截回答」也算作上一轮：与正常追问时的上下文一致，
-    // 否则续写往往会因历史轮数不足而跳过查询改写（#3）
-    const priorTurns = [...history, { role: 'assistant' as const, content: target.content }]
-    const retrieval = await retrieveRagContext(
-      papers,
-      userMessage.content,
-      priorTurns,
-      (prompt: string) => callLLM([{ role: 'user', content: prompt }]),
-      { externalContext: userMessage.context || undefined, retrievalMode: 'ek5', maxContextChars: retrievalContextChars.value },
-      // 续写与首答使用同一份 E-k5 索引和预算。
-      passageDeps(),
-    )
-    const messages = buildAnswerMessages(
-      retrieval.context,
-      '请接着上一条回答继续输出，从中断处直接续写，不要重复已经输出过的内容。',
-      priorTurns,
-      chatProfile.value.systemPrompt,
-    )
-    const outcome = await requestCompletion(messages)
-    await updateMessage(convId, messageId, {
-      content: target.content + outcome.content,
-      truncated: outcome.truncated,
+    const run = await beginChatRun(conv, target)
+    run.replacing = false
+    await settleChatRun(run, async () => {
+      const signal = run.controller.signal
+      const previous = target.content
+      const papers = userMessage.context ? [] : conv.paperIds.length > 0
+        ? (await collectIndexedPapers(conv, signal)).papers : []
+      const history = conv.messages.slice(0, index).map(m => ({ role: m.role, content: m.content }))
+      // Keep the saved partial answer in the prompt so continuation starts at its end.
+      const priorTurns = [...history, { role: 'assistant' as const, content: previous }]
+      const retrieval = await awaitOrCancel(retrieveRagContext(
+        papers,
+        userMessage.content,
+        priorTurns,
+        (prompt: string) => callLLM([{ role: 'user', content: prompt }], undefined, signal),
+        { externalContext: userMessage.context || undefined, retrievalMode: 'ek5', maxContextChars: retrievalContextChars.value },
+        passageDeps(),
+      ), signal)
+      throwIfCancelled(signal)
+      const messages = buildAnswerMessages(
+        retrieval.context,
+        '请接着上一条回答继续输出，从中断处直接续写，不要重复已经输出过的内容。',
+        priorTurns,
+        chatProfile.value.systemPrompt,
+      )
+      target.streaming = true
+      await queueRunPatch(run, { runStatus: 'streaming' })
+      const outcome = await requestCompletion(messages, undefined, {
+        signal,
+        onToken: token => {
+          if (signal.aborted) return
+          target.content += token
+          scheduleRunContentSave(run)
+        },
+      })
+      return { answer: previous + outcome.content, truncated: outcome.truncated }
     })
   }
 
@@ -1278,13 +1527,13 @@ export const useChatStore = defineStore('chat', () => {
     retrievalContextChars, setRetrievalContextChars, rebuildEk5Indexes, vectorModelState,
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
-    loaded, indexingPapers, indexedPapers, abstractToken,
+    loaded, indexingPapers, indexedPapers, abstractToken, doclingConfig, doclingConfigError, abstractProgress, setDoclingConfig,
     treeEnabled, treeReadyPapers, treeIndexingPapers,
     init,
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
     newConversation, addMessage, updateMessage, removeConversation, discardEmptyConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, retryMessage, continueMessage, requestCompletion,
+    sendMessage, retryMessage, continueMessage, stopConversationRun, generatePaperAbstract, requestCompletion,
     collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }

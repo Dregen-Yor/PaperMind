@@ -13,26 +13,32 @@
         <el-button v-if="!conversation" class="start-conversation" @click="$emit('create')">开始新对话</el-button>
       </div>
 
-      <div v-for="msg in conversation?.messages" :key="msg.id" class="message" :class="msg.role">
+      <div v-for="(msg, index) in conversation?.messages" :key="msg.id" class="message" :class="msg.role">
         <div class="msg-avatar" aria-hidden="true">
           <span v-if="msg.role === 'user'">你</span>
           <img v-else :src="paperMindMarkLight" alt="" />
         </div>
         <div class="msg-body">
           <div v-if="msg.role === 'assistant'" class="msg-author">PaperMind</div>
-          <div v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" v-html="renderMarkdown(msg.content)" />
+          <MarkdownContent v-if="msg.content" class="msg-content" :class="{ 'is-streaming': msg.streaming }" :content="msg.content" @open-source="emit('open-source', $event)" />
           <div v-if="msg.error" class="msg-error" role="alert">
             <div class="msg-error-text">{{ msg.error }}</div>
             <div class="msg-error-actions">
               <el-button size="small" :loading="retrying === msg.id" @click="retry(msg)">重试</el-button>
+              <el-button v-if="msg.content" size="small" text :loading="continuing === msg.id" aria-label="继续部分回答" @click="continueMsg(msg)">继续</el-button>
               <el-button size="small" text @click="router.push('/settings')">打开设置</el-button>
             </div>
+          </div>
+          <div v-if="msg.runStatus === 'cancelled' || msg.runStatus === 'interrupted'" class="msg-run-status" role="status">
+            <span>{{ msg.runStatus === 'cancelled' ? '已停止' : '上次运行已中断' }}{{ msg.content ? '，已保存部分回答' : '' }}</span>
+            <el-button v-if="msg.content" size="small" text :loading="continuing === msg.id" aria-label="继续部分回答" @click="continueMsg(msg)">继续</el-button>
+            <el-button size="small" text :loading="retrying === msg.id" @click="retry(msg)">重试</el-button>
           </div>
           <div v-if="msg.truncated && !msg.error" class="msg-truncated">
             <span>回答已达长度上限</span>
             <el-button size="small" text :loading="continuing === msg.id" @click="continueMsg(msg)">继续</el-button>
           </div>
-          <div v-if="msg.sources?.length" class="msg-sources">
+          <div v-if="msg.sources?.length && conversation?.messages[index - 1]?.content.trim().toLowerCase() !== '/abstract'" class="msg-sources">
             <span class="sources-label"><el-icon aria-hidden="true"><Link /></el-icon> 参考来源</span>
             <span
               v-for="(s, i) in msg.sources"
@@ -48,7 +54,7 @@
         </div>
       </div>
 
-      <div v-if="loading && !hasStreamingBubble" class="message assistant">
+      <div v-if="(loading || isRunActive || (conversation && chatStore.abstractProgress[conversation.id])) && !hasStreamingBubble" class="message assistant">
         <div class="msg-avatar" aria-hidden="true"><img :src="paperMindMarkLight" alt="" /></div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
@@ -67,10 +73,6 @@
             <button type="button" class="chip-close" aria-label="移除上下文" @click="pendingContext.splice(i, 1)"><el-icon><Close /></el-icon></button>
           </div>
         </div>
-        <button v-if="showAbstractCommand" type="button" class="command-option" @mousedown.prevent @click="choosePrompt('/abstract')">
-          <span class="command-name">/abstract</span>
-          <span class="command-desc">总结当前所选论文</span>
-        </button>
         <el-input
           ref="inputRef"
           v-model="input"
@@ -80,13 +82,14 @@
           name="chat-message"
           autocomplete="off"
           :disabled="!conversation"
-          :placeholder="conversation ? '围绕论文提问，或输入 / 查看命令…' : '新建对话后，即可在这里提问…'"
+          :placeholder="conversation ? '围绕论文提问…' : '新建对话后，即可在这里提问…'"
           aria-label="输入问题"
           @keydown.enter.exact="handleEnter"
         />
         <div class="composer-footer">
           <span class="composer-model" :title="chatStore.chatProfile?.model"><el-icon aria-hidden="true"><Cpu /></el-icon>{{ chatStore.chatProfile?.name || '对话模型' }}</span>
           <span class="input-hint">Enter 发送<span class="newline-hint">，Shift + Enter 换行</span></span>
+          <el-button v-if="isRunActive" size="small" text aria-label="停止生成" @click="stopRun">停止</el-button>
           <el-button type="primary" :loading="loading" :disabled="!input.trim() || !conversation" aria-label="发送消息" @click="send" class="send-btn"><el-icon><Top /></el-icon></el-button>
         </div>
       </div>
@@ -100,7 +103,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
-import { renderMarkdown } from '../utils/markdown'
+import MarkdownContent from './MarkdownContent.vue'
 import { isJumpable, type SourceRef } from '../utils/sourceRef'
 
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
@@ -130,6 +133,8 @@ const messagesRef = ref<HTMLElement>()
 const pendingContext = ref<string[]>([])
 /** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
 const preparationLabel = computed(() => {
+  const abstract = props.conversation && chatStore.abstractProgress[props.conversation.id]
+  if (abstract) return abstract
   const preparing = props.conversation?.paperIds.some(id => chatStore.indexingPapers.has(id))
   if (!preparing) return '正在生成回答'
   return chatStore.vectorModelState === 'loading'
@@ -137,10 +142,11 @@ const preparationLabel = computed(() => {
     : '正在准备论文索引…'
 })
 const hasStreamingBubble = computed(() => props.conversation?.messages.some(m => m.streaming) ?? false)
-const showAbstractCommand = computed(() => {
-  const value = input.value.trim().toLowerCase()
-  return value.startsWith('/') && '/abstract'.startsWith(value) && value !== '/abstract'
-})
+const isRunActive = computed(() => props.conversation?.messages.some(m => m.runStatus === 'preparing' || m.runStatus === 'streaming') ?? false)
+
+async function stopRun() {
+  if (props.conversation) await chatStore.stopConversationRun(props.conversation.id)
+}
 
 function addContext(text: string) {
   pendingContext.value.push(text)
@@ -245,6 +251,7 @@ async function send() {
 .msg-error { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--danger-dim); border-radius: 8px; background: var(--danger-dim); }
 .msg-error-text { font-size: 12px; line-height: 1.7; color: var(--danger); overflow-wrap: anywhere; }
 .msg-error-actions { display: flex; gap: 8px; margin-top: 8px; }
+.msg-run-status { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
 .message.user .msg-content { background: var(--bg-elevated); border: 1px solid var(--border); padding: 11px 15px; border-radius: 10px 3px 10px 10px; font-size: 13px; line-height: 1.8; }
 .msg-content :deep(code) {
   background: var(--bg-elevated);
@@ -367,10 +374,6 @@ async function send() {
 .input-hint { font-size: 10px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
 .send-btn { width: 32px; height: 32px; padding: 0; flex-shrink: 0; border-radius: 7px; }
 .send-btn .el-icon { font-size: 17px; }
-.command-option { position: absolute; z-index: 2; left: 0; right: 0; bottom: calc(100% + 8px); display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border-light); border-radius: 8px; background: var(--bg-surface); box-shadow: var(--shadow-card); cursor: pointer; text-align: left; }
-.command-option:hover { background: var(--bg-elevated); }
-.command-name { color: var(--accent); font-weight: 600; font-size: 12px; }
-.command-desc { color: var(--text-muted); font-size: 11px; }
 @container (max-width: 480px) {
   .newline-hint { display: none; }
   .composer-model { max-width: 50%; }

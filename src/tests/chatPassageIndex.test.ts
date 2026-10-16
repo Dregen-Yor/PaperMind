@@ -96,7 +96,11 @@ describe('E-k5 product index lifecycle', () => {
   it('continues with E-k5 and retains the previous answer', async () => {
     const store = useChatStore(), conv = await store.newConversation('t', ['p'])
     await store.sendMessage(conv.id, 'lasers')
-    global.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'continued' } }] }) })) as any
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: new Response('data: {"choices":[{"delta":{"content":"continued"}}]}\n\ndata: [DONE]\n\n').body,
+    })) as any
     await store.continueMessage(conv.id, conv.messages.at(-1)!.id)
     expect(conv.messages.at(-1)!.content).toBe('Answercontinued')
     const call = vi.mocked(fetch).mock.calls.at(-1)!
