@@ -1,5 +1,6 @@
 import type { DoclingRecord, DoclingSettings } from '../utils/doclingDocument'
 import type { PaperAbstractReport } from '../utils/paperAbstract'
+import type { ChatMessageWrite, ChatMessagePatch } from './chatRun'
 
 // Renderer-side type declaration for the db API exposed via preload contextBridge.
 export interface DbApi {
@@ -36,8 +37,8 @@ export interface DbApi {
     createConversation: (conv: any) => Promise<any>
     updateConversation: (id: string, patch: any) => Promise<void>
     removeConversation: (id: string) => Promise<void>
-    addMessage: (msg: any) => Promise<void>
-    updateMessage: (id: string, patch: any) => Promise<void>
+    addMessage: (msg: ChatMessageWrite) => Promise<void>
+    updateMessage: (id: string, patch: ChatMessagePatch) => Promise<void>
   }
   highlight: {
     listByPaper: (paperId: string) => Promise<any[]>

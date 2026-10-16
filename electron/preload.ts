@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { PreviewBounds, PreviewState } from '../src/types/webPreview'
+import type { ChatMessageWrite, ChatMessagePatch } from '../src/types/chatRun'
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db = {
@@ -36,8 +37,8 @@ const db = {
     createConversation: (conv: unknown) => ipcRenderer.invoke('chat:createConversation', conv),
     updateConversation: (id: string, patch: unknown) => ipcRenderer.invoke('chat:updateConversation', id, patch),
     removeConversation: (id: string) => ipcRenderer.invoke('chat:removeConversation', id),
-    addMessage: (msg: unknown) => ipcRenderer.invoke('chat:addMessage', msg),
-    updateMessage: (id: string, patch: unknown) => ipcRenderer.invoke('chat:updateMessage', id, patch),
+    addMessage: (msg: ChatMessageWrite) => ipcRenderer.invoke('chat:addMessage', msg),
+    updateMessage: (id: string, patch: ChatMessagePatch) => ipcRenderer.invoke('chat:updateMessage', id, patch),
   },
   highlight: {
     listByPaper: (paperId: string) => ipcRenderer.invoke('highlight:listByPaper', paperId),

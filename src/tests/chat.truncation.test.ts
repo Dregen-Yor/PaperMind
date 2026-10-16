@@ -17,7 +17,7 @@ import ChatPanel from '../components/ChatPanel.vue'
 import { useChatStore, UNLIMITED_MAX_TOKENS, type Conversation } from '../stores/chat'
 
 const mockDb = () => (globalThis as any).mockDb
-/** 非流式回答（`continueMessage` 仍走非流式请求）。 */
+/** 查询改写仍走非流式请求。 */
 const llm = (content: string, finishReason = 'stop') => ({
   ok: true,
   json: () => Promise.resolve({ choices: [{ message: { content }, finish_reason: finishReason }] }),
@@ -66,13 +66,15 @@ describe('截断与继续（#3）', () => {
     const assistant = conv.messages.find(m => m.role === 'assistant')!
     expect(assistant.truncated).toBe(true)
     const writes = mockDb().chat.addMessage.mock.calls.map((c: any[]) => c[0]).filter((m: any) => m.role === 'assistant')
-    expect(writes[0].truncated).toBe(true)
+    expect(writes[0].runStatus).toBe('preparing')
+    expect(mockDb().chat.updateMessage).toHaveBeenCalledWith(assistant.id,
+      expect.objectContaining({ truncated: true, runStatus: 'completed' }))
   })
 
   it('continueMessage 把续写追加到原回答并清除截断标记', async () => {
     global.fetch = vi.fn()
       .mockResolvedValueOnce(llm('续写用查询'))     // 历史 ≥2 轮会触发查询改写
-      .mockResolvedValueOnce(llm('，这是续写部分。'))
+      .mockResolvedValueOnce(sse(['，这是续写部分。']))
     const store = useChatStore()
     await store.init()
     const conv = await store.newConversation('t', [])
@@ -90,7 +92,7 @@ describe('截断与继续（#3）', () => {
   })
 
   it('「继续」在带划选 context 的用户消息上跳过检索并重放原文片段', async () => {
-    global.fetch = vi.fn().mockResolvedValue(llm('，这是续写部分。')) as any
+    global.fetch = vi.fn().mockResolvedValue(sse(['，这是续写部分。'])) as any
     const store = useChatStore()
     await store.init()
     // 带论文才能证明「继续」没有退回检索路径（与重试带 context 的用例同构）

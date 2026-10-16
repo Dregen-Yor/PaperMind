@@ -25,8 +25,14 @@
             <div class="msg-error-text">{{ msg.error }}</div>
             <div class="msg-error-actions">
               <el-button size="small" :loading="retrying === msg.id" @click="retry(msg)">重试</el-button>
+              <el-button v-if="msg.content" size="small" text :loading="continuing === msg.id" aria-label="继续部分回答" @click="continueMsg(msg)">继续</el-button>
               <el-button size="small" text @click="router.push('/settings')">打开设置</el-button>
             </div>
+          </div>
+          <div v-if="msg.runStatus === 'cancelled' || msg.runStatus === 'interrupted'" class="msg-run-status" role="status">
+            <span>{{ msg.runStatus === 'cancelled' ? '已停止' : '上次运行已中断' }}{{ msg.content ? '，已保存部分回答' : '' }}</span>
+            <el-button v-if="msg.content" size="small" text :loading="continuing === msg.id" aria-label="继续部分回答" @click="continueMsg(msg)">继续</el-button>
+            <el-button size="small" text :loading="retrying === msg.id" @click="retry(msg)">重试</el-button>
           </div>
           <div v-if="msg.truncated && !msg.error" class="msg-truncated">
             <span>回答已达长度上限</span>
@@ -48,7 +54,7 @@
         </div>
       </div>
 
-      <div v-if="(loading || (conversation && chatStore.abstractProgress[conversation.id])) && !hasStreamingBubble" class="message assistant">
+      <div v-if="(loading || isRunActive || (conversation && chatStore.abstractProgress[conversation.id])) && !hasStreamingBubble" class="message assistant">
         <div class="msg-avatar" aria-hidden="true"><img :src="paperMindMarkLight" alt="" /></div>
         <div class="msg-body">
           <div class="msg-author">PaperMind</div>
@@ -83,6 +89,7 @@
         <div class="composer-footer">
           <span class="composer-model" :title="chatStore.chatProfile?.model"><el-icon aria-hidden="true"><Cpu /></el-icon>{{ chatStore.chatProfile?.name || '对话模型' }}</span>
           <span class="input-hint">Enter 发送<span class="newline-hint">，Shift + Enter 换行</span></span>
+          <el-button v-if="isRunActive" size="small" text aria-label="停止生成" @click="stopRun">停止</el-button>
           <el-button type="primary" :loading="loading" :disabled="!input.trim() || !conversation" aria-label="发送消息" @click="send" class="send-btn"><el-icon><Top /></el-icon></el-button>
         </div>
       </div>
@@ -135,6 +142,11 @@ const preparationLabel = computed(() => {
     : '正在准备论文索引…'
 })
 const hasStreamingBubble = computed(() => props.conversation?.messages.some(m => m.streaming) ?? false)
+const isRunActive = computed(() => props.conversation?.messages.some(m => m.runStatus === 'preparing' || m.runStatus === 'streaming') ?? false)
+
+async function stopRun() {
+  if (props.conversation) await chatStore.stopConversationRun(props.conversation.id)
+}
 
 function addContext(text: string) {
   pendingContext.value.push(text)
@@ -239,6 +251,7 @@ async function send() {
 .msg-error { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--danger-dim); border-radius: 8px; background: var(--danger-dim); }
 .msg-error-text { font-size: 12px; line-height: 1.7; color: var(--danger); overflow-wrap: anywhere; }
 .msg-error-actions { display: flex; gap: 8px; margin-top: 8px; }
+.msg-run-status { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
 .message.user .msg-content { background: var(--bg-elevated); border: 1px solid var(--border); padding: 11px 15px; border-radius: 10px 3px 10px 10px; font-size: 13px; line-height: 1.8; }
 .msg-content :deep(code) {
   background: var(--bg-elevated);

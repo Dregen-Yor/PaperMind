@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS messages (
   error       TEXT DEFAULT '',          -- 失败态标记：非空即渲染失败卡（#2）
   truncated   INTEGER DEFAULT 0,        -- finish_reason=length 截断标记（#3）
   context     TEXT DEFAULT '',          -- 用户划选原文：重试时按原上下文重放（#2）
+  run_id      TEXT DEFAULT '',          -- 最近一次生成运行的身份
+  run_status  TEXT DEFAULT '',          -- preparing/streaming/terminal；旧消息留空
   timestamp       INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );

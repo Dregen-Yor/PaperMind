@@ -60,6 +60,24 @@ async function submit(text: string) {
 const retryButton = () => wrapper!.findAll('button').find(b => b.text() === '重试')!
 
 describe('ChatPanel 失败卡（#2）', () => {
+  it('shows Stop for a running answer and Continue for a saved partial answer', async () => {
+    const conversation = reactive(healthyConv())
+    conversation.messages.push({ id: 'm2', role: 'assistant', content: '前半段', timestamp: 2,
+      runId: 'run-1', runStatus: 'streaming', streaming: true })
+    const { chatStore } = await mountPanel(conversation)
+    const stop = vi.spyOn(chatStore, 'stopConversationRun').mockResolvedValue(true)
+    await wrapper!.find('[aria-label="停止生成"]').trigger('click')
+    expect(stop).toHaveBeenCalledWith('c1')
+
+    conversation.messages[1].runStatus = 'cancelled'
+    conversation.messages[1].streaming = false
+    await flushPromises()
+    expect(wrapper!.text()).toContain('已停止')
+    const continueRun = vi.spyOn(chatStore, 'continueMessage').mockResolvedValue()
+    await wrapper!.find('[aria-label="继续部分回答"]').trigger('click')
+    expect(continueRun).toHaveBeenCalledWith('c1', 'm2')
+  })
+
   it('渲染失败卡，重试调用 store，跳转按钮进设置', async () => {
     const pinia = createPinia()
     const chatStore = useChatStore(pinia)

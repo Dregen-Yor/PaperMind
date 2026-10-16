@@ -55,7 +55,9 @@ describe('问答失败路径（#2）', () => {
     expect(assistant[0].content).toBe('')
     expect(assistant[0].error).toBe('模型返回了空响应')
     const writes = mockDb().chat.addMessage.mock.calls.map((c: any[]) => c[0])
-    expect(writes.some((m: any) => m.role === 'assistant' && m.content === '' && !m.error)).toBe(false)
+    expect(writes.some((m: any) => m.role === 'assistant' && m.content === '' && m.runStatus === 'preparing')).toBe(true)
+    expect(mockDb().chat.updateMessage).toHaveBeenCalledWith(assistant[0].id,
+      expect.objectContaining({ runStatus: 'failed', error: '模型返回了空响应' }))
   })
 
   it('401 失败轮可重试：重试成功后原地更新，不追加重复提问', async () => {
@@ -116,7 +118,7 @@ describe('问答失败路径（#2）', () => {
     expect(body).toContain('被选中的原文片段')
   })
 
-  it('重试成功只写一次：不再有开头的预清 error 调用', async () => {
+  it('重试保留原消息身份，并为新运行写入完成状态', async () => {
     global.fetch = vi.fn().mockResolvedValue(llm401()) as any
     const store = useChatStore()
     await store.init()
@@ -124,15 +126,17 @@ describe('问答失败路径（#2）', () => {
 
     await expect(store.sendMessage(conv.id, '介绍一下')).rejects.toThrow('LLM 请求失败 (401)')
     const failed = conv.messages.find(m => m.role === 'assistant')!
+    const oldRunId = failed.runId
 
     global.fetch = vi.fn().mockResolvedValue(llmOk('最终回答')) as any
     await store.retryMessage(conv.id, failed.id)
 
     const updates = mockDb().chat.updateMessage.mock.calls
-    expect(updates).toHaveLength(1)
-    expect(updates[0][0]).toBe(failed.id)
-    // 重试写回同时刷新截断标记（#3），未截断即显式写 false
-    expect(updates[0][1]).toEqual({ content: '最终回答', error: '', truncated: false })
+    expect(updates.every((call: any[]) => call[0] === failed.id)).toBe(true)
+    expect(failed.runId).not.toBe(oldRunId)
+    expect(updates.at(-1)![1]).toEqual(expect.objectContaining({
+      content: '最终回答', error: '', truncated: false, runStatus: 'completed',
+    }))
   })
 
   it('超时映射中文文案：AbortSignal.timeout 的 TimeoutError 不进失败卡', async () => {

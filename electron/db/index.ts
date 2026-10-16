@@ -10,6 +10,8 @@ import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
 import { storedPaperFilePath } from '../paperProtocol'
+import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun'
+import { migrateChatRuns } from './chatRun'
 
 let db: Database.Database
 let papersDir: string
@@ -40,6 +42,7 @@ export function initDb() {
   if (!messageCols.includes('error')) db.exec("ALTER TABLE messages ADD COLUMN error TEXT DEFAULT ''")
   if (!messageCols.includes('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER DEFAULT 0')
   if (!messageCols.includes('context')) db.exec("ALTER TABLE messages ADD COLUMN context TEXT DEFAULT ''")
+  migrateChatRuns(db)
 
   // 论文文件内容哈希（#10，2026-09-21）。旧行留空串：空值不参与重复导入查重。
   const paperCols = (db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>).map(c => c.name)
@@ -181,7 +184,7 @@ export const chatApi = {
       paperIds: JSON.parse(c.paper_ids),
       createdAt: c.created_at,
       messages: (db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC').all(c.id) as any[])
-        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: normalizeSourceList(JSON.parse(m.sources)), timestamp: m.timestamp, error: m.error ?? '', truncated: !!m.truncated, context: m.context ?? '' })),
+        .map(m => ({ id: m.id, role: m.role, content: m.content, sources: normalizeSourceList(JSON.parse(m.sources)), timestamp: m.timestamp, error: m.error ?? '', truncated: !!m.truncated, context: m.context ?? '', runId: m.run_id || undefined, runStatus: m.run_status || undefined })),
     }))
   },
   createConversation: (conv: { id: string; title: string; paperIds: string[]; createdAt: number }) => {
@@ -196,20 +199,22 @@ export const chatApi = {
       .run(patch.title ?? cur.title, patch.paperIds ? JSON.stringify(patch.paperIds) : cur.paper_ids, id)
   },
   removeConversation: (id: string) => db.prepare('DELETE FROM conversations WHERE id = ?').run(id),
-  addMessage: (msg: { id: string; conversationId: string; role: string; content: string; sources: string[]; timestamp: number; error?: string; truncated?: boolean; context?: string }) => {
-    db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.error ?? '', msg.truncated ? 1 : 0, msg.context ?? '', msg.timestamp)
+  addMessage: (msg: ChatMessageWrite) => {
+    db.prepare('INSERT INTO messages (id, conversation_id, role, content, sources, error, truncated, context, run_id, run_status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(msg.id, msg.conversationId, msg.role, msg.content, JSON.stringify(msg.sources), msg.error ?? '', msg.truncated ? 1 : 0, msg.context ?? '', msg.runId ?? '', msg.runStatus ?? '', msg.timestamp)
   },
-  updateMessage: (id: string, patch: { content?: string; sources?: string[]; error?: string; truncated?: boolean; context?: string }) => {
+  updateMessage: (id: string, patch: ChatMessagePatch) => {
     const cur = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as any
     if (!cur) return
-    db.prepare('UPDATE messages SET content = ?, sources = ?, error = ?, truncated = ?, context = ? WHERE id = ?')
+    db.prepare('UPDATE messages SET content = ?, sources = ?, error = ?, truncated = ?, context = ?, run_id = ?, run_status = ? WHERE id = ?')
       .run(
         patch.content ?? cur.content,
         patch.sources !== undefined ? JSON.stringify(patch.sources) : cur.sources,
         patch.error !== undefined ? patch.error : (cur.error ?? ''),
         patch.truncated !== undefined ? (patch.truncated ? 1 : 0) : (cur.truncated ?? 0),
         patch.context !== undefined ? patch.context : (cur.context ?? ''),
+        patch.runId !== undefined ? patch.runId : (cur.run_id ?? ''),
+        patch.runStatus !== undefined ? patch.runStatus : (cur.run_status ?? ''),
         id,
       )
   },
