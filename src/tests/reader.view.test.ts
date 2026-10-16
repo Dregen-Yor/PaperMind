@@ -33,6 +33,26 @@ afterEach(() => {
 })
 
 describe('reader conversation lifecycle', () => {
+  it('places the summary tab between questions and notes', async () => {
+    const pinia = createPinia()
+    const paperStore = usePaperStore(pinia)
+    const chatStore = useChatStore(pinia)
+    paperStore.papers = [{ ...papers[0] }]
+    paperStore.loaded = true
+    chatStore.loaded = true
+    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    vi.spyOn(chatStore, 'newConversation').mockResolvedValue({ id: 'conv', title: '对话', paperIds: ['a'], messages: [], createdAt: 0 })
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/library/:id', component: ReaderView }] })
+    await router.push('/library/a')
+    wrapper = shallowMount(ReaderView, {
+      global: { plugins: [pinia, router], stubs: { ElButton: true, ElIcon: true, ElSelect: true, ElOption: true, ElEmpty: true } },
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.right-tab').map(tab => tab.text())).toEqual(['论文问答', '论文摘要', '阅读笔记'])
+    await wrapper.findAll('.right-tab')[1].trigger('click')
+    expect(wrapper.findComponent({ name: 'PaperAbstractPanel' }).exists()).toBe(true)
+  })
+
   it('keeps the current paper conversation when an earlier creation resolves late', async () => {
     const pinia = createPinia()
     const paperStore = usePaperStore(pinia)
@@ -112,5 +132,28 @@ describe('reader conversation lifecycle', () => {
 
     expect(wrapper.findComponent(PdfViewer).props('src')).toBe('blob:reader-test')
     expect(scrollToPage).toHaveBeenCalledWith(3)
+  })
+
+  it('带证据参数打开阅读页时定位到原句区域', async () => {
+    const pinia = createPinia()
+    const paperStore = usePaperStore(pinia)
+    const chatStore = useChatStore(pinia)
+    paperStore.papers = papers.map(paper => ({ ...paper }))
+    paperStore.loaded = true
+    chatStore.loaded = true
+    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    const scrollToEvidence = vi.fn()
+    const PdfViewerStub = defineComponent({
+      name: 'PdfViewer', props: ['src', 'paperId'],
+      setup: () => ({ scrollToEvidence }), template: '<div />',
+    })
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/library/:id', component: ReaderView }] })
+    await router.push('/library/a?page=3&region=0.1,0.2,0.4,0.08&quote=Measured%20score')
+    wrapper = shallowMount(ReaderView, {
+      global: { plugins: [pinia, router], stubs: { ElButton: true, ElIcon: true, ElSelect: true, ElOption: true, ElEmpty: true, PdfViewer: PdfViewerStub } },
+    })
+    await flushPromises()
+    expect(scrollToEvidence).toHaveBeenCalledWith({ label: 'p3', paperId: 'a', startPage: 2, endPage: 2,
+      region: { x: 0.1, y: 0.2, width: 0.4, height: 0.08 }, quote: 'Measured score' })
   })
 })

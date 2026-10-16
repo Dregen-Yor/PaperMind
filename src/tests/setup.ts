@@ -2,6 +2,20 @@
 import { vi } from 'vitest'
 
 const mockDb = {
+  docling: {
+    convert: vi.fn().mockRejectedValue(new Error('未配置测试解析结果')),
+    save: vi.fn().mockImplementation((_id, record) => Promise.resolve(record)),
+    readAsset: vi.fn().mockResolvedValue(null),
+    testConnection: vi.fn().mockResolvedValue('Docling 连接成功'),
+  },
+  abstractCheckpoint: {
+    get: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockResolvedValue(undefined),
+  },
+  paperAbstract: {
+    get: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockImplementation(report => Promise.resolve({ ...report, updatedAt: Date.now() })),
+  },
   kb: {
     list: vi.fn().mockResolvedValue([{ id: 'default', name: '默认知识库', description: '', color: '#409EFF', createdAt: 0 }]),
     create: vi.fn().mockImplementation(kb => Promise.resolve(kb)),

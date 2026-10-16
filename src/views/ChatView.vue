@@ -74,7 +74,7 @@ import ParamPanel from '../components/ParamPanel.vue'
 import ChatSources from '../components/ChatSources.vue'
 import { usePaperStore } from '../stores/paper'
 import { useChatStore, type Conversation } from '../stores/chat'
-import type { SourceRef } from '../utils/sourceRef'
+import { sourceRouteQuery, type SourceRef } from '../utils/sourceRef'
 
 const paperStore = usePaperStore()
 const chatStore = useChatStore()
@@ -140,7 +140,7 @@ function selectConv(c: Conversation) {
 /** 来源芯片跳页：论文问答页直接跳到对应论文的阅读页并定位（#1）。 */
 function onOpenSource(ref: SourceRef) {
   if (!ref.paperId || ref.startPage === undefined) return
-  void router.push({ path: '/library/' + ref.paperId, query: { page: String(ref.startPage + 1) } })
+  void router.push({ path: '/library/' + ref.paperId, query: sourceRouteQuery(ref) })
 }
 
 async function delConv(id: string) {

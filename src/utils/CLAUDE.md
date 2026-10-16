@@ -230,9 +230,16 @@ interface HighlightSegment { page: number; start: number; end: number }  // 页�
 
 ---
 
-## abstractSummarizer.ts — Hugging Face 摘要
+## Docling 图文解读
 
-服务于 `chat.ts` 的 `/abstract`。模型 `ABSTRACT_MODEL = 'Bashaarat1/t5-small-arxiv-summarizer'`，端点 `ABSTRACT_API_URL`（HF Inference API）。
+- `doclingDocument.ts` 定义共享设置、文档与素材结构，归一 Docling JSON 阅读顺序、图注、表格单元格、公式、页码和 bbox。
+- `doclingPdf.ts` 补齐缺失像素：按 Docling 原文区域使用 PDF.js 裁剪，保存后消息仅引用稳定图片 ID。
+- `doclingAbstract.ts` 在有界输入下逐段提炼和汇总，由当前对话模型生成中文解读，物化经过验证的素材/来源编号；公式优先 KaTeX，无法渲染时回退原图。
+- `MarkdownContent.vue` 经 IPC 恢复原图，支持放大与 `open-source` 页码跳转。Docling 网络和 SQLite BLOB 由主进程负责。
+
+## abstractSummarizer.ts — 离线 benchmark 的 Hugging Face 摘要
+
+保留给离线摘要 benchmark；产品 `/abstract` 已使用 Docling 和当前对话模型。模型 `ABSTRACT_MODEL = 'Bashaarat1/t5-small-arxiv-summarizer'`，端点 `ABSTRACT_API_URL`（HF Inference API）。
 
 | 导出 | 作用 |
 |------|------|

@@ -4,6 +4,7 @@ import { initDb } from './db'
 import { registerIpc } from './ipc'
 import { configureIdentity, getIconPath } from './branding'
 import { registerPreviewWindow, unregisterPreviewWindow } from './webPreview'
+import { stopManagedDoclingTunnel } from './doclingTunnel'
 
 configureIdentity(app, process.platform)
 
@@ -80,3 +81,5 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow()
 })
+
+app.on('before-quit', stopManagedDoclingTunnel)

@@ -3,6 +3,20 @@ import type { PreviewBounds, PreviewState } from '../src/types/webPreview'
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db = {
+  docling: {
+    convert: (paperId: string) => ipcRenderer.invoke('docling:convert', paperId),
+    save: (paperId: string, record: unknown) => ipcRenderer.invoke('docling:save', paperId, record),
+    readAsset: (id: string) => ipcRenderer.invoke('docling:readAsset', id),
+    testConnection: (settings: unknown) => ipcRenderer.invoke('docling:testConnection', settings),
+  },
+  abstractCheckpoint: {
+    get: (paperId: string, runKey: string, stage: string, position: number) => ipcRenderer.invoke('abstractCheckpoint:get', paperId, runKey, stage, position),
+    save: (paperId: string, runKey: string, stage: string, position: number, content: string) => ipcRenderer.invoke('abstractCheckpoint:save', paperId, runKey, stage, position, content),
+  },
+  paperAbstract: {
+    get: (paperId: string) => ipcRenderer.invoke('paperAbstract:get', paperId),
+    save: (report: unknown) => ipcRenderer.invoke('paperAbstract:save', report),
+  },
   kb: {
     list: () => ipcRenderer.invoke('kb:list'),
     create: (kb: unknown) => ipcRenderer.invoke('kb:create', kb),

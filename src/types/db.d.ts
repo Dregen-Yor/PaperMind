@@ -1,5 +1,22 @@
+import type { DoclingRecord, DoclingSettings } from '../utils/doclingDocument'
+import type { PaperAbstractReport } from '../utils/paperAbstract'
+
 // Renderer-side type declaration for the db API exposed via preload contextBridge.
 export interface DbApi {
+  docling: {
+    convert: (paperId: string) => Promise<DoclingRecord>
+    save: (paperId: string, record: DoclingRecord) => Promise<DoclingRecord>
+    readAsset: (id: string) => Promise<string | null>
+    testConnection: (settings: DoclingSettings) => Promise<string>
+  }
+  abstractCheckpoint: {
+    get: (paperId: string, runKey: string, stage: string, position: number) => Promise<string | null>
+    save: (paperId: string, runKey: string, stage: string, position: number, content: string) => Promise<void>
+  }
+  paperAbstract: {
+    get: (paperId: string) => Promise<PaperAbstractReport | null>
+    save: (report: Omit<PaperAbstractReport, 'updatedAt'>) => Promise<PaperAbstractReport>
+  }
   kb: {
     list: () => Promise<any[]>
     create: (kb: any) => Promise<any>

@@ -1,6 +1,7 @@
 # PaperMind
 
 **变更记录**
+- 2026-10-11: `/abstract` 改用可配置 Docling HTTP 服务解析 PDF，再由当前对话 LLM 生成中文图文解读。新增 `document_parses`/`document_assets` 缓存与图片 BLOB、`docling` IPC、PDF.js 区域裁剪、带素材和页码引用的 Markdown 渲染；备份包含素材且默认剔除 Docling API key。旧 T5 工具继续用于离线 benchmark。
 - 2026-09-24: 去掉回答输出上限——`LLMProfile.maxTokens` 语义改为「0 = 不限制」：OpenAI 兼容端点与 Ollama 不再发送 `max_tokens` / `num_predict`（`num_predict` 从「从不发送」改为「显式设了上限才发送」；`o` 系 / `gpt-5` 系设了上限时改发 `max_completion_tokens`），Anthropic Messages API 的 `max_tokens` 是必填字段，不限制时退到兜底常量 `CAPPED_MAX_TOKENS_DEFAULT`（8192），被老模型（claude-3-opus / haiku，上限 4096）拒绝时自动降级重试一次并记住该模型的上限；设置页与参数面板加「不限制」开关（滑块量程 `MAX_TOKENS_LIMIT`，关掉开关还原本地上次设过的值），旧落库配置里的出厂值 4096 在 `init()` 一次性迁移为不限制（标记 `llm_max_tokens_unlimited_migrated`，用户之后显式设回 4096 不会被再抹掉）。bench 侧 4096 是冻结的评测契约（`CONTEXT_BUDGET_TOKENS` + `generationContext.maxTokens`），未改
 - 2026-09-15: 轻量语义树索引实验（分支 `exp/tree`）——新增原文证据块（`src/utils/evidenceBlock.ts`）、单次 LLM 调用建树（`src/utils/semanticTree.ts`）、单轮树路由与原文取证（`src/utils/semanticRoute.ts`，树节点与平面叶节点在同一次打分判断里评分，取证不足即就地回落平面，统一 24000 字符上下文预算）；`paper_trees` 表（含 `build_config_hash` 建树配置指纹）+ `tree` IPC 命名空间持久化；`useChatStore` 后台建树（默认开启，设置页可关，并提供「重建全部语义树」）；bench 新增 `semantic-tree` 配置、树诊断指标与 `npm run bench:trees` 人工结构检查
 - 2026-09-09: 移除 `pageindex-adapted` 基线——上游 PageIndex 适配（Python 桥）端到端吞吐过低（推理模型逐题 agentic 检索），决策放弃：删 `bench/adapters/pageindex/`、`runner/pageindexQa.ts`、配置校验与 `upstreamCommit` meta 透传；强基线组保留 `hybrid-rerank` / `long-section-rag`（均已完成 qasper 179 篇全量）
@@ -15,7 +16,7 @@
 
 ## 项目愿景
 
-本地运行的学术论文阅读助手桌面应用。所有数据存储在本地（SQLite + 磁盘 PDF），无后端服务，支持多 LLM provider（OpenAI / Anthropic / Ollama）进行论文问答与 RAG 检索。可创建多个命名 LLM 配置，分别用于「对话」与「论文索引」；对话中输入 `/abstract` 可调用 Hugging Face 摘要模型为所选论文生成摘要。
+本地运行的学术论文阅读助手桌面应用。数据存储在本地（SQLite + 磁盘 PDF），支持多 LLM provider（OpenAI / Anthropic / Ollama）进行论文问答与 RAG 检索。可创建多个命名 LLM 配置，分别用于「对话」与「论文索引」；对话中输入 `/abstract` 可通过单独部署的 Docling 服务与当前对话 LLM 为所选 PDF 生成带原图、表格、公式及页码引用的详细解读。
 
 ## 架构概览
 
@@ -26,14 +27,14 @@ Renderer Process (Vue 3)          Main Process (Node/Electron)
 │  Pinia Stores            │      │  electron/ipc.ts            │
 │  Element Plus UI         │◄────►│  electron/db/index.ts       │
 │  pdfjs-dist (PDF 渲染)   │ IPC  │  electron/db/schema.ts      │
-│  markdown-it + KaTeX     │      │  better-sqlite3（8 张表）    │
+│  markdown-it + KaTeX     │      │  better-sqlite3（10 张表）   │
 │  直接 fetch → LLM API    │      │  磁盘：papermind.db + papers/│
-│  直接 fetch → HF 摘要 API │      └─────────────────────────────┘
+│  IPC → Docling 文档解析 │      └─────────────────────────────┘
 └──────────────────────────┘
 ```
 
 - `contextBridge` 将 `window.db` 注入渲染层，所有数据库操作通过 IPC 通道调用主进程（同步 better-sqlite3）。
-- LLM 请求与 Hugging Face 摘要请求由渲染层直接发出（fetch），**不经过主进程**；凭据存于 `settings` 表。
+- LLM 请求由渲染层 fetch 发出；Docling PDF 上传与转换在主进程执行，避免浏览器 CORS。凭据存于 `settings`；Docling 图片经 IPC 按 ID 加载，消息内容不含 base64。
 - 论文导入后在后台构建 PageIndex 语义索引，序列化后存入 `paper_indexes` 表；对话检索时读取索引做评分多选（RAG）。
 - 索引完成后另起**后台任务**构建轻量语义树（整篇一次 LLM 调用），树与原文证据块存入 `paper_trees` 表。树只承担导航职责，最终回答仍回到原文证据块与原始页码；建树失败、开关关闭或树取证不足时完全回落平面检索。建树缓存同时看原文指纹与构建配置指纹（提示词 / 模型端点 / 分块参数），任一变化都会让旧树失效。
 

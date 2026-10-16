@@ -87,6 +87,45 @@ CREATE TABLE IF NOT EXISTS paper_trees (
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
 );
 
+-- Immutable source image bytes survive reparse while their paper exists.
+CREATE TABLE IF NOT EXISTS document_parses (
+  paper_id TEXT PRIMARY KEY,
+  source_hash TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS document_assets (
+  id TEXT PRIMARY KEY,
+  paper_id TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_assets_paper ON document_assets(paper_id);
+
+CREATE TABLE IF NOT EXISTS abstract_checkpoints (
+  paper_id TEXT NOT NULL,
+  run_key TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (paper_id, run_key, stage, position),
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS paper_abstracts (
+  paper_id TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  truncated INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  pipeline_version INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_papers_kb ON papers(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_paper ON highlights(paper_id);
