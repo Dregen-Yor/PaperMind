@@ -28,6 +28,7 @@ const mockDb = {
     update: vi.fn().mockResolvedValue(undefined),
     remove: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn().mockResolvedValue(null),
+    contentUrl: vi.fn().mockResolvedValue(null),
   },
   chat: {
     listConversations: vi.fn().mockResolvedValue([]),

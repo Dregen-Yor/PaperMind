@@ -7,6 +7,7 @@ import { testDoclingConnection } from './doclingClient'
 import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
 import { backupFileName } from '../src/utils/exportSanitize'
 import { previewControllerForSender } from './webPreview'
+import { paperContentUrl } from './paperProtocol'
 
 // Register all IPC handlers. Each channel maps to a db api call.
 // Renderer invokes via window.db.* (see preload.ts).
@@ -41,6 +42,7 @@ export function registerIpc() {
     'paper:update': (_e, id, patch) => paperApi.update(id, patch),
     'paper:remove': (_e, id) => paperApi.remove(id),
     'paper:readFile': (_e, id) => paperApi.readFile(id),
+    'paper:contentUrl': (_e, id: string) => paperApi.filePath(id) ? paperContentUrl(id) : null,
     // isolated HTML preview; only the registered application renderer may control it
     'preview:open': (e, url, bounds) => previewControllerForSender(e.sender).open(url, bounds),
     'preview:setBounds': (e, bounds) => previewControllerForSender(e.sender).setBounds(bounds),

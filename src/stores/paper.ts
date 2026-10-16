@@ -87,6 +87,10 @@ export const usePaperStore = defineStore('paper', () => {
     return window.db.paper.readFile(id)
   }
 
+  function paperContentUrl(id: string): Promise<string | null> {
+    return window.db.paper.contentUrl(id)
+  }
+
   function getPapersByKb(kbId: string) {
     return computed(() => papers.value.filter(p => p.knowledgeBaseId === kbId))
   }
@@ -141,7 +145,7 @@ export const usePaperStore = defineStore('paper', () => {
   return {
     papers, knowledgeBases, loaded, init,
     addKnowledgeBase, removeKnowledgeBase,
-    addPaper, removePaper, updatePaper, readPaperFile,
+    addPaper, removePaper, updatePaper, readPaperFile, paperContentUrl,
     getPapersByKb, getPaper, highlights,
     addHighlight, getHighlights, loadHighlights, updateHighlight, removeHighlight, restoreHighlight,
   }

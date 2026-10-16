@@ -9,6 +9,7 @@ import { createPaperAbstractRepository, PAPER_ABSTRACT_PIPELINE_VERSION } from '
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
+import { storedPaperFilePath } from '../paperProtocol'
 
 let db: Database.Database
 let papersDir: string
@@ -108,6 +109,10 @@ export const paperApi = {
   get: (id: string) => {
     const row = db.prepare('SELECT * FROM papers WHERE id = ?').get(id) as any
     return row ? deserializePaper(row) : null
+  },
+  filePath: (id: string): string | null => {
+    const row = db.prepare('SELECT file_path FROM papers WHERE id = ?').get(id) as { file_path: string } | undefined
+    return storedPaperFilePath(id, row?.file_path, papersDir)
   },
   // create: fileData is base64; we write it to disk and store only the path
   create: (paper: any) => {

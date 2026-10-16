@@ -30,6 +30,8 @@ const state = vi.hoisted(() => ({
   window: vi.fn(),
 }))
 vi.mock('electron', () => ({
+  protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
+  net: { fetch: vi.fn() },
   app: {
     get isPackaged() { return state.packaged },
     setName: vi.fn(), setAppUserModelId: vi.fn(), setDesktopName: vi.fn(),

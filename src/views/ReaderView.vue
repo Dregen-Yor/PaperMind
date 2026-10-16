@@ -85,7 +85,6 @@ import PaperAbstractPanel from '../components/PaperAbstractPanel.vue'
 import NotesPanel from '../components/NotesPanel.vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
-import { base64ToUrl } from '../utils/pdfUtils'
 import { sourceFromRouteQuery, sourceRouteQuery, type SourceRef } from '../utils/sourceRef'
 
 const route = useRoute()
@@ -184,14 +183,13 @@ watch([() => paper.value?.id, () => chatStore.loaded], async ([id, chatReady], _
   onCleanup(() => { cancelled = true })
   loadingPdf.value = true
   fileError.value = ''
-  if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
   pdfUrl.value = ''
   if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   activeConvId.value = ''
   try {
-    const base64 = await paperStore.readPaperFile(id)
+    const url = await paperStore.paperContentUrl(id)
     if (cancelled) return
-    if (base64) pdfUrl.value = base64ToUrl(base64)
+    if (url) pdfUrl.value = url
     else fileError.value = '找不到论文文件，请返回文献库重新导入。'
     // 跨论文跳转：`?page=` 定位到目标页（页元素可能尚未渲染完，scrollToPage 内部等待）
     const target = sourceFromRouteQuery(id, route.query)
@@ -219,7 +217,6 @@ onBeforeUnmount(() => {
   paperGeneration += 1
   if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
   stopResize()
-  if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
   window.removeEventListener('mousemove', onMove)
   window.removeEventListener('mouseup', stopResize)
 })

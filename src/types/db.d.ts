@@ -29,6 +29,7 @@ export interface DbApi {
     update: (id: string, patch: any) => Promise<void>
     remove: (id: string) => Promise<void>
     readFile: (id: string) => Promise<string | null>
+    contentUrl: (id: string) => Promise<string | null>
   }
   chat: {
     listConversations: () => Promise<any[]>

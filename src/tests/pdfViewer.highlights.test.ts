@@ -106,6 +106,43 @@ function button(label: string) {
 }
 
 describe('PDF highlight cancellation', () => {
+  it('renders only nearby pages for a long PDF', async () => {
+    getDocument.mockImplementation(() => ({ promise: Promise.resolve({
+      numPages: 30,
+      getPage: async () => ({
+        getViewport: () => ({ width: 600, height: 800, scale: 1 }),
+        render: () => ({ promise: Promise.resolve() }),
+        getTextContent: async () => ({}),
+      }),
+    }) }))
+    await openViewer()
+    expect(wrapper!.findAll('canvas').length).toBeLessThanOrEqual(4)
+    expect(wrapper!.findAll('.pdf-page')).toHaveLength(30)
+  })
+
+  it('shows page one while later page dimensions are still loading', async () => {
+    getDocument.mockImplementation(() => ({ promise: Promise.resolve({
+      numPages: 2,
+      getPage: async (num: number) => {
+        if (num === 2) return new Promise(() => {})
+        return {
+          getViewport: () => ({ width: 600, height: 800, scale: 1 }),
+          render: () => ({ promise: Promise.resolve() }),
+          getTextContent: async () => ({}),
+        }
+      },
+    }) }))
+    await openViewer()
+    expect(wrapper!.find('[data-page="1"][data-rendered="true"]').exists()).toBe(true)
+  })
+
+  it('reuses the PDF document when zooming', async () => {
+    await openViewer()
+    await wrapper!.get('[aria-label="放大论文"]').trigger('click')
+    await flushPromises()
+    expect(getDocument).toHaveBeenCalledTimes(1)
+  })
+
   it('frames the quoted sentence instead of the whole Docling paragraph region', async () => {
     await openViewer()
     await (wrapper!.vm as any).scrollToEvidence({ label: 'p1', paperId: 'p1', startPage: 0, endPage: 0,

@@ -9,8 +9,6 @@ import PdfViewer from '../components/PdfViewer.vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore, type Conversation } from '../stores/chat'
 
-vi.mock('../utils/pdfUtils', () => ({ base64ToUrl: () => 'blob:reader-test' }))
-
 const papers: Paper[] = ['a', 'b'].map(id => ({
   id,
   title: 'Paper ' + id,
@@ -40,7 +38,7 @@ describe('reader conversation lifecycle', () => {
     paperStore.papers = [{ ...papers[0] }]
     paperStore.loaded = true
     chatStore.loaded = true
-    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    vi.mocked(window.db.paper.contentUrl).mockResolvedValue('papermind-paper://paper/a')
     vi.spyOn(chatStore, 'newConversation').mockResolvedValue({ id: 'conv', title: '对话', paperIds: ['a'], messages: [], createdAt: 0 })
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/library/:id', component: ReaderView }] })
     await router.push('/library/a')
@@ -60,7 +58,7 @@ describe('reader conversation lifecycle', () => {
     paperStore.papers = papers.map(paper => ({ ...paper }))
     paperStore.loaded = true
     chatStore.loaded = true
-    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    vi.mocked(window.db.paper.contentUrl).mockResolvedValue('papermind-paper://paper/a')
 
     const pending: Array<{ paperId: string; resolve: () => void }> = []
     vi.spyOn(chatStore, 'newConversation').mockImplementation((title, paperIds) => new Promise(resolve => {
@@ -106,7 +104,7 @@ describe('reader conversation lifecycle', () => {
     paperStore.papers = papers.map(paper => ({ ...paper }))
     paperStore.loaded = true
     chatStore.loaded = true
-    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    vi.mocked(window.db.paper.contentUrl).mockResolvedValue('papermind-paper://paper/a')
 
     const scrollToPage = vi.fn()
     const PdfViewerStub = defineComponent({
@@ -130,7 +128,8 @@ describe('reader conversation lifecycle', () => {
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.findComponent(PdfViewer).props('src')).toBe('blob:reader-test')
+    expect(wrapper.findComponent(PdfViewer).props('src')).toBe('papermind-paper://paper/a')
+    expect(window.db.paper.readFile).not.toHaveBeenCalled()
     expect(scrollToPage).toHaveBeenCalledWith(3)
   })
 
@@ -141,7 +140,7 @@ describe('reader conversation lifecycle', () => {
     paperStore.papers = papers.map(paper => ({ ...paper }))
     paperStore.loaded = true
     chatStore.loaded = true
-    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    vi.mocked(window.db.paper.contentUrl).mockResolvedValue('papermind-paper://paper/a')
     const scrollToEvidence = vi.fn()
     const PdfViewerStub = defineComponent({
       name: 'PdfViewer', props: ['src', 'paperId'],

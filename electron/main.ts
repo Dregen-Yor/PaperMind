@@ -1,10 +1,16 @@
-import { app, BrowserWindow, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, nativeImage, net, protocol, shell } from 'electron'
 import { join } from 'path'
-import { initDb } from './db'
+import { initDb, paperApi } from './db'
 import { registerIpc } from './ipc'
 import { configureIdentity, getIconPath } from './branding'
 import { registerPreviewWindow, unregisterPreviewWindow } from './webPreview'
 import { stopManagedDoclingTunnel } from './doclingTunnel'
+import { servePaperRequest } from './paperProtocol'
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'papermind-paper',
+  privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+}])
 
 configureIdentity(app, process.platform)
 
@@ -70,6 +76,11 @@ app.whenReady().then(() => {
   }
 
   initDb()
+  protocol.handle('papermind-paper', request => servePaperRequest(
+    request,
+    id => paperApi.filePath(id),
+    (url, headers) => net.fetch(url, { headers }),
+  ))
   registerIpc()
   createWindow()
 })

@@ -29,6 +29,7 @@ const db = {
     update: (id: string, patch: unknown) => ipcRenderer.invoke('paper:update', id, patch),
     remove: (id: string) => ipcRenderer.invoke('paper:remove', id),
     readFile: (id: string) => ipcRenderer.invoke('paper:readFile', id),
+    contentUrl: (id: string) => ipcRenderer.invoke('paper:contentUrl', id),
   },
   chat: {
     listConversations: () => ipcRenderer.invoke('chat:listConversations'),
