@@ -5,6 +5,7 @@ import { previewControllerForSender, registerPreviewWindow, unregisterPreviewWin
 const fake = vi.hoisted(() => ({
   views: [] as any[],
   permissionHandler: undefined as undefined | ((_contents: unknown, permission: string, callback: (allowed: boolean) => void) => void),
+  permissionCheckHandler: undefined as undefined | ((_contents: unknown, permission: string) => boolean),
   sessionHandlers: new Map<string, (...args: any[]) => void>(),
   externalOpen: vi.fn(async (_url: string) => {}),
   windowBySender: new Map<object, object>(),
@@ -15,6 +16,7 @@ vi.mock('electron', () => ({
   session: {
     fromPartition: () => ({
       setPermissionRequestHandler: (handler: typeof fake.permissionHandler) => { fake.permissionHandler = handler },
+      setPermissionCheckHandler: (handler: typeof fake.permissionCheckHandler) => { fake.permissionCheckHandler = handler },
       on: (name: string, handler: (...args: any[]) => void) => { fake.sessionHandlers.set(name, handler) },
     }),
   },
@@ -64,6 +66,7 @@ beforeEach(() => {
   fake.views.length = 0
   fake.sessionHandlers.clear()
   fake.permissionHandler = undefined
+  fake.permissionCheckHandler = undefined
   fake.externalOpen.mockClear()
   fake.windowBySender.clear()
 })
@@ -112,11 +115,57 @@ describe('isolated HTML preview controller', () => {
     const controller = registerPreviewWindow(appWindow())
     await controller.open('https://example.org/start', { x: 80, y: 64, width: 700, height: 500 })
     const reply = vi.fn()
-    fake.permissionHandler?.({}, 'notifications', reply)
+    const contents = fake.views[0].webContents
+    fake.permissionHandler?.(contents, 'notifications', reply)
     expect(reply).toHaveBeenCalledWith(false)
+    expect(fake.permissionCheckHandler?.(contents, 'notifications')).toBe(false)
+    expect(controller.getState().notice).toContain('权限')
     const event = { preventDefault: vi.fn() }
-    fake.sessionHandlers.get('will-download')?.(event)
+    fake.sessionHandlers.get('will-download')?.(event, {}, contents)
     expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(controller.getState().notice).toContain('下载')
+  })
+
+  it('keeps a failed link as the recovery target and restores the view after reload', async () => {
+    const win = appWindow()
+    const controller = registerPreviewWindow(win)
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('did-navigate', {}, 'https://example.org/article')
+    contents.emit('will-navigate', { url: 'https://example.org/missing', isMainFrame: true, preventDefault: vi.fn() })
+    contents.emit('did-start-navigation', { url: 'https://example.org/missing', isMainFrame: true, isSameDocument: false })
+    contents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', 'https://example.org/missing', true)
+    expect(controller.getState()).toMatchObject({ url: 'https://example.org/missing', visible: false })
+    expect((win.contentView as any).removeChildView).toHaveBeenCalledOnce()
+
+    await controller.reload()
+    expect(contents.loadURL).toHaveBeenCalledTimes(2)
+    expect(contents.loadURL).toHaveBeenLastCalledWith('https://example.org/missing')
+    contents.emit('did-start-navigation', { url: 'https://example.org/missing', isMainFrame: true, isSameDocument: false })
+    contents.emit('did-navigate', {}, 'https://example.org/missing')
+    expect(controller.getState()).toMatchObject({ url: 'https://example.org/missing', visible: true, error: '' })
+    expect((win.contentView as any).addChildView).toHaveBeenCalledTimes(2)
+  })
+
+  it('recognizes a failed history navigation and reattaches after a successful Back', async () => {
+    const win = appWindow()
+    const controller = registerPreviewWindow(win)
+    await controller.open('https://example.org/a', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('did-navigate', {}, 'https://example.org/a')
+    await controller.open('https://example.org/b', { x: 80, y: 64, width: 700, height: 500 })
+    contents.emit('did-navigate', {}, 'https://example.org/b')
+    contents.navigationHistory.canGoBack.mockReturnValue(true)
+    controller.back()
+    contents.emit('did-start-navigation', { url: 'https://example.org/a', isMainFrame: true, isSameDocument: false })
+    contents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', 'https://example.org/a', true)
+    expect(controller.getState()).toMatchObject({ url: 'https://example.org/a', visible: false })
+
+    controller.back()
+    contents.emit('did-start-navigation', { url: 'https://example.org/a', isMainFrame: true, isSameDocument: false })
+    contents.emit('did-navigate', {}, 'https://example.org/a')
+    expect(controller.getState()).toMatchObject({ url: 'https://example.org/a', visible: true, error: '' })
+    expect((win.contentView as any).addChildView).toHaveBeenCalledTimes(2)
   })
 
   it('ignores a stale load failure after the address changes', async () => {

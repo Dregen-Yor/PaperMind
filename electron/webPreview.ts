@@ -6,12 +6,20 @@ import type { PreviewBounds, PreviewState } from '../src/types/webPreview'
 const PREVIEW_PARTITION = 'papermind-preview'
 const controllers = new WeakMap<BrowserWindow, PreviewController>()
 const configuredSessions = new WeakSet<Session>()
+const blockedNotices = new WeakMap<WebContents, (message: string) => void>()
 
 function configureSession(previewSession: Session) {
   if (configuredSessions.has(previewSession)) return
   configuredSessions.add(previewSession)
-  previewSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  previewSession.on('will-download', event => event.preventDefault())
+  previewSession.setPermissionCheckHandler(() => false)
+  previewSession.setPermissionRequestHandler((contents, _permission, callback) => {
+    callback(false)
+    blockedNotices.get(contents)?.('该网站请求的权限已被预览页拒绝。')
+  })
+  previewSession.on('will-download', (event, _item, contents) => {
+    event.preventDefault()
+    blockedNotices.get(contents)?.('预览页不支持下载，请在系统浏览器中打开。')
+  })
 }
 
 function loadErrorMessage(description: string): string {
@@ -70,6 +78,7 @@ export class PreviewController {
     })
     this.view = view
     const contents = view.webContents
+    blockedNotices.set(contents, message => this.publish({ notice: message }))
 
     const guardNavigation = (event: { url: string; isMainFrame: boolean; preventDefault: () => void }) => {
       if (!event.isMainFrame) return
@@ -82,6 +91,9 @@ export class PreviewController {
     }
     contents.on('will-navigate', guardNavigation)
     contents.on('will-redirect', guardNavigation)
+    contents.on('did-start-navigation', details => {
+      if (details.isMainFrame && isAllowedPreviewUrl(details.url)) this.targetUrl = details.url
+    })
     contents.setWindowOpenHandler(({ url }) => {
       if (isAllowedPreviewUrl(url)) {
         queueMicrotask(() => { if (this.view === view) void this.open(url, this.bounds) })
@@ -95,15 +107,20 @@ export class PreviewController {
     contents.on('did-navigate', (_event, url) => {
       if (!isAllowedPreviewUrl(url)) return
       this.targetUrl = url
+      this.attach()
       this.publish({ url, error: '', notice: '', visible: true })
     })
     contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
-      if (isMainFrame && isAllowedPreviewUrl(url)) this.publish({ url, notice: '' })
+      if (isMainFrame && isAllowedPreviewUrl(url)) {
+        this.targetUrl = url
+        this.attach()
+        this.publish({ url, error: '', notice: '', visible: true })
+      }
     })
     contents.on('did-fail-load', (_event, code, description, failedUrl, isMainFrame) => {
       if (!isMainFrame || code === -3 || failedUrl !== this.targetUrl) return
       this.detach()
-      this.publish({ loading: false, error: loadErrorMessage(description), visible: false })
+      this.publish({ url: failedUrl, loading: false, error: loadErrorMessage(description), visible: false })
     })
     this.attach()
     return view
@@ -149,6 +166,7 @@ export class PreviewController {
   }
 
   reload() {
+    if (this.state.error && this.state.url) return this.open(this.state.url, this.bounds)
     if (this.view && this.state.url) this.view.webContents.reload()
   }
 
@@ -160,6 +178,7 @@ export class PreviewController {
   close() {
     this.generation++
     this.detach()
+    if (this.view) blockedNotices.delete(this.view.webContents)
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close()
     this.view = null
     this.targetUrl = ''
