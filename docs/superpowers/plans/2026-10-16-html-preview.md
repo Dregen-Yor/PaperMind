@@ -108,7 +108,7 @@ interface PreviewApi {
 }
 ```
 
-- [ ] **Step 1: Write failing controller tests with a fake window and fake native view.** The fake must record `contentView.addChildView/removeChildView`, bounds, `loadURL`, `close`, emitted navigation events and sent state. Assert: one view per window; HTTPS redirect allowed; HTTP/`file:` redirect prevented; allowed new-window target loaded into the same view; forbidden target ignored; permission and download requests denied; an old `did-fail-load` after a newer open is ignored; close removes and destroys the view; oversized or negative bounds are clamped to window content size. Start with this observable contract and add one test per remaining behavior:
+- [x] **Step 1: Write failing controller tests with a fake window and fake native view.** The fake must record `contentView.addChildView/removeChildView`, bounds, `loadURL`, `close`, emitted navigation events and sent state. Assert: one view per window; HTTPS redirect allowed; HTTP/`file:` redirect prevented; allowed new-window target loaded into the same view; forbidden target ignored; permission and download requests denied; an old `did-fail-load` after a newer open is ignored; close removes and destroys the view; oversized or negative bounds are clamped to window content size. Start with this observable contract and add one test per remaining behavior:
 
 ```ts
 const controller = registerPreviewWindow(fakeWindow as unknown as BrowserWindow)
@@ -119,8 +119,8 @@ fakeContents.emit('will-redirect', event)
 expect(event.preventDefault).toHaveBeenCalledTimes(1)
 expect(fakeContents.loadURL).toHaveBeenCalledTimes(1)
 ```
-- [ ] **Step 2: Run `npx vitest run src/tests/webPreviewController.test.ts`; confirm expected missing-controller failure.**
-- [ ] **Step 3: Implement `electron/webPreview.ts`.** Use `WeakMap<BrowserWindow, PreviewController>` for per-window ownership. `registerPreviewWindow(win)` admits only the app's own renderer; `unregisterPreviewWindow(win)` closes its native view. Create the remote view with these explicit security settings, and validate every URL before loading:
+- [x] **Step 2: Run `npx vitest run src/tests/webPreviewController.test.ts`; confirm expected missing-controller failure.**
+- [x] **Step 3: Implement `electron/webPreview.ts`.** Use `WeakMap<BrowserWindow, PreviewController>` for per-window ownership. `registerPreviewWindow(win)` admits only the app's own renderer; `unregisterPreviewWindow(win)` closes its native view. Create the remote view with these explicit security settings, and validate every URL before loading:
 
 ```ts
 const partition = 'papermind-preview'
@@ -142,7 +142,7 @@ view.webContents.setWindowOpenHandler(({ url }) => {
 ```
 
 Register `will-navigate`, `will-redirect`, `did-navigate`, `did-navigate-in-page`, loading, and main-frame failure listeners. Cancel disallowed navigation, deny permission and download requests, and ignore aborted or stale failures by comparing the event URL with the current target.
-- [ ] **Step 4: Add IPC and preload wiring.** `electron/ipc.ts` validates `event.sender === win.webContents` for a registered app window before dispatching `preview:*` channels. `electron/preload.ts` exposes `window.preview` with the signatures above; `onState` removes its listener when called. `src/types/webPreview.d.ts` declares the matching global API. `electron/main.ts` registers the created BrowserWindow and disposes it on `closed`. Use a narrow subscription, not an exposed `ipcRenderer`:
+- [x] **Step 4: Add IPC and preload wiring.** `electron/ipc.ts` validates `event.sender === win.webContents` for a registered app window before dispatching `preview:*` channels. `electron/preload.ts` exposes `window.preview` with the signatures above; `onState` removes its listener when called. `src/types/webPreview.d.ts` declares the matching global API. `electron/main.ts` registers the created BrowserWindow and disposes it on `closed`. Use a narrow subscription, not an exposed `ipcRenderer`:
 
 ```ts
 onState: (callback: (state: PreviewState) => void) => {
@@ -151,7 +151,7 @@ onState: (callback: (state: PreviewState) => void) => {
   return () => ipcRenderer.removeListener('preview:state', listener)
 },
 ```
-- [ ] **Step 5: Run focused controller tests and `npm run typecheck`; commit `feat: isolate HTML preview in Electron`.**
+- [x] **Step 5: Run focused controller tests and `npm run typecheck`; commit `feat: isolate HTML preview in Electron`.**
 
 ### Task 3: Preview page and route integration
 
@@ -166,7 +166,7 @@ onState: (callback: (state: PreviewState) => void) => {
 - Consumes: `window.preview` from Task 2 and `normalizePreviewUrl` from Task 1.
 - Produces: route `/web-preview` and sidebar item “网页预览”.
 
-- [ ] **Step 1: Write failing Vue tests.** Mount the real page with a complete `window.preview` fake. Assert: paste or type a domain and Enter calls `open` with normalized HTTPS URL and the measured slot bounds; invalid HTTP input displays the inline error without calling `open`; state events update the address and back/forward disabled states; edits in progress are not overwritten by state events until Enter or Escape; buttons call back/forward/reload/external commands; unmount calls `close` and unsubscribes. Start with a user interaction:
+- [x] **Step 1: Write failing Vue tests.** Mount the real page with a complete `window.preview` fake. Assert: paste or type a domain and Enter calls `open` with normalized HTTPS URL and the measured slot bounds; invalid HTTP input displays the inline error without calling `open`; state events update the address and back/forward disabled states; edits in progress are not overwritten by state events until Enter or Escape; buttons call back/forward/reload/external commands; unmount calls `close` and unsubscribes. Start with a user interaction:
 
 ```ts
 const wrapper = mount(WebPreviewView)
@@ -179,8 +179,8 @@ expect(window.preview.open).toHaveBeenCalledWith(
 ```
 
 Check narrow-window geometry during native acceptance rather than snapshotting CSS text.
-- [ ] **Step 2: Run `npx vitest run src/tests/webPreviewView.test.ts`; confirm missing-page failure.**
-- [ ] **Step 3: Build the page and integrate navigation.** Add `/web-preview` to `src/router/index.ts` and a sidebar link in `src/App.vue`; include this route in the compact reading-sidebar condition. The view contains a quiet single-row toolbar (back, forward, address, reload, external) and a rectangular slot with approximately 12px reader-background gutter. Use `ResizeObserver` plus window resize to report slot bounds; subscribe to preview state on mount and close/unsubscribe on unmount. Keep toolbars in Vue DOM above the native view. The empty state is “粘贴 HTTPS 链接，按 Enter 预览原网页”; loading uses one thin line; failures show reason, retry and external-open actions. At about 520px, wrap the address and controls into two rows. The essential lifecycle is:
+- [x] **Step 2: Run `npx vitest run src/tests/webPreviewView.test.ts`; confirm missing-page failure.**
+- [x] **Step 3: Build the page and integrate navigation.** Add `/web-preview` to `src/router/index.ts` and a sidebar link in `src/App.vue`; include this route in the compact reading-sidebar condition. The view contains a quiet single-row toolbar (back, forward, address, reload, external) and a rectangular slot with approximately 12px reader-background gutter. Use `ResizeObserver` plus window resize to report slot bounds; subscribe to preview state on mount and close/unsubscribe on unmount. Keep toolbars in Vue DOM above the native view. The empty state is “粘贴 HTTPS 链接，按 Enter 预览原网页”; loading uses one thin line; failures show reason, retry and external-open actions. At about 520px, wrap the address and controls into two rows. The essential lifecycle is:
 
 ```ts
 onMounted(() => {
@@ -194,7 +194,7 @@ onBeforeUnmount(() => {
   void window.preview.close()
 })
 ```
-- [ ] **Step 4: Run focused Vue tests, `npm run typecheck`, and `npm test`; commit `feat: add HTML preview page`.**
+- [x] **Step 4: Run focused Vue tests, `npm run typecheck`, and `npm test`; commit `feat: add HTML preview page`.**
 
 ### Task 4: Native acceptance and final verification
 
@@ -205,7 +205,7 @@ onBeforeUnmount(() => {
 - Consumes the complete route, bridge and controller from Tasks 1–3.
 - Produces a reviewable running preview and a verified branch.
 
-- [ ] **Step 1: Start `npm run dev` and open `/web-preview`.** Check an HTTPS technical blog with a table of contents, code blocks and client scripts. Confirm the site is rendered as-is and that the URL updates after internal links.
-- [ ] **Step 2: Verify navigation and states.** Check back/forward/reload, a new-window HTTPS link, HTTP input, offline or invalid host, external open, route exit, and a narrow window. Inspect whether the native view ever overlaps the toolbar or sidebar.
-- [ ] **Step 3: If acceptance reveals a defect, write the smallest failing regression test, fix it, and rerun the relevant focused tests.**
-- [ ] **Step 4: Run `npm run typecheck`, `npm test`, and `git diff --check`. Inspect `git status --short --branch` and the final diff. Present the running result and any limits for the user's final review.**
+- [x] **Step 1: Start `npm run dev` and open `/web-preview`.** Check an HTTPS technical blog with a table of contents, code blocks and client scripts. Confirm the site is rendered as-is and that the URL updates after internal links.
+- [x] **Step 2: Verify navigation and states.** Check back/forward/reload, a new-window HTTPS link, HTTP input, offline or invalid host, external open, route exit, and a narrow window. Inspect whether the native view ever overlaps the toolbar or sidebar.
+- [x] **Step 3: If acceptance reveals a defect, write the smallest failing regression test, fix it, and rerun the relevant focused tests.**
+- [x] **Step 4: Run `npm run typecheck`, `npm test`, and `git diff --check`. Inspect `git status --short --branch` and the final diff. Present the running result and any limits for the user's final review.**
