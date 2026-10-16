@@ -86,7 +86,7 @@
 
       <section class="settings-card">
         <h3>Docling 文档解析</h3>
-        <p class="card-desc">输入 <code>/abstract</code> 生成详细图文解读。默认通过 SSH 自动连接 101.76.222.151 上的 Docling 服务；PDF 将发送到该服务，解读使用当前对话模型，原文图片保存在本地。</p>
+        <p class="card-desc">在论文阅读页的「论文摘要」中生成图文解读。默认通过 SSH 自动连接 101.76.222.151 上的 Docling 服务；PDF 将发送到该服务，解读使用当前对话模型，原文图片保存在本地。</p>
         <p v-if="chatStore.doclingConfigError" class="card-desc" role="alert">{{ chatStore.doclingConfigError }}</p>
         <el-form label-position="top">
           <el-form-item label="Docling 服务根地址">

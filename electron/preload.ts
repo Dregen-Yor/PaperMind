@@ -12,6 +12,10 @@ const db = {
     get: (paperId: string, runKey: string, stage: string, position: number) => ipcRenderer.invoke('abstractCheckpoint:get', paperId, runKey, stage, position),
     save: (paperId: string, runKey: string, stage: string, position: number, content: string) => ipcRenderer.invoke('abstractCheckpoint:save', paperId, runKey, stage, position, content),
   },
+  paperAbstract: {
+    get: (paperId: string) => ipcRenderer.invoke('paperAbstract:get', paperId),
+    save: (report: unknown) => ipcRenderer.invoke('paperAbstract:save', report),
+  },
   kb: {
     list: () => ipcRenderer.invoke('kb:list'),
     create: (kb: unknown) => ipcRenderer.invoke('kb:create', kb),

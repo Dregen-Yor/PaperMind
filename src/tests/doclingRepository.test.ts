@@ -11,7 +11,12 @@ const fixture = () => {
   db.prepare('INSERT INTO knowledge_bases (id,name,created_at) VALUES (?,?,?)').run('kb', 'KB', 0)
   db.prepare('INSERT INTO papers (id,knowledge_base_id,file_name,file_path,added_at) VALUES (?,?,?,?,?)').run('paper', 'kb', 'p.pdf', '/p.pdf', 0)
   const repo = createDoclingRepository(db)
-  const record = { document: normalizeDoclingDocument({ texts: [{ text: 'Evidence' }], pictures: [{ image: { uri: 'data:image/png;base64,aGVsbG8=' } }] }), sourceHash: 'a'.repeat(64), configHash: 'b'.repeat(64), cached: false }
+  const record = { document: normalizeDoclingDocument({
+    body: { children: [{ $ref: '#/texts/0' }, { $ref: '#/pictures/0' }] },
+    pages: { '1': { size: { width: 100, height: 100 } } },
+    texts: [{ text: 'Evidence' }, { text: 'Figure 1: Evidence plot', label: 'caption', prov: [{ page_no: 1, bbox: { l: 10, r: 90, t: 60, b: 65, coord_origin: 'TOPLEFT' } }] }],
+    pictures: [{ captions: [{ $ref: '#/texts/1' }], prov: [{ page_no: 1, bbox: { l: 10, r: 90, t: 10, b: 55, coord_origin: 'TOPLEFT' } }], image: { uri: 'data:image/png;base64,aGVsbG8=' } }],
+  }), sourceHash: 'a'.repeat(64), configHash: 'b'.repeat(64), cached: false }
   return { db, repo, record }
 }
 describe('native Docling cache and asset persistence', () => {

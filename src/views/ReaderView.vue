@@ -49,8 +49,9 @@
       ><span aria-hidden="true" /></div>
 
       <section class="split-right" :class="{ 'mobile-active': mobilePane === 'discussion' }" aria-label="论文讨论">
-        <div class="right-tabs" role="group" aria-label="问答与笔记">
+        <div class="right-tabs" role="group" aria-label="论文问答、摘要与笔记">
           <button type="button" class="right-tab" :class="{ active: rightTab === 'chat' }" :aria-pressed="rightTab === 'chat'" @click="rightTab = 'chat'"><el-icon aria-hidden="true"><ChatLineRound /></el-icon> 论文问答</button>
+          <button type="button" class="right-tab" :class="{ active: rightTab === 'abstract' }" :aria-pressed="rightTab === 'abstract'" @click="rightTab = 'abstract'"><el-icon aria-hidden="true"><Document /></el-icon> 论文摘要</button>
           <button type="button" class="right-tab" :class="{ active: rightTab === 'notes' }" :aria-pressed="rightTab === 'notes'" @click="rightTab = 'notes'"><el-icon aria-hidden="true"><EditPen /></el-icon> 阅读笔记</button>
         </div>
         <template v-if="rightTab === 'chat'">
@@ -62,6 +63,7 @@
           </div>
           <ChatPanel ref="chatPanelRef" :conversation="activeConv" @create="createConv" @open-source="onOpenSource" />
         </template>
+        <PaperAbstractPanel v-else-if="rightTab === 'abstract'" :paper-id="paper.id" @open-source="onOpenSource" />
         <NotesPanel v-else :paper-id="paper.id" @jump="jumpToPage" />
       </section>
     </div>
@@ -79,6 +81,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Plus, Document, ChatLineRound, EditPen } from '@element-plus/icons-vue'
 import PdfViewer from '../components/PdfViewer.vue'
 import ChatPanel from '../components/ChatPanel.vue'
+import PaperAbstractPanel from '../components/PaperAbstractPanel.vue'
 import NotesPanel from '../components/NotesPanel.vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
@@ -97,7 +100,7 @@ const splitRatio = ref(58)
 const readerSplitRef = ref<HTMLElement>()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel>>()
 const pdfViewerRef = ref<InstanceType<typeof PdfViewer>>()
-const rightTab = ref<'chat' | 'notes'>('chat')
+const rightTab = ref<'chat' | 'abstract' | 'notes'>('chat')
 const mobilePane = ref<'paper' | 'discussion'>('paper')
 const activeConvId = ref('')
 let paperGeneration = 0
@@ -242,8 +245,8 @@ onBeforeUnmount(() => {
 .conversation-select { flex: 1; min-width: 0; }
 .conversation-select :deep(.el-select__wrapper) { box-shadow: none; background: transparent; padding-left: 0; }
 .conversation-select :deep(.el-select__wrapper.is-focused) { box-shadow: 0 0 0 1px var(--accent); padding-left: 8px; }
-.right-tabs { display: flex; align-items: stretch; gap: 24px; padding: 0 20px; min-height: 51px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.right-tab { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 15px 1px 13px; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 12px; color: var(--text-muted); cursor: pointer; }
+.right-tabs { display: flex; align-items: stretch; gap: clamp(10px, 2vw, 22px); padding: 0 20px; min-height: 51px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.right-tab { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 15px 1px 13px; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 12px; color: var(--text-muted); cursor: pointer; white-space: nowrap; }
 .right-tab .el-icon { font-size: 15px; }
 .right-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 .right-tab:hover { color: var(--accent); }

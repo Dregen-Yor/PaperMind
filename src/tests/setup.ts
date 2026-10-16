@@ -12,6 +12,10 @@ const mockDb = {
     get: vi.fn().mockResolvedValue(null),
     save: vi.fn().mockResolvedValue(undefined),
   },
+  paperAbstract: {
+    get: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockImplementation(report => Promise.resolve({ ...report, updatedAt: Date.now() })),
+  },
   kb: {
     list: vi.fn().mockResolvedValue([{ id: 'default', name: '默认知识库', description: '', color: '#409EFF', createdAt: 0 }]),
     create: vi.fn().mockImplementation(kb => Promise.resolve(kb)),

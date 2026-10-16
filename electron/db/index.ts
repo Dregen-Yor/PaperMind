@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdir
 import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
 import { createAbstractCheckpointRepository } from './abstractCheckpoint'
+import { createPaperAbstractRepository, PAPER_ABSTRACT_PIPELINE_VERSION } from './paperAbstract'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
@@ -42,6 +43,10 @@ export function initDb() {
   // 论文文件内容哈希（#10，2026-09-21）。旧行留空串：空值不参与重复导入查重。
   const paperCols = (db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>).map(c => c.name)
   if (!paperCols.includes('file_hash')) db.exec("ALTER TABLE papers ADD COLUMN file_hash TEXT DEFAULT ''")
+
+  // Reports saved before pipeline versioning may contain figures now rejected by Docling.
+  const abstractCols = (db.prepare('PRAGMA table_info(paper_abstracts)').all() as Array<{ name: string }>).map(c => c.name)
+  if (!abstractCols.includes('pipeline_version')) db.exec('ALTER TABLE paper_abstracts ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 0')
 
   // Seed default knowledge base
   const count = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
@@ -320,6 +325,7 @@ export const treeApi = {
 
 export const getDoclingRepository = () => createDoclingRepository(db)
 export const getAbstractCheckpointRepository = () => createAbstractCheckpointRepository(db)
+export const getPaperAbstractRepository = () => createPaperAbstractRepository(db)
 
 /** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
 export function exportAll(opts: { includeApiKey?: boolean } = {}) {
@@ -339,6 +345,7 @@ export function exportAll(opts: { includeApiKey?: boolean } = {}) {
     paperIndexes: db.prepare('SELECT paper_id, index_json, pages_json FROM paper_indexes').all(),
     paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
     docling: getDoclingRepository().exportBackup(),
+    paperAbstracts: db.prepare('SELECT * FROM paper_abstracts').all(),
     settings: opts.includeApiKey ? settingsRows : stripApiKeysFromSettings(settingsRows),
   }
 }
@@ -361,6 +368,7 @@ export function importAll(data: any) {
   const indexes = Array.isArray(data.paperIndexes) ? data.paperIndexes : []
   const trees = Array.isArray(data.paperTrees) ? data.paperTrees : []
   const settings = Array.isArray(data.settings) ? data.settings : []
+  const paperAbstracts = Array.isArray(data.paperAbstracts) ? data.paperAbstracts : []
 
   // 1) 先写回备份中的 PDF（幂等覆盖，不影响旧库）
   for (const p of papers) {
@@ -371,7 +379,7 @@ export function importAll(data: any) {
 
   // 2) DB 事务：清空旧行并按依赖顺序写入
   const insert = db.transaction(() => {
-    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -425,6 +433,15 @@ export function importAll(data: any) {
     }
 
     getDoclingRepository().importBackup(data.docling)
+
+    for (const row of paperAbstracts) {
+      getPaperAbstractRepository().save({
+        paperId: row.paper_id ?? row.paperId,
+        content: row.content,
+        sources: typeof row.sources_json === 'string' ? JSON.parse(row.sources_json) : row.sources ?? [],
+        truncated: !!row.truncated,
+      }, row.pipeline_version === PAPER_ABSTRACT_PIPELINE_VERSION ? PAPER_ABSTRACT_PIPELINE_VERSION : 0)
+    }
 
     for (const s of settings) {
       db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(s.key, s.value)

@@ -16,11 +16,21 @@ export interface DocumentItem {
   caption: string
   pages: number[]
   regions: SourceRegion[]
+  captionRegions?: SourceRegion[]
+  inBody?: boolean
   cells?: DocumentCell[]
   images: DocumentImage[]
 }
 export interface ParsedDocument { version: 1; items: DocumentItem[]; warnings: string[] }
 export interface DoclingRecord { document: ParsedDocument; sourceHash: string; configHash: string; cached: boolean }
+const FIGURE_CAPTION = /^\s*(?:figure|fig\.?)\s+\d+[a-z]?(?:\s*[-–]\s*\d+)?\s*[:.]\s*\S/i
+export function isEligibleFigure(item: DocumentItem): boolean {
+  if (item.kind !== 'picture' || item.inBody !== true || !FIGURE_CAPTION.test(item.caption)) return false
+  return item.regions.some(picture => item.captionRegions?.some(caption =>
+    caption.page === picture.page && caption.y >= picture.y + picture.height - 0.005
+    && caption.y - picture.y - picture.height <= 0.08
+    && caption.x < picture.x + picture.width && caption.x + caption.width > picture.x)) ?? false
+}
 export function assignTypedDocumentIds(document: ParsedDocument): ParsedDocument {
   const counts: Record<DocumentItem['kind'], number> = { text: 0, heading: 0, picture: 0, table: 0, formula: 0 }
   for (const item of document.items) item.id = `${item.kind}-${++counts[item.kind]}`
@@ -67,6 +77,9 @@ export function isParsedDocument(value: unknown): value is ParsedDocument {
         && Array.isArray(i.pages) && i.pages.every((p: unknown) => Number.isInteger(p) && Number(p) >= 0)
         && Array.isArray(i.regions) && i.regions.every((r: SourceRegion) => r && Number.isInteger(r.page) && r.page >= 0
           && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001)
+        && (i.captionRegions === undefined || Array.isArray(i.captionRegions) && i.captionRegions.every((r: SourceRegion) => r && Number.isInteger(r.page) && r.page >= 0
+          && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001))
+        && (i.inBody === undefined || typeof i.inBody === 'boolean')
         && (i.cells === undefined || Array.isArray(i.cells) && i.kind === 'table' && i.cells.every((cell: DocumentCell) =>
           cell && typeof cell.text === 'string' && cell.region && Number.isInteger(cell.region.page) && cell.region.page >= 0
           && [cell.region.x, cell.region.y, cell.region.width, cell.region.height].every(Number.isFinite)
@@ -103,12 +116,17 @@ export function normalizeDoclingDocument(input: unknown): ParsedDocument {
     const bottom = Math.min(1, (top + Math.abs(box.t - box.b)) / size.height)
     return right > x && bottom > y ? [{ page: page - 1, x, y, width: right - x, height: bottom - y }] : []
   })
-  const visit = (raw: JsonObject, path: string) => {
+  const nearbyFigureCaptions = list(doc.texts).map((value, index) => {
+    const raw = object(value)
+    return { ref: string(raw.self_ref) || `#/texts/${index}`, text: string(raw.text), regions: regions(raw), label: string(raw.label) }
+  }).filter(candidate => candidate.label === 'caption' && FIGURE_CAPTION.test(candidate.text))
+  const usedFigureCaptions = new Set<string>()
+  const visit = (raw: JsonObject, path: string, inBody = false) => {
     const key = string(raw.self_ref) || path
     if (visited.has(key)) return
     visited.add(key)
     if (path.startsWith('#/groups/')) {
-      for (const ref of list(raw.children)) visit(resolve(ref), string(ref?.$ref))
+      for (const ref of list(raw.children)) visit(resolve(ref), string(ref?.$ref), inBody)
       return
     }
     if (raw.content_layer === 'furniture' || ['caption', 'page_header', 'page_footer'].includes(raw.label)) return
@@ -127,15 +145,37 @@ export function normalizeDoclingDocument(input: unknown): ParsedDocument {
         return cellRegions.length && string(cell.text) ? [{ text: string(cell.text), region: cellRegions[0] }] : []
       })
     }
-    const caption = list(raw.captions).map(ref => string(resolve(ref).text)).filter(Boolean).join('\n') || string(raw.caption)
+    let caption = list(raw.captions).map(ref => string(resolve(ref).text)).filter(Boolean).join('\n') || string(raw.caption)
+    let captionRegions = kind === 'picture' ? list(raw.captions).flatMap(ref => regions(resolve(ref))) : []
     const pages = [...new Set<number>(list(raw.prov).map(p => p?.page_no).filter(p => Number.isInteger(p) && p >= 1).map(p => p - 1))].sort((a, b) => a - b)
     const uri = string(object(raw.image).uri)
     const images: DocumentImage[] = IMAGE_DATA_PATTERN.test(uri) && uri.length <= MAX_IMAGE_BYTES * 1.4 ? [{ data: uri, ...(pages[0] !== undefined ? { page: pages[0] } : {}) }] : []
+    const pictureRegions = kind === 'picture' ? regions(raw) : []
+    if (kind === 'picture' && inBody && !caption) {
+      const nearest = nearbyFigureCaptions.filter(candidate => !usedFigureCaptions.has(candidate.ref))
+        .map(candidate => ({ ...candidate, gap: Math.min(...pictureRegions.flatMap(picture => candidate.regions
+          .filter(region => region.page === picture.page && region.y >= picture.y + picture.height - 0.005
+            && region.y - picture.y - picture.height <= 0.08
+            && region.x < picture.x + picture.width && region.x + region.width > picture.x)
+          .map(region => region.y - picture.y - picture.height))) }))
+        .filter(candidate => Number.isFinite(candidate.gap))
+        .sort((a, b) => a.gap - b.gap)[0]
+      if (nearest) {
+        caption = nearest.text
+        captionRegions = nearest.regions
+        usedFigureCaptions.add(nearest.ref)
+      }
+    }
     if (!text && !caption && kind === 'text') return
-    items.push({ id: `${kind}-${++counts[kind]}`, kind, text, caption, pages, regions: regions(raw), images,
-      ...(cells.length ? { cells } : {}) })
+    const item: DocumentItem = { id: `${kind}-${counts[kind] + 1}`, kind, text, caption, pages, regions: kind === 'picture' ? pictureRegions : regions(raw), images,
+      ...(kind === 'picture' ? { captionRegions, inBody } : {}),
+      ...(cells.length ? { cells } : {}) }
+    if (kind === 'picture' && !isEligibleFigure(item)) return
+    if (kind === 'picture') for (const ref of list(raw.captions)) usedFigureCaptions.add(string(ref?.$ref))
+    counts[kind]++
+    items.push(item)
   }
-  for (const ref of list(object(doc.body).children)) visit(resolve(ref), string(ref?.$ref))
+  for (const ref of list(object(doc.body).children)) visit(resolve(ref), string(ref?.$ref), true)
   // Old or partial exports can omit body. Include unreferenced evidence without duplicating references.
   for (const collection of ['texts', 'pictures', 'tables']) list(doc[collection]).forEach((raw, index) => visit(object(raw), `#/${collection}/${index}`))
   if (!items.some(i => i.text || i.caption)) throw new Error('Docling 未返回可用于解读的文档内容')

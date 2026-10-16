@@ -116,6 +116,16 @@ CREATE TABLE IF NOT EXISTS abstract_checkpoints (
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS paper_abstracts (
+  paper_id TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  truncated INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  pipeline_version INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_papers_kb ON papers(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_paper ON highlights(paper_id);

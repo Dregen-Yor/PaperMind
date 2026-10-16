@@ -67,10 +67,6 @@
             <button type="button" class="chip-close" aria-label="移除上下文" @click="pendingContext.splice(i, 1)"><el-icon><Close /></el-icon></button>
           </div>
         </div>
-        <button v-if="showAbstractCommand" type="button" class="command-option" @mousedown.prevent @click="choosePrompt('/abstract')">
-          <span class="command-name">/abstract</span>
-          <span class="command-desc">总结当前所选论文</span>
-        </button>
         <el-input
           ref="inputRef"
           v-model="input"
@@ -80,7 +76,7 @@
           name="chat-message"
           autocomplete="off"
           :disabled="!conversation"
-          :placeholder="conversation ? '围绕论文提问，或输入 / 查看命令…' : '新建对话后，即可在这里提问…'"
+          :placeholder="conversation ? '围绕论文提问…' : '新建对话后，即可在这里提问…'"
           aria-label="输入问题"
           @keydown.enter.exact="handleEnter"
         />
@@ -139,10 +135,6 @@ const preparationLabel = computed(() => {
     : '正在准备论文索引…'
 })
 const hasStreamingBubble = computed(() => props.conversation?.messages.some(m => m.streaming) ?? false)
-const showAbstractCommand = computed(() => {
-  const value = input.value.trim().toLowerCase()
-  return value.startsWith('/') && '/abstract'.startsWith(value) && value !== '/abstract'
-})
 
 function addContext(text: string) {
   pendingContext.value.push(text)
@@ -369,10 +361,6 @@ async function send() {
 .input-hint { font-size: 10px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
 .send-btn { width: 32px; height: 32px; padding: 0; flex-shrink: 0; border-radius: 7px; }
 .send-btn .el-icon { font-size: 17px; }
-.command-option { position: absolute; z-index: 2; left: 0; right: 0; bottom: calc(100% + 8px); display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border-light); border-radius: 8px; background: var(--bg-surface); box-shadow: var(--shadow-card); cursor: pointer; text-align: left; }
-.command-option:hover { background: var(--bg-elevated); }
-.command-name { color: var(--accent); font-weight: 600; font-size: 12px; }
-.command-desc { color: var(--text-muted); font-size: 11px; }
 @container (max-width: 480px) {
   .newline-hint { display: none; }
   .composer-model { max-width: 50%; }

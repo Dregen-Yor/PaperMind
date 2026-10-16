@@ -19,6 +19,7 @@ import {
 } from '../utils/semanticTree'
 import type { PaperTreeRecord } from '../types/db'
 import type { SourceRef } from '../utils/sourceRef'
+import type { PaperAbstractReport } from '../utils/paperAbstract'
 import { DEFAULT_DOCLING_SETTINGS, DOCLING_SETTINGS_KEY, normalizeDoclingSettings, type DoclingSettings } from '../utils/doclingDocument'
 import { prepareDoclingPaper } from '../utils/doclingPdf'
 import { abstractRunKey, generateDoclingAbstract } from '../utils/doclingAbstract'
@@ -374,6 +375,7 @@ export const useChatStore = defineStore('chat', () => {
   const doclingConfig = ref<DoclingSettings>({ ...DEFAULT_DOCLING_SETTINGS })
   const doclingConfigError = ref('')
   const abstractProgress = ref<Record<string, string>>({})
+  const paperAbstractJobs = new Map<string, Promise<PaperAbstractReport>>()
   /**
    * 轻量语义树总开关；默认关闭（方案 §6.3：语义树退出默认检索路径）。
    * 仅保留旧数据维护 API，不参与产品检索，设置页不再提供开关。
@@ -1122,6 +1124,28 @@ export const useChatStore = defineStore('chat', () => {
     } finally { delete abstractProgress.value[conv.id] }
   }
 
+  /** The summary tab reuses the exact Docling/LLM pipeline without adding chat messages. */
+  async function generatePaperAbstract(paperId: string, force = false): Promise<PaperAbstractReport> {
+    const ongoing = paperAbstractJobs.get(paperId)
+    if (ongoing) return ongoing
+    const task = (async () => {
+      const saved = await window.db.paperAbstract.get(paperId)
+      if (saved && !saved.truncated && !force) return saved
+      const conv: Conversation = { id: `paper-abstract:${paperId}`, title: '', paperIds: [paperId], messages: [], createdAt: 0 }
+      const resume: AbstractResume | undefined = saved?.truncated && !force
+        ? { kind: 'docling-abstract', paperIds: [paperId], index: 0, previous: saved.content.slice(-9000) }
+        : undefined
+      const result = await generateAbstract(conv, resume)
+      const sources = [...new Map([...(resume ? saved?.sources ?? [] : []), ...result.sources]
+        .map(source => [`${source.paperId}:${source.startPage}:${source.label}`, source])).values()]
+      return window.db.paperAbstract.save({ paperId,
+        content: resume ? `${saved!.content}\n\n${result.content}` : result.content,
+        sources, truncated: result.truncated })
+    })()
+    paperAbstractJobs.set(paperId, task)
+    try { return await task } finally { paperAbstractJobs.delete(paperId) }
+  }
+
   // ---------- Send Message (RAG 3-call pipeline) ----------
 
   async function collectIndexedPapers(conv: Conversation): Promise<{ papers: IndexedPaper[]; paperIds: string[] }> {
@@ -1345,7 +1369,7 @@ export const useChatStore = defineStore('chat', () => {
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
     newConversation, addMessage, updateMessage, removeConversation, discardEmptyConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, retryMessage, continueMessage, requestCompletion,
+    sendMessage, retryMessage, continueMessage, generatePaperAbstract, requestCompletion,
     collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }

@@ -22,7 +22,10 @@ export function evidenceHref(paperId: string, page: number, region?: EvidenceReg
   const base = `paper-source:${encodeURIComponent(paperId)}:${page}`
   if (!validEvidenceRegion(region) && !quote) return base
   const box = validEvidenceRegion(region) ? [region.x, region.y, region.width, region.height].map(n => Number(n.toFixed(4))).join(',') : '-'
-  return `${base}:${box}:${encodeURIComponent(quote.slice(0, MAX_EVIDENCE_QUOTE))}`
+  // Markdown destinations treat parentheses as syntax, but encodeURIComponent leaves them bare.
+  const encodedQuote = encodeURIComponent(quote.slice(0, MAX_EVIDENCE_QUOTE))
+    .replace(/[()]/g, character => character === '(' ? '%28' : '%29')
+  return `${base}:${box}:${encodedQuote}`
 }
 
 export function parseEvidenceHref(href: string): Pick<SourceRef, 'paperId' | 'startPage' | 'endPage' | 'region' | 'quote'> | null {

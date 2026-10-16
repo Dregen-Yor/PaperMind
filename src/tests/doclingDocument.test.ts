@@ -5,7 +5,7 @@ const prov = (page = 2, origin = 'BOTTOMLEFT') => [{ page_no: page, bbox: { l: 1
 const fixture = () => ({
   body: { children: [{ $ref: '#/pictures/0' }, { $ref: '#/texts/0' }, { $ref: '#/tables/0' }, { $ref: '#/texts/2' }] },
   pictures: [{ self_ref: '#/pictures/0', captions: [{ $ref: '#/texts/1' }], prov: prov(), image: { uri: 'data:image/png;base64,aGVsbG8=' } }],
-  texts: [{ self_ref: '#/texts/0', label: 'section_header', text: 'Method', prov: prov() }, { self_ref: '#/texts/1', label: 'caption', text: 'Figure 1. Original caption' }, { self_ref: '#/texts/2', label: 'formula', text: 'x^2', prov: prov(2, 'TOPLEFT') }],
+  texts: [{ self_ref: '#/texts/0', label: 'section_header', text: 'Method', prov: prov() }, { self_ref: '#/texts/1', label: 'caption', text: 'Figure 1. Original caption', prov: [{ page_no: 2, bbox: { l: 10, r: 90, t: 16, b: 11, coord_origin: 'BOTTOMLEFT' } }] }, { self_ref: '#/texts/2', label: 'formula', text: 'x^2', prov: prov(2, 'TOPLEFT') }],
   tables: [{ self_ref: '#/tables/0', prov: prov(), data: { table_cells: [{ text: '95.2', start_row_offset_idx: 1, start_col_offset_idx: 0 }] } }],
   pages: { '2': { size: { width: 100, height: 100 } } },
 })
@@ -26,6 +26,22 @@ describe('Docling document boundary', () => {
     expect(document.items[0].regions[0].height).toBeCloseTo(.6)
     expect(document.items[3].regions).toEqual(document.items[0].regions)
   })
+  it('marks only numbered figures with a linked caption below the body image as eligible', () => {
+    const input: any = fixture()
+    input.pictures.push(
+      { self_ref: '#/pictures/1', captions: [], prov: [{ page_no: 2, bbox: { l: 10, r: 90, t: 10, b: 20, coord_origin: 'TOPLEFT' } }], image: { uri: 'data:image/png;base64,aGVsbG8=' } },
+      { self_ref: '#/pictures/2', captions: [{ $ref: '#/texts/1' }], prov: [{ page_no: 2, bbox: { l: 10, r: 90, t: 8, b: 3, coord_origin: 'BOTTOMLEFT' } }], image: { uri: 'data:image/png;base64,aGVsbG8=' } },
+      { self_ref: '#/pictures/3', captions: [{ $ref: '#/texts/1' }], prov: prov(), content_layer: 'furniture', image: { uri: 'data:image/png;base64,aGVsbG8=' } },
+      { self_ref: '#/pictures/4', captions: [], prov: prov(), image: { uri: 'data:image/png;base64,aGVsbG8=' } },
+    )
+    input.texts.push({ self_ref: '#/texts/3', label: 'caption', text: 'Figure 2: Unlinked but immediately below.',
+      prov: [{ page_no: 2, bbox: { l: 10, r: 90, t: 16, b: 11, coord_origin: 'BOTTOMLEFT' } }] })
+    input.body.children.push({ $ref: '#/pictures/1' }, { $ref: '#/pictures/2' }, { $ref: '#/pictures/4' })
+    const pictures = normalizeDoclingDocument(input).items.filter(item => item.kind === 'picture')
+    expect(pictures[0]).toMatchObject({ inBody: true, caption: 'Figure 1. Original caption', captionRegions: [{ page: 1, y: .84 }] })
+    expect(pictures[1]).toMatchObject({ caption: 'Figure 2: Unlinked but immediately below.' })
+    expect(pictures).toHaveLength(2)
+  })
   it('retains table-cell boxes for precise source links when Docling provides them', () => {
     const input = fixture()
     Object.assign(input.tables[0].data.table_cells[0], { bbox: { l: 30, r: 50, t: 55, b: 45, coord_origin: 'TOPLEFT' } })
@@ -36,9 +52,8 @@ describe('Docling document boundary', () => {
   })
   it('keeps unlocated text but never creates fake pages or fetches remote images', () => {
     const document = normalizeDoclingDocument({ texts: [{ text: 'Evidence' }], pictures: [{ image: { uri: 'https://example.com/image.png' } }] })
-    expect(document.items.map(i => i.id)).toEqual(['text-1', 'picture-1'])
+    expect(document.items.map(i => i.id)).toEqual(['text-1'])
     expect(document.items[0].pages).toEqual([])
-    expect(document.items[1].images).toEqual([])
   })
   it('guards cyclic groups and duplicate body references', () => {
     const input = { ...fixture(), groups: [{ children: [{ $ref: '#/groups/0' }, { $ref: '#/texts/0' }] }], body: { children: [{ $ref: '#/groups/0' }, { $ref: '#/texts/0' }] } }

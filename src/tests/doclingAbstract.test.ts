@@ -3,8 +3,15 @@ import { abstractRunKey, buildEvidenceChunks, generateDoclingAbstract, materiali
 import { normalizeDoclingDocument } from '../utils/doclingDocument'
 import { renderMarkdown } from '../utils/markdown'
 const document = () => {
-  const doc = normalizeDoclingDocument({ texts: [{ text: 'Research evidence', prov: [{ page_no: 2 }] }], pictures: [{ captions: [], prov: [{ page_no: 2 }] }] })
-  doc.items[1].caption = 'Figure 1. Results'
+  const doc = normalizeDoclingDocument({
+    body: { children: [{ $ref: '#/texts/0' }, { $ref: '#/pictures/0' }] },
+    pages: { '2': { size: { width: 100, height: 100 } } },
+    texts: [
+      { text: 'Research evidence', prov: [{ page_no: 2 }] },
+      { text: 'Figure 1. Results', label: 'caption', prov: [{ page_no: 2, bbox: { l: 10, r: 90, t: 82, b: 87, coord_origin: 'TOPLEFT' } }] },
+    ],
+    pictures: [{ captions: [{ $ref: '#/texts/1' }], prov: [{ page_no: 2, bbox: { l: 10, r: 90, t: 20, b: 80, coord_origin: 'TOPLEFT' } }] }],
+  })
   doc.items[1].images = [{ assetId: 'a'.repeat(64), page: 1 }]
   return doc
 }
@@ -54,7 +61,7 @@ describe('illustrated abstract evidence and references', () => {
   })
   it('does not retry an authentication error', async () => {
     const llm = vi.fn().mockRejectedValue(new Error('LLM 请求失败 (401)：unauthorized'))
-    await expect(generateDoclingAbstract(document(), 'paper', 'Title', llm)).rejects.toThrow('生成详细图文解读失败')
+    await expect(generateDoclingAbstract(document(), 'paper', 'Title', llm)).rejects.toThrow('生成论文摘要失败')
     expect(llm).toHaveBeenCalledTimes(1)
   })
   it('materializes only known assets and citations with accurate source pages', () => {
@@ -82,6 +89,35 @@ describe('illustrated abstract evidence and references', () => {
     expect(links[2].dataset.region).toBe('0.2,0.5,0.6,0.2')
     expect(links[2].dataset.quote).toBeUndefined()
   })
+  it('renders sentence citations with parenthesized source text without leaking link destinations', () => {
+    const doc = document()
+    doc.items[0].text = 'ERQA (Team et al., 2025) and VSIBench (Yang et al.,'
+    const html = documentElement(renderMarkdown(materializeAbstract('结果更好 {{cite:text-1-s1}}。', doc, 'paper').content))
+    const link = html.querySelector<HTMLAnchorElement>('a.paper-source')
+    expect(link?.textContent).toBe('文1')
+    expect(link?.dataset.quote).toBe(doc.items[0].text)
+    expect(html.textContent).not.toContain('paper-source:')
+    expect(html.textContent).not.toContain('[文1]')
+  })
+  it('omits a final unreported-content section while keeping the preceding findings', () => {
+    const raw = '## 主要发现\n\n方法改善了表现 {{cite:text-1-s1}}。\n\n## 局限、未报告内容与证据边界\n\n论文没有报告若干设置。'
+    const result = materializeAbstract(raw, document(), 'paper')
+    expect(result.content).toContain('方法改善了表现')
+    expect(result.content).not.toContain('未报告内容')
+    expect(result.content).not.toContain('论文没有报告若干设置')
+  })
+  it('revises a score list into a qualitative experimental conclusion', async () => {
+    const doc = document()
+    const outputs = [
+      '## 实验结论\n\nERQA 为 52.5，VSIBench 为 60.0，EmbSpatial 为 84.3，RefSpatial 为 69.9。',
+      '## 实验结论\n\n空间和具身任务整体优于对照模型，外部工具进一步改善表现。',
+    ]
+    const llm = vi.fn(async () => ({ content: outputs.shift() ?? '', truncated: false }))
+    const result = await generateDoclingAbstract(doc, 'paper', 'Title', llm)
+    expect(result.content).toContain('空间和具身任务整体优于对照模型')
+    expect(result.content).not.toContain('52.5')
+    expect(llm).toHaveBeenCalledTimes(2)
+  })
   it('never trusts an invented quotation as a precise source anchor', () => {
     const doc = document()
     doc.items[0].regions = [{ page: 1, x: 0.1, y: 0.2, width: 0.6, height: 0.1 }]
@@ -103,6 +139,7 @@ describe('illustrated abstract evidence and references', () => {
     const doc = document()
     doc.items[0].text = 'First finding. Second finding.'
     doc.items[1].regions = [{ page: 1, x: .2, y: .3, width: .6, height: .3 }]
+    doc.items[1].captionRegions = [{ page: 1, x: .2, y: .63, width: .6, height: .05 }]
     const raw = '结果 {{cite:text-1-s2}} 和 {{cite:text-1-s2}}，见图 {{cite:picture-1}} 与 {{cite:picture-1}}。\n\n再次讨论 {{cite:text-1-s2}}。'
     const html = documentElement(renderMarkdown(materializeAbstract(raw, doc, 'paper').content))
     const links = Array.from(html.querySelectorAll<HTMLAnchorElement>('a.paper-source'))
@@ -110,7 +147,7 @@ describe('illustrated abstract evidence and references', () => {
     expect(links[1].dataset.region).toBe('0.2,0.3,0.6,0.3')
     expect(links[1].dataset.quote).toBeUndefined()
   })
-  it('omits a repeated uncaptioned page header while keeping a substantive uncaptioned figure', () => {
+  it('omits uncaptioned pictures regardless of their size or page position', () => {
     const doc = document()
     doc.items[1].caption = ''
     doc.items[1].regions = [{ page: 1, x: 0.15, y: 0.3, width: 0.7, height: 0.2 }]
@@ -118,9 +155,41 @@ describe('illustrated abstract evidence and references', () => {
       regions: [{ page: 32, x: 0.37, y: 0.03, width: 0.26, height: 0.014 }],
       images: [{ assetId: 'b'.repeat(64), page: 32 }] })
     const result = materializeAbstract('{{asset:picture-2}} {{asset:picture-1}} {{asset:picture-2}}', doc, 'paper')
+    expect(buildEvidenceChunks(doc).join('\n')).not.toContain('[picture-2; picture; p33]')
     expect(result.content).not.toContain('asset:' + 'b'.repeat(64))
-    expect(result.content).toContain('asset:' + 'a'.repeat(64))
-    expect(result.content).toContain('paper-source:paper:32')
+    expect(result.content).not.toContain('asset:' + 'a'.repeat(64))
+    expect(result.content).not.toContain('paper-source:paper:32')
+  })
+  it('accepts only body figures with numbered captions physically below the picture', () => {
+    const doc = document()
+    doc.items[1].caption = ''
+    doc.items[1].regions = [{ page: 1, x: .32, y: .14, width: .02, height: .015 }]
+    doc.items.push(
+      { id: 'picture-2', kind: 'picture', text: '', caption: '', pages: [1],
+        regions: [{ page: 1, x: .12, y: .6, width: .35, height: .25 }], images: [{ assetId: 'b'.repeat(64), page: 1 }] },
+      { id: 'picture-3', kind: 'picture', text: '', caption: 'Figure 2. Model architecture.', pages: [2],
+        regions: [{ page: 2, x: .3, y: .15, width: .5, height: .3 }], captionRegions: [{ page: 2, x: .3, y: .48, width: .5, height: .05 }], inBody: true,
+        images: [{ assetId: 'c'.repeat(64), page: 2 }] },
+      { id: 'picture-4', kind: 'picture', text: '', caption: 'Figure 3: Wrong place.', pages: [2],
+        regions: [{ page: 2, x: .3, y: .6, width: .5, height: .2 }], captionRegions: [{ page: 2, x: .3, y: .5, width: .5, height: .05 }], inBody: true,
+        images: [{ assetId: 'd'.repeat(64), page: 2 }] },
+      { id: 'picture-5', kind: 'picture', text: '', caption: 'Figure 4: Header.', pages: [2],
+        regions: [{ page: 2, x: .3, y: .6, width: .5, height: .2 }], captionRegions: [{ page: 2, x: .3, y: .85, width: .5, height: .05 }], inBody: false,
+        images: [{ assetId: 'e'.repeat(64), page: 2 }] },
+    )
+    const chunks = buildEvidenceChunks(doc).join('\n')
+    expect(chunks).not.toContain('[picture-1; picture; p2]')
+    expect(chunks).not.toContain('[picture-2; picture; p2]')
+    expect(chunks).toContain('[picture-3; picture; p3]')
+    expect(chunks).not.toContain('[picture-4; picture; p3]')
+    expect(chunks).not.toContain('[picture-5; picture; p3]')
+    const result = materializeAbstract('{{asset:picture-1}} {{cite:picture-1}} {{asset:picture-2}} {{asset:picture-3}} {{asset:picture-4}} {{asset:picture-5}}', doc, 'paper')
+    expect(result.content).not.toContain('asset:' + 'a'.repeat(64))
+    expect(result.content).not.toContain('asset:' + 'b'.repeat(64))
+    expect(result.content).toContain('asset:' + 'c'.repeat(64))
+    expect(result.content).not.toContain('asset:' + 'd'.repeat(64))
+    expect(result.content).not.toContain('asset:' + 'e'.repeat(64))
+    expect(Array.from(documentElement(renderMarkdown(result.content)).querySelectorAll('a.paper-source')).map(link => link.textContent)).toEqual(['图3'])
   })
   it('shows each original asset once and omits long figure and table captions', () => {
     const doc = document()

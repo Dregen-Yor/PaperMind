@@ -33,6 +33,26 @@ afterEach(() => {
 })
 
 describe('reader conversation lifecycle', () => {
+  it('places the summary tab between questions and notes', async () => {
+    const pinia = createPinia()
+    const paperStore = usePaperStore(pinia)
+    const chatStore = useChatStore(pinia)
+    paperStore.papers = [{ ...papers[0] }]
+    paperStore.loaded = true
+    chatStore.loaded = true
+    vi.spyOn(paperStore, 'readPaperFile').mockResolvedValue('pdf-fixture')
+    vi.spyOn(chatStore, 'newConversation').mockResolvedValue({ id: 'conv', title: '对话', paperIds: ['a'], messages: [], createdAt: 0 })
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/library/:id', component: ReaderView }] })
+    await router.push('/library/a')
+    wrapper = shallowMount(ReaderView, {
+      global: { plugins: [pinia, router], stubs: { ElButton: true, ElIcon: true, ElSelect: true, ElOption: true, ElEmpty: true } },
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.right-tab').map(tab => tab.text())).toEqual(['论文问答', '论文摘要', '阅读笔记'])
+    await wrapper.findAll('.right-tab')[1].trigger('click')
+    expect(wrapper.findComponent({ name: 'PaperAbstractPanel' }).exists()).toBe(true)
+  })
+
   it('keeps the current paper conversation when an earlier creation resolves late', async () => {
     const pinia = createPinia()
     const paperStore = usePaperStore(pinia)
