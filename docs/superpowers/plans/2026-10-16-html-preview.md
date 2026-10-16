@@ -54,7 +54,7 @@
 - Produces: `normalizePreviewUrl(input: string): string`, `isAllowedPreviewUrl(url: string): boolean`, `isAllowedExternalUrl(url: string): boolean`.
 - These are imported by the Vue page and the main-process controller. Normalization is for user input only; navigation checks receive absolute URLs.
 
-- [ ] **Step 1: Write failing behavior tests.** In `src/tests/webPreviewUrl.test.ts`, assert literal outputs and rejection:
+- [x] **Step 1: Write failing behavior tests.** In `src/tests/webPreviewUrl.test.ts`, assert literal outputs and rejection:
 
 ```ts
 expect(normalizePreviewUrl('  example.org/article  ')).toBe('https://example.org/article')
@@ -68,9 +68,9 @@ expect(isAllowedExternalUrl('http://example.org')).toBe(true)
 expect(isAllowedExternalUrl('javascript:alert(1)')).toBe(false)
 ```
 
-- [ ] **Step 2: Run `npx vitest run src/tests/webPreviewUrl.test.ts`; confirm missing module/export failure.**
-- [ ] **Step 3: Implement the pure URL functions.** Trim input; add `https://` only when the input has no scheme; parse with `new URL`; require hostname and no username/password. Preview checks require `https:`; external checks allow `http:` or `https:`. Preserve path, query, and fragment via `URL.href`. Return a clear error for empty or malformed input.
-- [ ] **Step 4: Run the focused test, `npm run typecheck`, then commit `feat: validate HTML preview URLs`.**
+- [x] **Step 2: Run `npx vitest run src/tests/webPreviewUrl.test.ts`; confirm missing module/export failure.**
+- [x] **Step 3: Implement the pure URL functions.** Trim input; add `https://` only when the input has no scheme; parse with `new URL`; require hostname and no username/password. Preview checks require `https:`; external checks allow `http:` or `https:`. Preserve path, query, and fragment via `URL.href`. Return a clear error for empty or malformed input.
+- [x] **Step 4: Run the focused test, `npm run typecheck`, then commit `feat: validate HTML preview URLs`.**
 
 ### Task 2: Isolated native preview controller and bridge
 
