@@ -43,6 +43,7 @@ vi.mock('electron', () => ({
     static getAllWindows() { return [] }
     constructor(options: unknown) { state.window(options) }
     webContents = { setWindowOpenHandler: vi.fn(), on: vi.fn() }
+    on = vi.fn()
     loadURL = vi.fn()
     loadFile = vi.fn()
   },
