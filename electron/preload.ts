@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { PreviewBounds, PreviewState } from '../src/types/webPreview'
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db = {
@@ -53,5 +54,22 @@ const db = {
 }
 
 contextBridge.exposeInMainWorld('db', db)
+
+const preview = {
+  open: (url: string, bounds: PreviewBounds) => ipcRenderer.invoke('preview:open', url, bounds),
+  setBounds: (bounds: PreviewBounds) => ipcRenderer.invoke('preview:setBounds', bounds),
+  back: () => ipcRenderer.invoke('preview:back'),
+  forward: () => ipcRenderer.invoke('preview:forward'),
+  reload: () => ipcRenderer.invoke('preview:reload'),
+  close: () => ipcRenderer.invoke('preview:close'),
+  openExternal: (url: string) => ipcRenderer.invoke('preview:openExternal', url),
+  onState: (callback: (state: PreviewState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: PreviewState) => callback(state)
+    ipcRenderer.on('preview:state', listener)
+    return () => ipcRenderer.removeListener('preview:state', listener)
+  },
+}
+
+contextBridge.exposeInMainWorld('preview', preview)
 
 export type DbApi = typeof db

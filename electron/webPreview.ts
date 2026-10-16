@@ -1,0 +1,188 @@
+import { BrowserWindow, session, shell, WebContentsView } from 'electron'
+import type { Session, WebContents } from 'electron'
+import { isAllowedExternalUrl, isAllowedPreviewUrl } from '../src/utils/webPreviewUrl'
+import type { PreviewBounds, PreviewState } from '../src/types/webPreview'
+
+const PREVIEW_PARTITION = 'papermind-preview'
+const controllers = new WeakMap<BrowserWindow, PreviewController>()
+const configuredSessions = new WeakSet<Session>()
+
+function configureSession(previewSession: Session) {
+  if (configuredSessions.has(previewSession)) return
+  configuredSessions.add(previewSession)
+  previewSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  previewSession.on('will-download', event => event.preventDefault())
+}
+
+function loadErrorMessage(description: string): string {
+  if (description.includes('CERT')) return '网站证书无效，请检查链接或在系统浏览器中打开。'
+  if (description.includes('NAME_NOT_RESOLVED')) return '找不到网站，请检查地址或网络连接。'
+  if (description.includes('INTERNET_DISCONNECTED')) return '网络已断开，请连接网络后重试。'
+  return '网页暂时无法打开，请重试或在系统浏览器中打开。'
+}
+
+export class PreviewController {
+  private view: WebContentsView | null = null
+  private attached = false
+  private targetUrl = ''
+  private generation = 0
+  private bounds: PreviewBounds = { x: 0, y: 0, width: 0, height: 0 }
+  private state: PreviewState = {
+    url: '', loading: false, canGoBack: false, canGoForward: false,
+    error: '', notice: '', visible: false,
+  }
+
+  constructor(private readonly win: BrowserWindow) {}
+
+  getState(): PreviewState { return { ...this.state } }
+
+  private publish(patch: Partial<PreviewState> = {}) {
+    this.state = { ...this.state, ...patch }
+    const history = this.view?.webContents.navigationHistory
+    this.state.canGoBack = history?.canGoBack() ?? false
+    this.state.canGoForward = history?.canGoForward() ?? false
+    this.win.webContents.send('preview:state', this.getState())
+  }
+
+  private attach() {
+    if (!this.view || this.attached) return
+    this.win.contentView.addChildView(this.view)
+    this.attached = true
+  }
+
+  private detach() {
+    if (!this.view || !this.attached) return
+    this.win.contentView.removeChildView(this.view)
+    this.attached = false
+  }
+
+  private ensureView(): WebContentsView {
+    if (this.view) return this.view
+    configureSession(session.fromPartition(PREVIEW_PARTITION))
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: PREVIEW_PARTITION,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+      },
+    })
+    this.view = view
+    const contents = view.webContents
+
+    const guardNavigation = (event: { url: string; isMainFrame: boolean; preventDefault: () => void }) => {
+      if (!event.isMainFrame) return
+      if (isAllowedPreviewUrl(event.url)) {
+        this.targetUrl = event.url
+        return
+      }
+      event.preventDefault()
+      this.publish({ notice: '该链接无法在预览页打开，仅支持 HTTPS 网页。' })
+    }
+    contents.on('will-navigate', guardNavigation)
+    contents.on('will-redirect', guardNavigation)
+    contents.setWindowOpenHandler(({ url }) => {
+      if (isAllowedPreviewUrl(url)) {
+        queueMicrotask(() => { if (this.view === view) void this.open(url, this.bounds) })
+      } else {
+        this.publish({ notice: '该链接无法在预览页打开，仅支持 HTTPS 网页。' })
+      }
+      return { action: 'deny' }
+    })
+    contents.on('did-start-loading', () => this.publish({ loading: true, notice: '' }))
+    contents.on('did-stop-loading', () => this.publish({ loading: false }))
+    contents.on('did-navigate', (_event, url) => {
+      if (!isAllowedPreviewUrl(url)) return
+      this.targetUrl = url
+      this.publish({ url, error: '', notice: '', visible: true })
+    })
+    contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+      if (isMainFrame && isAllowedPreviewUrl(url)) this.publish({ url, notice: '' })
+    })
+    contents.on('did-fail-load', (_event, code, description, failedUrl, isMainFrame) => {
+      if (!isMainFrame || code === -3 || failedUrl !== this.targetUrl) return
+      this.detach()
+      this.publish({ loading: false, error: loadErrorMessage(description), visible: false })
+    })
+    this.attach()
+    return view
+  }
+
+  setBounds(bounds: PreviewBounds) {
+    const { width: outerWidth, height: outerHeight } = this.win.getContentBounds()
+    const x = Math.min(outerWidth, Math.max(0, Math.floor(Number.isFinite(bounds.x) ? bounds.x : 0)))
+    const y = Math.min(outerHeight, Math.max(0, Math.floor(Number.isFinite(bounds.y) ? bounds.y : 0)))
+    const width = Math.max(0, Math.min(outerWidth - x, Math.floor(Number.isFinite(bounds.width) ? bounds.width : 0)))
+    const height = Math.max(0, Math.min(outerHeight - y, Math.floor(Number.isFinite(bounds.height) ? bounds.height : 0)))
+    this.bounds = { x, y, width, height }
+    this.view?.setBounds(this.bounds)
+  }
+
+  async open(url: string, bounds: PreviewBounds) {
+    if (!isAllowedPreviewUrl(url)) throw new Error('仅支持 HTTPS 链接')
+    const view = this.ensureView()
+    this.setBounds(bounds)
+    this.attach()
+    const generation = ++this.generation
+    this.targetUrl = url
+    this.publish({ url, loading: true, error: '', notice: '', visible: true })
+    try {
+      await view.webContents.loadURL(url)
+    } catch (error) {
+      if (generation !== this.generation || this.view !== view) return
+      const description = error instanceof Error ? error.message : String(error)
+      if (description.includes('ERR_ABORTED')) return
+      this.detach()
+      this.publish({ loading: false, error: loadErrorMessage(description), visible: false })
+    }
+  }
+
+  back() {
+    const history = this.view?.webContents.navigationHistory
+    if (history?.canGoBack()) history.goBack()
+  }
+
+  forward() {
+    const history = this.view?.webContents.navigationHistory
+    if (history?.canGoForward()) history.goForward()
+  }
+
+  reload() {
+    if (this.view && this.state.url) this.view.webContents.reload()
+  }
+
+  async openExternal(url: string) {
+    if (!isAllowedExternalUrl(url)) throw new Error('只能在浏览器中打开 HTTP 或 HTTPS 链接')
+    await shell.openExternal(url)
+  }
+
+  close() {
+    this.generation++
+    this.detach()
+    if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close()
+    this.view = null
+    this.targetUrl = ''
+    this.publish({ url: '', loading: false, error: '', notice: '', visible: false })
+  }
+}
+
+export function registerPreviewWindow(win: BrowserWindow): PreviewController {
+  const existing = controllers.get(win)
+  if (existing) return existing
+  const controller = new PreviewController(win)
+  controllers.set(win, controller)
+  return controller
+}
+
+export function unregisterPreviewWindow(win: BrowserWindow) {
+  controllers.get(win)?.close()
+  controllers.delete(win)
+}
+
+export function previewControllerForSender(sender: WebContents): PreviewController {
+  const win = BrowserWindow.fromWebContents(sender)
+  const controller = win ? controllers.get(win) : null
+  if (!win || !controller || win.webContents !== sender) throw new Error('未授权的网页预览请求')
+  return controller
+}

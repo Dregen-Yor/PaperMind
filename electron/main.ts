@@ -3,6 +3,7 @@ import { join } from 'path'
 import { initDb } from './db'
 import { registerIpc } from './ipc'
 import { configureIdentity, getIconPath } from './branding'
+import { registerPreviewWindow, unregisterPreviewWindow } from './webPreview'
 
 configureIdentity(app, process.platform)
 
@@ -28,6 +29,8 @@ const createWindow = () => {
       nodeIntegration: false,
     },
   })
+  registerPreviewWindow(win)
+  win.on('close', () => unregisterPreviewWindow(win))
 
   const openExternalUrl = (url: string) => {
     try {

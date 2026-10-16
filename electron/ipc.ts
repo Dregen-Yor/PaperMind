@@ -3,6 +3,7 @@ import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, exportAll, clearAll, importAll } from './db'
 import { backupFileName } from '../src/utils/exportSanitize'
+import { previewControllerForSender } from './webPreview'
 
 // Register all IPC handlers. Each channel maps to a db api call.
 // Renderer invokes via window.db.* (see preload.ts).
@@ -19,6 +20,14 @@ export function registerIpc() {
     'paper:update': (_e, id, patch) => paperApi.update(id, patch),
     'paper:remove': (_e, id) => paperApi.remove(id),
     'paper:readFile': (_e, id) => paperApi.readFile(id),
+    // isolated HTML preview; only the registered application renderer may control it
+    'preview:open': (e, url, bounds) => previewControllerForSender(e.sender).open(url, bounds),
+    'preview:setBounds': (e, bounds) => previewControllerForSender(e.sender).setBounds(bounds),
+    'preview:back': e => previewControllerForSender(e.sender).back(),
+    'preview:forward': e => previewControllerForSender(e.sender).forward(),
+    'preview:reload': e => previewControllerForSender(e.sender).reload(),
+    'preview:close': e => previewControllerForSender(e.sender).close(),
+    'preview:openExternal': (e, url) => previewControllerForSender(e.sender).openExternal(url),
     // chat
     'chat:listConversations': () => chatApi.listConversations(),
     'chat:createConversation': (_e, conv) => chatApi.createConversation(conv),
