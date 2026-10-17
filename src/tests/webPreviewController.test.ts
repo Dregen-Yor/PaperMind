@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'crypto'
 import type { BrowserWindow } from 'electron'
 import { previewControllerForSender, registerPreviewWindow, unregisterPreviewWindow } from '../../electron/webPreview'
 
@@ -42,6 +43,10 @@ vi.mock('electron', () => ({
       }
       setWindowOpenHandler(handler: (details: { url: string }) => { action: string }) { this.windowOpenHandler = handler }
       loadURL = vi.fn(async (url: string) => { this.currentUrl = url })
+      executeJavaScript = vi.fn(async () => ({
+        doctype: '<!DOCTYPE html>', html: '<html><body>动态正文</body></html>',
+        title: '文章', url: this.currentUrl,
+      }))
       getURL() { return this.currentUrl }
       reload = vi.fn()
       close = vi.fn(() => { this.destroyed = true })
@@ -192,5 +197,45 @@ describe('isolated HTML preview controller', () => {
     const controller = registerPreviewWindow(win)
     expect(previewControllerForSender(win.webContents)).toBe(controller)
     expect(() => previewControllerForSender({} as any)).toThrow('未授权的网页预览请求')
+  })
+
+  it('captures the fully serialized loaded DOM with a UTF-8 hash and byte length', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('did-stop-loading')
+
+    const result = await controller.captureSnapshot()
+    expect(result.html).toBe('<!DOCTYPE html>\n<html><body>动态正文</body></html>')
+    expect(result.finalUrl).toBe('https://example.org/article')
+    expect(result.title).toBe('文章')
+    expect(result.byteLength).toBe(Buffer.byteLength(result.html, 'utf8'))
+    expect(result.contentHash).toBe(createHash('sha256').update(result.html).digest('hex'))
+    expect(result.capturedAt).toBeGreaterThan(0)
+  })
+
+  it('refuses capture while loading or after a same-URL reload races with serialization', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    await expect(controller.captureSnapshot()).rejects.toThrow()
+    const contents = fake.views[0].webContents
+    contents.emit('did-stop-loading')
+    let finish!: (value: object) => void
+    contents.executeJavaScript.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const pending = controller.captureSnapshot()
+    contents.emit('did-start-navigation', { url: 'https://example.org/article', isMainFrame: true })
+    finish({ doctype: '', html: '<html>stale</html>', title: '文章', url: 'https://example.org/article' })
+    await expect(pending).rejects.toThrow('网页已变化')
+  })
+
+  it('rejects oversized HTML instead of sending a truncated snapshot', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('did-stop-loading')
+    contents.executeJavaScript.mockResolvedValueOnce({
+      doctype: '', html: '字'.repeat(3_000_000), title: '大页面', url: 'https://example.org/article',
+    })
+    await expect(controller.captureSnapshot()).rejects.toThrow('8 MiB')
   })
 })

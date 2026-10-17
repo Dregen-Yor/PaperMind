@@ -52,6 +52,7 @@ export function registerIpc() {
     'preview:reload': e => previewControllerForSender(e.sender).reload(),
     'preview:close': e => previewControllerForSender(e.sender).close(),
     'preview:openExternal': (e, url) => previewControllerForSender(e.sender).openExternal(url),
+    'preview:captureSnapshot': e => previewControllerForSender(e.sender).captureSnapshot(),
     // chat
     'chat:listConversations': () => chatApi.listConversations(),
     'chat:createConversation': (_e, conv) => chatApi.createConversation(conv),

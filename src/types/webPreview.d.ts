@@ -15,6 +15,15 @@ export interface PreviewState {
   visible: boolean
 }
 
+export interface PreviewSnapshot {
+  finalUrl: string
+  title: string
+  html: string
+  capturedAt: number
+  contentHash: string
+  byteLength: number
+}
+
 export interface PreviewApi {
   open: (url: string, bounds: PreviewBounds) => Promise<void>
   setBounds: (bounds: PreviewBounds) => Promise<void>
@@ -23,6 +32,7 @@ export interface PreviewApi {
   reload: () => Promise<void>
   close: () => Promise<void>
   openExternal: (url: string) => Promise<void>
+  captureSnapshot: () => Promise<PreviewSnapshot>
   onState: (callback: (state: PreviewState) => void) => () => void
 }
 

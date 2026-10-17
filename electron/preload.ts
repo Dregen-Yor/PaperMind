@@ -81,6 +81,7 @@ const preview: PreviewInvokeApi & { onState: (callback: (state: PreviewState) =>
   reload: () => invoke('preview:reload'),
   close: () => invoke('preview:close'),
   openExternal: (url: string) => invoke('preview:openExternal', url),
+  captureSnapshot: () => invoke('preview:captureSnapshot'),
   onState: (callback: (state: PreviewState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: PreviewState) => callback(state)
     ipcRenderer.on('preview:state', listener)

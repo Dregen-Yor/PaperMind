@@ -1,7 +1,7 @@
 import type { DoclingRecord, DoclingSettings } from '../utils/doclingDocument'
 import type { PaperAbstractReport } from '../utils/paperAbstract'
 import type { ChatMessageWrite, ChatMessagePatch } from './chatRun'
-import type { PreviewBounds } from './webPreview'
+import type { PreviewBounds, PreviewSnapshot } from './webPreview'
 import type { Conversation } from './chat'
 import type { Paper, KnowledgeBase, Highlight } from './paper'
 
@@ -85,6 +85,7 @@ export interface PreviewInvokeApi {
   reload: () => Promise<void>
   close: () => Promise<void>
   openExternal: (url: string) => Promise<void>
+  captureSnapshot: () => Promise<PreviewSnapshot>
 }
 
 type IpcSurface = DbApi & { preview: PreviewInvokeApi }

@@ -26,6 +26,10 @@ beforeEach(() => {
     reload: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     openExternal: vi.fn(async () => {}),
+    captureSnapshot: vi.fn(async () => ({
+      finalUrl: 'https://example.org/', title: 'Example', html: '<html></html>',
+      capturedAt: 1, contentHash: 'hash', byteLength: 13,
+    })),
     onState: vi.fn((callback: (state: PreviewState) => void): (() => void) => {
       pushState = callback
       return unsubscribe

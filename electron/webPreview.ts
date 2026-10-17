@@ -1,7 +1,8 @@
 import { BrowserWindow, session, shell, WebContentsView } from 'electron'
 import type { Session, WebContents } from 'electron'
+import { createHash } from 'crypto'
 import { isAllowedExternalUrl, isAllowedPreviewUrl } from '../src/utils/webPreviewUrl'
-import type { PreviewBounds, PreviewState } from '../src/types/webPreview'
+import type { PreviewBounds, PreviewSnapshot, PreviewState } from '../src/types/webPreview'
 
 const PREVIEW_PARTITION = 'papermind-preview'
 const controllers = new WeakMap<BrowserWindow, PreviewController>()
@@ -92,7 +93,10 @@ export class PreviewController {
     contents.on('will-navigate', guardNavigation)
     contents.on('will-redirect', guardNavigation)
     contents.on('did-start-navigation', details => {
-      if (details.isMainFrame && isAllowedPreviewUrl(details.url)) this.targetUrl = details.url
+      if (details.isMainFrame) {
+        this.generation++
+        if (isAllowedPreviewUrl(details.url)) this.targetUrl = details.url
+      }
     })
     contents.setWindowOpenHandler(({ url }) => {
       if (isAllowedPreviewUrl(url)) {
@@ -112,6 +116,7 @@ export class PreviewController {
     })
     contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
       if (isMainFrame && isAllowedPreviewUrl(url)) {
+        this.generation++
         this.targetUrl = url
         this.attach()
         this.publish({ url, error: '', notice: '', visible: true })
@@ -167,7 +172,44 @@ export class PreviewController {
 
   reload() {
     if (this.state.error && this.state.url) return this.open(this.state.url, this.bounds)
-    if (this.view && this.state.url) this.view.webContents.reload()
+    if (this.view && this.state.url) {
+      this.generation++
+      this.view.webContents.reload()
+    }
+  }
+
+  async captureSnapshot(): Promise<PreviewSnapshot> {
+    const contents = this.view?.webContents
+    if (!contents || contents.isDestroyed() || !this.state.visible || this.state.loading) {
+      throw new Error('网页尚未加载完成，请稍后重试')
+    }
+    const beforeUrl = contents.getURL()
+    if (!isAllowedPreviewUrl(beforeUrl)) throw new Error('仅支持 HTTPS 网页')
+    const beforeGeneration = this.generation
+    const raw = await contents.executeJavaScript(`({
+      doctype: document.doctype ? new XMLSerializer().serializeToString(document.doctype) : '',
+      html: document.documentElement.outerHTML,
+      title: document.title,
+      url: location.href
+    })`) as { doctype: string; html: string; title: string; url: string }
+    if (this.generation !== beforeGeneration || this.view?.webContents !== contents
+      || contents.getURL() !== beforeUrl || raw.url !== beforeUrl || this.state.loading) {
+      throw new Error('网页已变化，请重试采集')
+    }
+    if (typeof raw.html !== 'string' || typeof raw.title !== 'string' || typeof raw.doctype !== 'string') {
+      throw new Error('网页 DOM 采集失败，请重试')
+    }
+    const html = raw.doctype ? `${raw.doctype}\n${raw.html}` : raw.html
+    const byteLength = Buffer.byteLength(html, 'utf8')
+    if (byteLength > 8 * 1024 * 1024) throw new Error('网页超过 8 MiB，无法完整发送')
+    return {
+      finalUrl: beforeUrl,
+      title: raw.title,
+      html,
+      capturedAt: Date.now(),
+      contentHash: createHash('sha256').update(html, 'utf8').digest('hex'),
+      byteLength,
+    }
   }
 
   async openExternal(url: string) {
