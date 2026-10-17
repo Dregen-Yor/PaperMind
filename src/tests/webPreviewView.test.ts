@@ -184,6 +184,21 @@ describe('HTML preview page', () => {
     await flushPromises()
     expect(confirm).toHaveBeenCalledTimes(2)
     expect(window.db.webQa.removePage).toHaveBeenCalledWith(page.id)
+    expect(preview.close).toHaveBeenCalledOnce()
+  })
+
+  it('allows a new QA after returning from the live source to cached reading', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await flushPromises()
+    await wrapper.get('[data-action="open-source"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="return-cache"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-action="new-session"]').trigger('click')
+    expect(wrapper.get('[aria-label="问题输入框"]').attributes('disabled')).toBeUndefined()
   })
 
   it('explains HTTP input without asking Electron to load it', async () => {

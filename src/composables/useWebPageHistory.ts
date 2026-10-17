@@ -82,6 +82,7 @@ export function useWebPageHistory(preview: PreviewApi, repository: WebRepository
       selectedSnapshotPreview.value = null
       qa.selectSnapshot('', '')
       mode.value = 'live'
+      await preview.close().catch(() => {})
     }
     await refreshPages()
   }

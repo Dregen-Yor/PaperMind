@@ -7,6 +7,7 @@
       <button type="button" data-action="open-source" @click="emit('open-source')">打开原网页 ↗</button>
     </header>
     <div class="cached-body">
+      <p v-if="!snapshot.preview.blocks.length" class="cached-note">缓存预览不可用；已保存的问答会话仍可查看。</p>
       <article v-for="(block, index) in snapshot.preview.blocks" :key="index" class="cached-block">
         <component :is="`h${Math.min(6, Math.max(1, block.level ?? 2))}`" v-if="block.kind === 'heading'">{{ block.text }}</component>
         <pre v-else-if="block.kind === 'code'">{{ block.text }}</pre>

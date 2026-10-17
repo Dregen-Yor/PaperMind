@@ -239,17 +239,7 @@ export function createWebQaRepository(db: Database.Database) {
     db.prepare('UPDATE web_qa_sessions SET updated_at=? WHERE id=?').run(Date.now(), row.session_id)
   }
 
-  const remove = (id: string): void => {
-    db.transaction(() => {
-      const row = db.prepare(`SELECT s.snapshot_id, p.page_id FROM web_qa_sessions s
-        JOIN web_snapshots p ON p.id=s.snapshot_id WHERE s.id=?`).get(id) as { snapshot_id: string; page_id: string } | undefined
-      if (!row) return
-      db.prepare('DELETE FROM web_qa_sessions WHERE id=?').run(id)
-      db.prepare('DELETE FROM web_snapshots WHERE id=?').run(row.snapshot_id)
-      db.prepare('DELETE FROM web_pages WHERE id=? AND NOT EXISTS (SELECT 1 FROM web_snapshots WHERE page_id=?)')
-        .run(row.page_id, row.page_id)
-    })()
-  }
+  const remove = (id: string): void => { removeSession(id) }
 
   const exportBackup = (): WebQaBackup => ({
     pages: (db.prepare('SELECT * FROM web_pages').all() as PageRow[]).map(r => ({

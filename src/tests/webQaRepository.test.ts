@@ -71,6 +71,18 @@ describe('web QA repository', () => {
     expect(repo.getSession('s1')?.messages.map(message => message.id)).toEqual(['q1', 'a1'])
     db.close()
   })
+
+  it('legacy remove leaves sibling conversations on a shared snapshot intact', () => {
+    const { db, repo } = setup()
+    const page = repo.archive(snapshot, 100)
+    for (const n of [1, 2]) repo.createSession({ sessionId: `s${n}`, questionId: `q${n}`,
+      assistantId: `a${n}`, snapshotId: page.latestSnapshotId, question: `问题 ${n}`,
+      createdAt: 110 + n, modelId: 'model-a' })
+    repo.remove('s1')
+    expect(repo.getSession('s2')?.messages[0].content).toBe('问题 2')
+    expect(repo.getSnapshot(page.latestSnapshotId)).not.toBeNull()
+    db.close()
+  })
   it('creates one immutable snapshot with ordered messages and cascades removal', () => {
     const { db, repo } = setup()
     const session = repo.create({ sessionId: 's1', messageId: 'm1', snapshot, question: '结论？', createdAt: 20 })
@@ -85,7 +97,7 @@ describe('web QA repository', () => {
     expect(repo.list()).toHaveLength(1)
     repo.remove('s1')
     expect(repo.list()).toEqual([])
-    expect((db.prepare('SELECT COUNT(*) n FROM web_snapshots').get() as { n: number }).n).toBe(0)
+    expect((db.prepare('SELECT COUNT(*) n FROM web_snapshots').get() as { n: number }).n).toBe(1)
     db.close()
   })
 

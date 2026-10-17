@@ -142,10 +142,16 @@ export function createWebQaController(deps: WebQaDependencies) {
         content: result.content, status: 'completed', error: '', modelId: profile.id,
       })
       if (active(controller) && currentSession.value?.id === session.id) {
-        currentSession.value = await deps.repository.getSession(session.id)
+        const updated = await deps.repository.getSession(session.id).catch(() => null)
+        if (active(controller) && currentSession.value?.id === session.id) {
+          currentSession.value = updated ?? { ...currentSession.value,
+            messages: currentSession.value.messages.map(message => message.id === assistantId
+              ? { ...message, content: result.content, status: 'completed' as const, error: '', modelId: profile.id }
+              : message) }
+        }
       }
       if (active(controller)) await refresh().catch(() => {})
-      return true
+      return active(controller)
     } catch (cause) {
       const cancelled = controller.signal.aborted || !ownsRun(controller)
       const message = cancelled ? '已停止生成' : readableError(cause)

@@ -158,4 +158,12 @@ describe('web QA run lifecycle', () => {
     await h.qa.load(id)
     expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('interrupted')
   })
+
+  it('does not downgrade a completed answer if its display refresh fails', async () => {
+    const h = harness()
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    h.repository.getSession.mockRejectedValueOnce(new Error('读取失败'))
+    expect(await h.qa.send('问题')).toBe(true)
+    expect(h.data.values().next().value?.messages.at(-1)?.status).toBe('completed')
+  })
 })

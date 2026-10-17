@@ -113,7 +113,8 @@ const splitRatio = ref(58)
 const mobilePane = ref<'web' | 'qa'>('web')
 const sourceChanged = ref(false)
 const liveDirty = ref(false)
-const canAsk = computed(() => !!qa.currentSession.value || (!!qa.selectedSnapshotId.value && !liveDirty.value))
+const canAsk = computed(() => !!qa.currentSession.value || (!!qa.selectedSnapshotId.value
+  && (history.mode.value === 'cached' || !liveDirty.value)))
 const previewSlot = ref<HTMLElement>()
 const addressInput = ref<HTMLInputElement>()
 const address = ref('')
@@ -185,6 +186,7 @@ function startNewSession() {
 async function loadSession(id: string) {
   try {
     await history.selectSession(id)
+    liveDirty.value = false
     sourceChanged.value = false
     await nextTick(syncBounds)
   } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页会话加载失败' }
@@ -237,6 +239,7 @@ async function onDrop(event: DragEvent) {
 async function selectPage(id: string) {
   try {
     await history.selectPage(id)
+    liveDirty.value = false
     address.value = history.selectedPage.value?.canonicalUrl ?? address.value
     sourceChanged.value = false
     await nextTick(syncBounds)

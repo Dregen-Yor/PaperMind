@@ -19,4 +19,11 @@ describe('cached webpage preview', () => {
     await wrapper.get('[data-action="open-source"]').trigger('click')
     expect(wrapper.emitted('open-source')).toHaveLength(1)
   })
+
+  it('explains an empty migrated preview while retaining access to its conversation', () => {
+    const wrapper = mount(WebCachedPreview, { props: { snapshot: { ...snapshot,
+      preview: { blocks: [], truncated: false } } } })
+    expect(wrapper.text()).toContain('缓存预览不可用')
+    expect(wrapper.find('[data-action="open-source"]').exists()).toBe(true)
+  })
 })

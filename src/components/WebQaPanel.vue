@@ -17,11 +17,12 @@
       </select>
       <button v-if="selectedPageId" type="button" data-action="remove-page" title="删除此网页和全部会话" @click="emit('remove-page', selectedPageId)">删除</button>
     </div>
+    <p v-if="selectedPage" class="page-meta">{{ selectedPage.snapshotCount }} 个缓存版本 · {{ formatSize(selectedPage.totalBytes) }} · 最近打开 {{ formatTime(selectedPage.lastOpenedAt) }}</p>
     <div class="session-toolbar">
       <label for="web-qa-history">历史会话</label>
       <select id="web-qa-history" :value="session?.id || ''" @change="onHistoryChange">
         <option value="">当前页面的新会话</option>
-        <option v-for="item in sessions" :key="item.id" :value="item.id">{{ 'firstQuestion' in item && item.firstQuestion ? item.firstQuestion : item.title || item.finalUrl }} · {{ formatTime(item.createdAt) }}</option>
+        <option v-for="item in sessions" :key="item.id" :value="item.id">{{ 'firstQuestion' in item && item.firstQuestion ? item.firstQuestion : item.title || item.finalUrl }} · 创建 {{ formatTime(item.createdAt) }} · 更新 {{ formatTime(item.updatedAt) }} · 快照 {{ formatTime(item.capturedAt) }}</option>
       </select>
     </div>
 
@@ -103,6 +104,7 @@ const emit = defineEmits<{
   'open-source': []
 }>()
 const draft = ref('')
+const selectedPage = computed(() => props.pages?.find(page => page.id === props.selectedPageId))
 watch(() => [props.session?.id, props.session?.messages.at(-1)?.status] as const,
   ([id, status], [oldId, oldStatus]) => {
     if (id !== oldId) {
@@ -149,6 +151,7 @@ defineExpose({ clearDraft })
 .session-toolbar label { flex-shrink: 0; color: var(--text-muted); font-size: 11px; }
 .session-toolbar select { min-width: 0; flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; outline-color: var(--accent); background: var(--bg-base); color: var(--text-primary); font-size: 12px; }
 .session-toolbar button { border: 0; color: var(--danger); background: transparent; cursor: pointer; font-size: 11px; }
+.page-meta { padding: 0 22px 9px; border-bottom: 1px solid var(--border-light); color: var(--text-muted); font-size: 10px; }
 .source-card { display: flex; flex-direction: column; gap: 5px; margin: 14px 22px 0; padding: 12px 14px; border-left: 2px solid var(--accent); background: var(--bg-base); }
 .source-card strong { overflow: hidden; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }
 .source-url { overflow: hidden; color: var(--text-muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
