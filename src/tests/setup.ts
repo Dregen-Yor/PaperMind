@@ -2,6 +2,33 @@
 import { vi } from 'vitest'
 
 const mockDb = {
+  webQa: {
+    listPages: vi.fn().mockResolvedValue([]),
+    archive: vi.fn().mockRejectedValue(new Error('未配置网页归档测试结果')),
+    getPreview: vi.fn().mockResolvedValue(null),
+    findAppearance: vi.fn().mockResolvedValue(null),
+    getSnapshot: vi.fn().mockResolvedValue(null),
+    listSessions: vi.fn().mockResolvedValue([]),
+    getSession: vi.fn().mockResolvedValue(null),
+    createSession: vi.fn().mockRejectedValue(new Error('未配置网页会话测试结果')),
+    appendTurn: vi.fn().mockRejectedValue(new Error('未配置网页追加测试结果')),
+    ensureAssistantForLastUser: vi.fn().mockRejectedValue(new Error('未配置网页重试测试结果')),
+    removeSession: vi.fn().mockResolvedValue(undefined),
+    removePage: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn().mockResolvedValue(null),
+    create: vi.fn().mockImplementation(input => Promise.resolve({
+      id: input.sessionId, snapshotId: input.sessionId, snapshot: input.snapshot,
+      finalUrl: input.snapshot.finalUrl, title: input.snapshot.title,
+      capturedAt: input.snapshot.capturedAt, byteLength: input.snapshot.byteLength,
+      createdAt: input.createdAt, updatedAt: input.createdAt,
+      messages: [{ id: input.messageId, sessionId: input.sessionId, role: 'user',
+        content: input.question, status: 'completed', error: '', modelId: '', createdAt: input.createdAt }],
+    })),
+    addMessage: vi.fn().mockResolvedValue(undefined),
+    updateMessage: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
+  },
   docling: {
     convert: vi.fn().mockRejectedValue(new Error('未配置测试解析结果')),
     save: vi.fn().mockImplementation((_id, record) => Promise.resolve(record)),

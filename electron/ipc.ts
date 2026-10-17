@@ -1,7 +1,7 @@
 import { app, dialog, ipcMain } from 'electron'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
-import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, getPaperAbstractRepository, exportAll, clearAll, importAll } from './db'
+import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, getPaperAbstractRepository, getWebQaRepository, exportAll, clearAll, importAll } from './db'
 import { createDoclingFacade } from './docling'
 import { testDoclingConnection } from './doclingClient'
 import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
@@ -23,7 +23,26 @@ export function registerIpc() {
   })
   const abstractCheckpoint = getAbstractCheckpointRepository()
   const paperAbstract = getPaperAbstractRepository()
+  const webQa = getWebQaRepository()
   const handlers = {
+    'webQa:listPages': () => webQa.listPages(),
+    'webQa:archive': (_e, snapshot, openedAt) => webQa.archive(snapshot, openedAt),
+    'webQa:getPreview': (_e, id) => webQa.getPreview(id),
+    'webQa:findAppearance': (_e, pageId, contentHash) => webQa.findAppearance(pageId, contentHash),
+    'webQa:getSnapshot': (_e, id) => webQa.getSnapshot(id),
+    'webQa:listSessions': (_e, pageId) => webQa.listSessions(pageId),
+    'webQa:getSession': (_e, id) => webQa.getSession(id),
+    'webQa:createSession': (_e, input) => webQa.createSession(input),
+    'webQa:appendTurn': (_e, input) => webQa.appendTurn(input),
+    'webQa:ensureAssistantForLastUser': (_e, sessionId, assistantId, modelId) => webQa.ensureAssistantForLastUser(sessionId, assistantId, modelId),
+    'webQa:removeSession': (_e, id) => { webQa.removeSession(id) },
+    'webQa:removePage': (_e, id) => { webQa.removePage(id) },
+    'webQa:list': () => webQa.list(),
+    'webQa:get': (_e, id) => webQa.get(id),
+    'webQa:create': (_e, input) => webQa.create(input),
+    'webQa:addMessage': (_e, message) => { webQa.addMessage(message) },
+    'webQa:updateMessage': (_e, id, patch) => { webQa.updateMessage(id, patch) },
+    'webQa:remove': (_e, id) => { webQa.remove(id) },
     'docling:convert': (_e, id) => docling.convert(id),
     'docling:save': (_e, id, record) => docling.save(id, record),
     'docling:readAsset': (_e, id) => docling.readAsset(id),
@@ -46,12 +65,24 @@ export function registerIpc() {
     'paper:contentUrl': (_e, id: string) => paperApi.filePath(id) ? paperContentUrl(id) : null,
     // isolated HTML preview; only the registered application renderer may control it
     'preview:open': (e, url, bounds) => previewControllerForSender(e.sender).open(url, bounds),
+    'preview:openAndCapture': (e, url, bounds) => previewControllerForSender(e.sender).openAndCapture(url, bounds),
     'preview:setBounds': (e, bounds) => previewControllerForSender(e.sender).setBounds(bounds),
+    'preview:showCached': async (e, snapshotId, bounds) => {
+      const controller = previewControllerForSender(e.sender)
+      const archive = webQa.getArchive(snapshotId)
+      if (!archive) {
+        controller.close()
+        return false
+      }
+      await controller.showCached(archive, bounds)
+      return true
+    },
     'preview:back': e => previewControllerForSender(e.sender).back(),
     'preview:forward': e => previewControllerForSender(e.sender).forward(),
     'preview:reload': e => previewControllerForSender(e.sender).reload(),
     'preview:close': e => previewControllerForSender(e.sender).close(),
     'preview:openExternal': (e, url) => previewControllerForSender(e.sender).openExternal(url),
+    'preview:captureSnapshot': e => previewControllerForSender(e.sender).captureSnapshot(),
     // chat
     'chat:listConversations': () => chatApi.listConversations(),
     'chat:createConversation': (_e, conv) => chatApi.createConversation(conv),

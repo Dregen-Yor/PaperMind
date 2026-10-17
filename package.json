@@ -54,6 +54,7 @@
     "katex": "^0.18.1",
     "markdown-it": "^14.3.0",
     "markdown-it-texmath": "^1.0.0",
+    "parse5": "^8.0.1",
     "pdfjs-dist": "^6.0.227",
     "pinia": "^3.0.4",
     "vue": "^3.5.35",

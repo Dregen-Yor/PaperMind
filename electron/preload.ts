@@ -6,6 +6,26 @@ const invoke: TypedInvoke = (channel, ...args) => ipcRenderer.invoke(channel, ..
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db: DbApi = {
+  webQa: {
+    listPages: () => invoke('webQa:listPages'),
+    archive: (snapshot, openedAt) => invoke('webQa:archive', snapshot, openedAt),
+    getPreview: id => invoke('webQa:getPreview', id),
+    findAppearance: (pageId, contentHash) => invoke('webQa:findAppearance', pageId, contentHash),
+    getSnapshot: id => invoke('webQa:getSnapshot', id),
+    listSessions: pageId => invoke('webQa:listSessions', pageId),
+    getSession: id => invoke('webQa:getSession', id),
+    createSession: input => invoke('webQa:createSession', input),
+    appendTurn: input => invoke('webQa:appendTurn', input),
+    ensureAssistantForLastUser: (sessionId, assistantId, modelId) => invoke('webQa:ensureAssistantForLastUser', sessionId, assistantId, modelId),
+    removeSession: id => invoke('webQa:removeSession', id),
+    removePage: id => invoke('webQa:removePage', id),
+    list: () => invoke('webQa:list'),
+    get: id => invoke('webQa:get', id),
+    create: input => invoke('webQa:create', input),
+    addMessage: message => invoke('webQa:addMessage', message),
+    updateMessage: (id, patch) => invoke('webQa:updateMessage', id, patch),
+    remove: id => invoke('webQa:remove', id),
+  },
   docling: {
     convert: (paperId: string) => invoke('docling:convert', paperId),
     save: (paperId, record) => invoke('docling:save', paperId, record),
@@ -75,12 +95,15 @@ contextBridge.exposeInMainWorld('db', db)
 
 const preview: PreviewInvokeApi & { onState: (callback: (state: PreviewState) => void) => () => void } = {
   open: (url: string, bounds: PreviewBounds) => invoke('preview:open', url, bounds),
+  openAndCapture: (url: string, bounds: PreviewBounds) => invoke('preview:openAndCapture', url, bounds),
   setBounds: (bounds: PreviewBounds) => invoke('preview:setBounds', bounds),
+  showCached: (snapshotId: string, bounds: PreviewBounds) => invoke('preview:showCached', snapshotId, bounds),
   back: () => invoke('preview:back'),
   forward: () => invoke('preview:forward'),
   reload: () => invoke('preview:reload'),
   close: () => invoke('preview:close'),
   openExternal: (url: string) => invoke('preview:openExternal', url),
+  captureSnapshot: () => invoke('preview:captureSnapshot'),
   onState: (callback: (state: PreviewState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: PreviewState) => callback(state)
     ipcRenderer.on('preview:state', listener)

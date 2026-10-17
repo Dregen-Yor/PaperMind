@@ -1,8 +1,9 @@
 import type { DoclingRecord, DoclingSettings } from '../utils/doclingDocument'
 import type { PaperAbstractReport } from '../utils/paperAbstract'
 import type { ChatMessageWrite, ChatMessagePatch } from './chatRun'
-import type { PreviewBounds } from './webPreview'
+import type { PreviewBounds, PreviewSnapshot } from './webPreview'
 import type { Conversation } from './chat'
+import type { WebPageSummary, WebQaAppendInput, WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaNewSessionInput, WebQaPageSessionSummary, WebQaSavedSession, WebQaSessionDetail, WebQaSessionSummary, WebSnapshotPreview } from './webQa'
 import type { Paper, KnowledgeBase, Highlight } from './paper'
 
 export type PaperCreateInput = Paper & { fileData: string }
@@ -10,6 +11,26 @@ export type ChatConversationWrite = Omit<Conversation, 'messages'>
 
 // One contract for renderer callers, preload wrappers, and main handlers.
 export interface DbApi {
+  webQa: {
+    listPages: () => Promise<WebPageSummary[]>
+    archive: (snapshot: PreviewSnapshot, openedAt: number) => Promise<WebPageSummary>
+    getPreview: (snapshotId: string) => Promise<WebSnapshotPreview | null>
+    findAppearance: (pageId: string, contentHash: string) => Promise<WebSnapshotPreview | null>
+    getSnapshot: (snapshotId: string) => Promise<PreviewSnapshot | null>
+    listSessions: (pageId: string) => Promise<WebQaPageSessionSummary[]>
+    getSession: (id: string) => Promise<WebQaSavedSession | null>
+    createSession: (input: WebQaNewSessionInput) => Promise<WebQaSavedSession>
+    appendTurn: (input: WebQaAppendInput) => Promise<WebQaSavedSession>
+    ensureAssistantForLastUser: (sessionId: string, assistantId: string, modelId: string) => Promise<WebQaSavedSession>
+    removeSession: (id: string) => Promise<void>
+    removePage: (id: string) => Promise<void>
+    list: () => Promise<WebQaSessionSummary[]>
+    get: (id: string) => Promise<WebQaSessionDetail | null>
+    create: (input: WebQaCreateInput) => Promise<WebQaSessionDetail>
+    addMessage: (message: WebQaMessage) => Promise<void>
+    updateMessage: (id: string, patch: WebQaMessagePatch) => Promise<void>
+    remove: (id: string) => Promise<void>
+  }
   docling: {
     convert: (paperId: string) => Promise<DoclingRecord>
     save: (paperId: string, record: DoclingRecord) => Promise<DoclingRecord>
@@ -79,12 +100,15 @@ export interface DbApi {
 
 export interface PreviewInvokeApi {
   open: (url: string, bounds: PreviewBounds) => Promise<void>
+  openAndCapture: (url: string, bounds: PreviewBounds) => Promise<PreviewSnapshot>
   setBounds: (bounds: PreviewBounds) => Promise<void>
+  showCached: (snapshotId: string, bounds: PreviewBounds) => Promise<boolean>
   back: () => Promise<void>
   forward: () => Promise<void>
   reload: () => Promise<void>
   close: () => Promise<void>
   openExternal: (url: string) => Promise<void>
+  captureSnapshot: () => Promise<PreviewSnapshot>
 }
 
 type IpcSurface = DbApi & { preview: PreviewInvokeApi }
