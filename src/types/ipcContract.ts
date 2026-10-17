@@ -99,6 +99,7 @@ export interface DbApi {
 
 export interface PreviewInvokeApi {
   open: (url: string, bounds: PreviewBounds) => Promise<void>
+  openAndCapture: (url: string, bounds: PreviewBounds) => Promise<PreviewSnapshot>
   setBounds: (bounds: PreviewBounds) => Promise<void>
   back: () => Promise<void>
   forward: () => Promise<void>

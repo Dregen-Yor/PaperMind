@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld('db', db)
 
 const preview: PreviewInvokeApi & { onState: (callback: (state: PreviewState) => void) => () => void } = {
   open: (url: string, bounds: PreviewBounds) => invoke('preview:open', url, bounds),
+  openAndCapture: (url: string, bounds: PreviewBounds) => invoke('preview:openAndCapture', url, bounds),
   setBounds: (bounds: PreviewBounds) => invoke('preview:setBounds', bounds),
   back: () => invoke('preview:back'),
   forward: () => invoke('preview:forward'),

@@ -35,6 +35,7 @@ export class PreviewController {
   private attached = false
   private targetUrl = ''
   private generation = 0
+  private explicitOpenRequest = 0
   private bounds: PreviewBounds = { x: 0, y: 0, width: 0, height: 0 }
   private state: PreviewState = {
     url: '', loading: false, canGoBack: false, canGoForward: false,
@@ -81,17 +82,19 @@ export class PreviewController {
     const contents = view.webContents
     blockedNotices.set(contents, message => this.publish({ notice: message }))
 
-    const guardNavigation = (event: { url: string; isMainFrame: boolean; preventDefault: () => void }) => {
+    const guardNavigation = (event: { url: string; isMainFrame: boolean; preventDefault: () => void }, redirect: boolean) => {
       if (!event.isMainFrame) return
+      if (!redirect) this.explicitOpenRequest++
       if (isAllowedPreviewUrl(event.url)) {
         this.targetUrl = event.url
         return
       }
+      if (redirect) this.explicitOpenRequest++
       event.preventDefault()
       this.publish({ notice: '该链接无法在预览页打开，仅支持 HTTPS 网页。' })
     }
-    contents.on('will-navigate', guardNavigation)
-    contents.on('will-redirect', guardNavigation)
+    contents.on('will-navigate', event => guardNavigation(event, false))
+    contents.on('will-redirect', event => guardNavigation(event, true))
     contents.on('did-start-navigation', details => {
       if (details.isMainFrame) {
         this.generation++
@@ -116,6 +119,7 @@ export class PreviewController {
     })
     contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
       if (isMainFrame && isAllowedPreviewUrl(url)) {
+        this.explicitOpenRequest++
         this.generation++
         this.targetUrl = url
         this.attach()
@@ -142,6 +146,56 @@ export class PreviewController {
   }
 
   async open(url: string, bounds: PreviewBounds) {
+    this.explicitOpenRequest++
+    await this.load(url, bounds)
+  }
+
+  async openAndCapture(url: string, bounds: PreviewBounds): Promise<PreviewSnapshot> {
+    const request = ++this.explicitOpenRequest
+    await this.load(url, bounds)
+    if (request !== this.explicitOpenRequest) throw new Error('网页已变化，请重新打开')
+    await this.waitForIdle(request)
+    if (request !== this.explicitOpenRequest || this.state.error || !this.state.visible) {
+      throw new Error('网页未能完成加载')
+    }
+    const snapshot = await this.captureSnapshot()
+    if (request !== this.explicitOpenRequest) throw new Error('网页已变化，请重新打开')
+    return snapshot
+  }
+
+  private waitForIdle(request: number): Promise<void> {
+    if (request !== this.explicitOpenRequest) return Promise.reject(new Error('网页已变化，请重新打开'))
+    if (!this.state.loading) {
+      return this.state.error || !this.state.visible
+        ? Promise.reject(new Error('网页未能完成加载')) : Promise.resolve()
+    }
+    const contents = this.view?.webContents
+    if (!contents) return Promise.reject(new Error('网页预览已关闭'))
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout)
+        contents.removeListener('did-stop-loading', onStop)
+        contents.removeListener('did-fail-load', onFail)
+      }
+      const onStop = () => {
+        cleanup()
+        if (request !== this.explicitOpenRequest || this.state.error || !this.state.visible) {
+          reject(new Error('网页未能完成加载'))
+        } else resolve()
+      }
+      const onFail = (_event: unknown, code: number, _description: string, failedUrl: string, isMainFrame: boolean) => {
+        if (!isMainFrame || code === -3 || failedUrl !== this.targetUrl) return
+        cleanup()
+        reject(new Error('网页未能完成加载'))
+      }
+      const timeout = setTimeout(() => { cleanup(); reject(new Error('网页加载超时，请重试')) }, 20_000)
+      contents.on('did-stop-loading', onStop)
+      contents.on('did-fail-load', onFail)
+      if (!this.state.loading) onStop()
+    })
+  }
+
+  private async load(url: string, bounds: PreviewBounds) {
     if (!isAllowedPreviewUrl(url)) throw new Error('仅支持 HTTPS 链接')
     const view = this.ensureView()
     this.setBounds(bounds)
@@ -161,16 +215,19 @@ export class PreviewController {
   }
 
   back() {
+    this.explicitOpenRequest++
     const history = this.view?.webContents.navigationHistory
     if (history?.canGoBack()) history.goBack()
   }
 
   forward() {
+    this.explicitOpenRequest++
     const history = this.view?.webContents.navigationHistory
     if (history?.canGoForward()) history.goForward()
   }
 
   reload() {
+    this.explicitOpenRequest++
     if (this.state.error && this.state.url) return this.open(this.state.url, this.bounds)
     if (this.view && this.state.url) {
       this.generation++
@@ -218,6 +275,7 @@ export class PreviewController {
   }
 
   close() {
+    this.explicitOpenRequest++
     this.generation++
     this.detach()
     if (this.view) blockedNotices.delete(this.view.webContents)

@@ -64,6 +64,7 @@ export function registerIpc() {
     'paper:contentUrl': (_e, id: string) => paperApi.filePath(id) ? paperContentUrl(id) : null,
     // isolated HTML preview; only the registered application renderer may control it
     'preview:open': (e, url, bounds) => previewControllerForSender(e.sender).open(url, bounds),
+    'preview:openAndCapture': (e, url, bounds) => previewControllerForSender(e.sender).openAndCapture(url, bounds),
     'preview:setBounds': (e, bounds) => previewControllerForSender(e.sender).setBounds(bounds),
     'preview:back': e => previewControllerForSender(e.sender).back(),
     'preview:forward': e => previewControllerForSender(e.sender).forward(),

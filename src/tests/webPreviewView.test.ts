@@ -21,6 +21,10 @@ beforeEach(() => {
   unsubscribe = vi.fn()
   preview = {
     open: vi.fn(async () => {}),
+    openAndCapture: vi.fn(async () => ({
+      finalUrl: 'https://example.org/', title: 'Example', html: '<html></html>',
+      capturedAt: 1, contentHash: 'hash', byteLength: 13,
+    })),
     setBounds: vi.fn(async () => {}),
     back: vi.fn(async () => {}),
     forward: vi.fn(async () => {}),

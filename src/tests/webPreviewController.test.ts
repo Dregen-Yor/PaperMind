@@ -38,6 +38,9 @@ vi.mock('electron', () => ({
       on(name: string, handler: (...args: any[]) => void) {
         this.listeners.set(name, [...(this.listeners.get(name) ?? []), handler])
       }
+      removeListener(name: string, handler: (...args: any[]) => void) {
+        this.listeners.set(name, (this.listeners.get(name) ?? []).filter(item => item !== handler))
+      }
       emit(name: string, ...args: any[]) {
         for (const handler of this.listeners.get(name) ?? []) handler(...args)
       }
@@ -212,6 +215,47 @@ describe('isolated HTML preview controller', () => {
     expect(result.byteLength).toBe(Buffer.byteLength(result.html, 'utf8'))
     expect(result.contentHash).toBe(createHash('sha256').update(result.html).digest('hex'))
     expect(result.capturedAt).toBeGreaterThan(0)
+  })
+
+  it('captures a redirected HTTPS page from one explicit open', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    const pending = controller.openAndCapture('https://example.org/start', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('will-redirect', { url: 'https://example.org/final', isMainFrame: true, preventDefault: vi.fn() })
+    contents.currentUrl = 'https://example.org/final'
+    contents.emit('did-navigate', {}, 'https://example.org/final')
+    contents.emit('did-stop-loading')
+    expect((await pending).finalUrl).toBe('https://example.org/final')
+  })
+
+  it('rejects an explicit import after a site click or insecure redirect', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    const bounds = { x: 80, y: 64, width: 700, height: 500 }
+    const clicked = controller.openAndCapture('https://example.org/start', bounds)
+    const contents = fake.views[0].webContents
+    contents.emit('will-navigate', { url: 'https://example.org/clicked', isMainFrame: true, preventDefault: vi.fn() })
+    contents.currentUrl = 'https://example.org/clicked'
+    contents.emit('did-stop-loading')
+    await expect(clicked).rejects.toThrow()
+    const redirected = controller.openAndCapture('https://example.org/again', bounds)
+    const event = { url: 'http://example.org/plain', isMainFrame: true, preventDefault: vi.fn() }
+    contents.emit('will-redirect', event)
+    contents.emit('did-stop-loading')
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    await expect(redirected).rejects.toThrow()
+  })
+
+  it('rejects a failed load and an import superseded by another explicit open', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    const bounds = { x: 80, y: 64, width: 700, height: 500 }
+    const failed = controller.openAndCapture('https://example.org/fail', bounds)
+    const contents = fake.views[0].webContents
+    contents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', 'https://example.org/fail', true)
+    await expect(failed).rejects.toThrow()
+    const first = controller.openAndCapture('https://example.org/first', bounds)
+    await controller.open('https://example.org/second', bounds)
+    contents.emit('did-stop-loading')
+    await expect(first).rejects.toThrow()
   })
 
   it('refuses capture while loading or after a same-URL reload races with serialization', async () => {
