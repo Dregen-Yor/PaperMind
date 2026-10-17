@@ -60,6 +60,17 @@ describe('web QA repository', () => {
     expect(repo.getSnapshot(page.latestSnapshotId)).toBeNull()
     db.close()
   })
+
+  it('rolls back both rows when a later answer placeholder conflicts', () => {
+    const { db, repo } = setup()
+    const page = repo.archive(snapshot, 100)
+    repo.createSession({ sessionId: 's1', questionId: 'q1', assistantId: 'a1',
+      snapshotId: page.latestSnapshotId, question: '第一问', createdAt: 110, modelId: 'model-a' })
+    expect(() => repo.appendTurn({ sessionId: 's1', questionId: 'q2', assistantId: 'a1',
+      question: '第二问', createdAt: 120, modelId: 'model-a' })).toThrow()
+    expect(repo.getSession('s1')?.messages.map(message => message.id)).toEqual(['q1', 'a1'])
+    db.close()
+  })
   it('creates one immutable snapshot with ordered messages and cascades removal', () => {
     const { db, repo } = setup()
     const session = repo.create({ sessionId: 's1', messageId: 'm1', snapshot, question: '结论？', createdAt: 20 })

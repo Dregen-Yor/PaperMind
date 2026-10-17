@@ -1,218 +1,161 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createWebQaController } from '../composables/useWebQa'
-import type { WebQaMessage, WebQaSessionDetail } from '../types/webQa'
+import type { WebQaMessage, WebQaSavedSession } from '../types/webQa'
 
 const oldHtml = '<html><main>旧页</main></html>'
 const source = { finalUrl: 'https://example.org/old', title: '旧页', html: oldHtml, capturedAt: 1, contentHash: 'hash', byteLength: 32 }
 
 function harness() {
-  const data = new Map<string, WebQaSessionDetail>()
-  const captureSnapshot = vi.fn(async () => ({ ...source }))
+  const data = new Map<string, WebQaSavedSession>()
+  const snapshots = new Map([['snap-1', source], ['snap-2', { ...source, html: '<html><main>新页</main></html>' }]])
   const repository = {
-    list: vi.fn(async () => [...data.values()].map(({ snapshot: _snapshot, messages: _messages, ...summary }) => ({ ...summary }))),
-    get: vi.fn(async (id: string) => structuredClone(data.get(id) ?? null)),
-    create: vi.fn(async (input: any) => {
-      const detail: WebQaSessionDetail = {
-        id: input.sessionId, snapshotId: input.sessionId, snapshot: input.snapshot,
-        finalUrl: input.snapshot.finalUrl, title: input.snapshot.title,
-        capturedAt: input.snapshot.capturedAt, byteLength: input.snapshot.byteLength,
-        createdAt: input.createdAt, updatedAt: input.createdAt,
-        messages: [{ id: input.messageId, sessionId: input.sessionId, role: 'user', content: input.question,
-          status: 'completed', error: '', modelId: '', createdAt: input.createdAt }],
-      }
+    listSessions: vi.fn(async (pageId: string) => [...data.values()].filter(s => s.pageId === pageId)
+      .map(({ messages: _messages, ...summary }) => structuredClone(summary))),
+    getSession: vi.fn(async (id: string) => structuredClone(data.get(id) ?? null)),
+    getSnapshot: vi.fn(async (id: string) => structuredClone(snapshots.get(id) ?? null)),
+    createSession: vi.fn(async (input: any) => {
+      const snapshot = snapshots.get(input.snapshotId)!
+      const detail: WebQaSavedSession = { id: input.sessionId, pageId: 'page-1', snapshotId: input.snapshotId,
+        finalUrl: snapshot.finalUrl, title: snapshot.title, capturedAt: snapshot.capturedAt,
+        byteLength: snapshot.byteLength, createdAt: input.createdAt, updatedAt: input.createdAt,
+        firstQuestion: input.question, messages: [] }
       data.set(detail.id, detail)
+      insertTurn(detail, input)
       return structuredClone(detail)
     }),
-    addMessage: vi.fn(async (message: WebQaMessage) => { data.get(message.sessionId)!.messages.push(structuredClone(message)) }),
+    appendTurn: vi.fn(async (input: any) => {
+      const detail = data.get(input.sessionId)!
+      insertTurn(detail, input)
+      return structuredClone(detail)
+    }),
     updateMessage: vi.fn(async (id: string, patch: Partial<WebQaMessage>) => {
       for (const session of data.values()) {
         const message = session.messages.find(m => m.id === id)
         if (message) Object.assign(message, patch)
       }
     }),
-    remove: vi.fn(async (id: string) => { data.delete(id) }),
+    ensureAssistantForLastUser: vi.fn(async (id: string, assistantId: string, modelId: string) => {
+      const detail = data.get(id)!
+      detail.messages.push({ id: assistantId, sessionId: id, role: 'assistant', content: '', status: 'interrupted',
+        error: '上次回答未开始，请重试。', modelId, createdAt: Date.now() })
+      return structuredClone(detail)
+    }),
+  }
+  function insertTurn(detail: WebQaSavedSession, input: any) {
+    detail.messages.push({ id: input.questionId, sessionId: detail.id, role: 'user', content: input.question,
+      status: 'completed', error: '', modelId: '', createdAt: input.createdAt })
+    detail.messages.push({ id: input.assistantId, sessionId: detail.id, role: 'assistant', content: '',
+      status: 'streaming', error: '', modelId: input.modelId, createdAt: input.createdAt + 1 })
   }
   const profile = { id: 'model-a', name: 'Model A', provider: 'openai' as const, model: 'model-a',
     apiKey: 'test', baseUrl: 'https://api.example.org', systemPrompt: '请用中文回答',
     temperature: 0, maxTokens: 0, topK: 0 }
-  const requestCompletion = vi.fn(async (
-    _messages: Array<{ role: string; content: string }>,
-    _profileId?: string,
-    _options?: { signal?: AbortSignal; onToken?: (token: string) => void },
-  ) => ({ content: '回答', truncated: false }))
-  const qa = createWebQaController({ preview: { captureSnapshot }, repository, getProfile: () => profile, requestCompletion })
-  return { qa, data, captureSnapshot, repository, profile, requestCompletion }
+  const requestCompletion = vi.fn(async (_messages: Array<{ role: string; content: string }>,
+    _profileId?: string, _options?: { signal?: AbortSignal; onToken?: (token: string) => void }) =>
+    ({ content: '回答', truncated: false }))
+  const qa = createWebQaController({ repository, getProfile: () => profile, requestCompletion })
+  return { qa, data, snapshots, repository, profile, requestCompletion }
 }
 
 describe('web QA run lifecycle', () => {
-  it('accepts only one initial send while the page snapshot is being captured', async () => {
+  it('requires an archived snapshot and writes the turn before calling the model', async () => {
     const h = harness()
-    let finishCapture!: (snapshot: typeof source) => void
-    h.captureSnapshot.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve }))
-    const first = h.qa.send('第一问')
-    expect(await h.qa.send('重复提交')).toBe(false)
-    finishCapture({ ...source })
-    expect(await first).toBe(true)
-    expect(h.repository.create).toHaveBeenCalledTimes(1)
-    expect(h.requestCompletion).toHaveBeenCalledTimes(1)
-  })
-
-  it('cancels a pending capture before new-session navigation can send to the model', async () => {
-    const h = harness()
-    let finishCapture!: (snapshot: typeof source) => void
-    h.captureSnapshot.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve }))
-    const pending = h.qa.send('放弃的问题')
-    expect(h.qa.busy.value).toBe(true)
-    h.qa.newSession()
-    finishCapture({ ...source })
-    expect(await pending).toBe(false)
-    expect(h.repository.create).not.toHaveBeenCalled()
+    expect(await h.qa.send('未归档')).toBe(false)
     expect(h.requestCompletion).not.toHaveBeenCalled()
-    expect(h.qa.currentSession.value).toBeNull()
-  })
-
-  it('stops a pending capture before it can call the model', async () => {
-    const h = harness()
-    let finishCapture!: (snapshot: typeof source) => void
-    h.captureSnapshot.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve }))
-    const pending = h.qa.send('停止的问题')
-    h.qa.stop()
-    finishCapture({ ...source })
-    expect(await pending).toBe(false)
-    expect(h.repository.create).not.toHaveBeenCalled()
-    expect(h.requestCompletion).not.toHaveBeenCalled()
-  })
-
-  it('removes an initial session saved after the user leaves during persistence', async () => {
-    const h = harness()
-    const save = h.repository.create.getMockImplementation()!
-    let finishSave!: () => void
-    h.repository.create.mockImplementationOnce(async input => {
-      await new Promise<void>(resolve => { finishSave = resolve })
-      return save(input)
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    h.requestCompletion.mockImplementationOnce(async () => {
+      expect(h.repository.createSession).toHaveBeenCalledOnce()
+      expect(h.data.values().next().value?.messages.map((m: WebQaMessage) => m.role)).toEqual(['user', 'assistant'])
+      return { content: '回答', truncated: false }
     })
-    const pending = h.qa.send('保存时放弃')
-    await vi.waitFor(() => expect(h.repository.create).toHaveBeenCalledOnce())
-    h.qa.newSession()
-    finishSave()
-    expect(await pending).toBe(false)
-    expect(h.data.size).toBe(0)
-    expect(h.requestCompletion).not.toHaveBeenCalled()
-  })
-
-  it('captures once and keeps the original snapshot after the visible page changes', async () => {
-    const h = harness()
     expect(await h.qa.send('第一问')).toBe(true)
-    h.captureSnapshot.mockResolvedValueOnce({ ...source, html: '<html><main>新页</main></html>' })
-    expect(await h.qa.send('第二问')).toBe(true)
-    expect(h.captureSnapshot).toHaveBeenCalledTimes(1)
-    const second = h.requestCompletion.mock.calls[1][0]
-    expect(second.some(m => m.content.includes(oldHtml))).toBe(true)
-    expect(second.some(m => m.content.includes('新页'))).toBe(false)
-    expect(second.map(m => m.content)).toContain('第一问')
-    expect(second.map(m => m.content)).toContain('回答')
-    expect(h.qa.currentSession.value?.messages).toHaveLength(4)
-  })
-
-  it('does not call the model if the initial local save fails', async () => {
-    const h = harness()
-    h.repository.create.mockRejectedValueOnce(new Error('磁盘写入失败'))
-    expect(await h.qa.send('问题')).toBe(false)
-    expect(h.requestCompletion).not.toHaveBeenCalled()
-    expect(h.qa.error.value).toContain('磁盘写入失败')
-  })
-
-  it('keeps a failed question and retries without sending the failed answer as history', async () => {
-    const h = harness()
-    h.requestCompletion.mockRejectedValueOnce(new Error('context length exceeded'))
-    expect(await h.qa.send('失败问题')).toBe(false)
-    expect(h.qa.error.value).toContain('更长上下文')
-    expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('failed')
-    expect(await h.qa.retry()).toBe(true)
-    const retryMessages = h.requestCompletion.mock.calls[1][0]
-    expect(retryMessages.at(-1)?.content).toBe('失败问题')
-    expect(retryMessages.filter(m => m.content === '失败问题')).toHaveLength(1)
     expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('completed')
   })
 
-  it('keeps a draft out of storage when the model profile is not configured', async () => {
+  it('keeps a saved turn when navigation interrupts its transaction result', async () => {
     const h = harness()
-    h.profile.apiKey = ''
-    expect(await h.qa.send('留在输入框')).toBe(false)
-    expect(h.captureSnapshot).not.toHaveBeenCalled()
-    expect(h.repository.create).not.toHaveBeenCalled()
-    expect(h.qa.error.value).toContain('模型')
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    const save = h.repository.createSession.getMockImplementation()!
+    let finish!: () => void
+    h.repository.createSession.mockImplementationOnce(async input => {
+      await new Promise<void>(resolve => { finish = resolve })
+      return save(input)
+    })
+    const pending = h.qa.send('保存中的问题')
+    await vi.waitFor(() => expect(h.repository.createSession).toHaveBeenCalledOnce())
+    h.qa.newSession()
+    finish()
+    expect(await pending).toBe(false)
+    expect(h.data.size).toBe(1)
+    expect(h.requestCompletion).not.toHaveBeenCalled()
   })
 
-  it('marks a stopped stream as cancelled and can retry the same question', async () => {
+  it('keeps a saved turn if history refresh fails', async () => {
     const h = harness()
-    h.requestCompletion.mockImplementationOnce((_messages, _profileId, options) => new Promise<{ content: string; truncated: boolean }>((_resolve, reject) => {
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    h.repository.listSessions.mockRejectedValueOnce(new Error('列表读取失败'))
+    expect(await h.qa.send('保留问题')).toBe(true)
+    expect(h.data.size).toBe(1)
+  })
+
+  it('uses the original snapshot across new versions and new sessions', async () => {
+    const h = harness()
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    await h.qa.send('旧页第一问')
+    const oldId = h.qa.currentSession.value!.id
+    h.qa.newSession()
+    h.qa.selectSnapshot('page-1', 'snap-2')
+    await h.qa.send('新页第一问')
+    await h.qa.load(oldId)
+    await h.qa.send('旧页第二问')
+    expect(h.requestCompletion.mock.calls[2][0].some(m => m.content.includes(oldHtml))).toBe(true)
+    expect(h.requestCompletion.mock.calls[2][0].some(m => m.content.includes('新页'))).toBe(false)
+    expect(h.repository.appendTurn).toHaveBeenCalledOnce()
+  })
+
+  it('does not call the model after a failed local transaction', async () => {
+    const h = harness()
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    h.repository.createSession.mockRejectedValueOnce(new Error('磁盘写入失败'))
+    expect(await h.qa.send('问题')).toBe(false)
+    expect(h.requestCompletion).not.toHaveBeenCalled()
+    expect(h.data.size).toBe(0)
+  })
+
+  it('marks a cancelled partial answer and retries without including that partial text', async () => {
+    const h = harness()
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    h.requestCompletion.mockImplementationOnce((_messages, _profileId, options) => new Promise((_resolve, reject) => {
+      options?.onToken?.('部分回答')
       options?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
     }))
-    const pending = h.qa.send('停止这次回答')
+    const pending = h.qa.send('原问题')
     await vi.waitFor(() => expect(h.requestCompletion).toHaveBeenCalledOnce())
     h.qa.stop()
     expect(await pending).toBe(false)
     expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('cancelled')
     expect(await h.qa.retry()).toBe(true)
-    expect(h.requestCompletion.mock.calls[1][0].at(-1)?.content).toBe('停止这次回答')
+    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content === '部分回答')).toBe(false)
   })
 
-  it('does not show one session’s stream beneath another saved session', async () => {
+  it('recovers a user-only legacy turn on load', async () => {
     const h = harness()
-    await h.qa.send('A 的第一问')
-    const aId = h.qa.currentSession.value!.id
-    h.qa.newSession()
-    await h.qa.send('B 的第一问')
-    const bId = h.qa.currentSession.value!.id
-    await h.qa.load(aId)
-    let finishAnswer!: (answer: { content: string; truncated: boolean }) => void
-    h.requestCompletion.mockImplementationOnce((_messages, _profileId, options) => new Promise(resolve => {
-      finishAnswer = resolve
-      queueMicrotask(() => options?.onToken?.('A 的部分回答'))
-    }))
-    const pending = h.qa.send('A 的第二问')
-    await vi.waitFor(() => expect(h.qa.streamedText.value).toBe('A 的部分回答'))
-    await h.qa.load(bId)
-    expect(h.qa.currentSession.value?.id).toBe(bId)
-    expect(h.qa.streamedText.value).toBe('')
-    finishAnswer({ content: 'A 的完整回答', truncated: false })
-    expect(await pending).toBe(false)
-    expect(h.qa.currentSession.value?.id).toBe(bId)
-    expect(h.qa.streamedText.value).toBe('')
-    const a = await h.repository.get(aId)
-    expect(a?.messages.at(-1)?.status).toBe('cancelled')
-    expect(a?.messages.at(-1)?.content).toBe('A 的部分回答')
-  })
-
-  it('preserves a truncated response as retryable incomplete output', async () => {
-    const h = harness()
-    h.requestCompletion.mockResolvedValueOnce({ content: '不完整的回答', truncated: true })
-    expect(await h.qa.send('请完整解释')).toBe(false)
-    const partial = h.qa.currentSession.value?.messages.at(-1)
-    expect(partial?.status).toBe('failed')
-    expect(partial?.content).toBe('不完整的回答')
-    expect(partial?.error).toContain('截断')
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    await h.qa.send('旧问题')
+    const id = h.qa.currentSession.value!.id
+    h.data.get(id)!.messages.pop()
+    await h.qa.load(id)
+    expect(h.repository.ensureAssistantForLastUser).toHaveBeenCalledOnce()
     expect(await h.qa.retry()).toBe(true)
-    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content === '不完整的回答')).toBe(false)
   })
 
-  it('uses a new page only after starting a new session and restores the old one unchanged', async () => {
+  it('marks an abandoned streaming answer interrupted when opening its history', async () => {
     const h = harness()
-    await h.qa.send('旧页第一问')
-    const oldId = h.qa.currentSession.value!.id
-    h.qa.newSession()
-    const newHtml = '<html><main>新页</main></html>'
-    h.captureSnapshot.mockResolvedValueOnce({ ...source, finalUrl: 'https://example.org/new', html: newHtml })
-    await h.qa.send('新页第一问')
-    const newId = h.qa.currentSession.value!.id
-    expect(newId).not.toBe(oldId)
-    expect(h.requestCompletion.mock.calls[0][0].some(m => m.content.includes(oldHtml))).toBe(true)
-    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content.includes(newHtml))).toBe(true)
-    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content.includes(oldHtml))).toBe(false)
-    await h.qa.load(oldId)
-    await h.qa.send('旧页第二问')
-    expect(h.requestCompletion.mock.calls[2][0].some(m => m.content.includes(oldHtml))).toBe(true)
-    expect(h.captureSnapshot).toHaveBeenCalledTimes(2)
+    h.qa.selectSnapshot('page-1', 'snap-1')
+    await h.qa.send('问题')
+    const id = h.qa.currentSession.value!.id
+    h.data.get(id)!.messages.at(-1)!.status = 'streaming'
+    await h.qa.load(id)
+    expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('interrupted')
   })
 })

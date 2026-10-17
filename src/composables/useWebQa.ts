@@ -1,16 +1,15 @@
 import { ref } from 'vue'
 import { useChatStore, type LLMProfile } from '../stores/chat'
 import type { DbApi } from '../types/ipcContract'
-import type { PreviewApi } from '../types/webPreview'
-import type { WebQaMessage, WebQaSessionDetail, WebQaSessionSummary } from '../types/webQa'
+import type { WebQaPageSessionSummary, WebQaSavedSession } from '../types/webQa'
 import { buildWebQaMessages } from '../utils/webQaPrompt'
 
 type Completion = (messages: Array<{ role: string; content: string }>, profileId?: string,
   opts?: { signal?: AbortSignal; onToken?: (token: string) => void }) => Promise<{ content: string; truncated: boolean }>
 
 interface WebQaDependencies {
-  preview: Pick<PreviewApi, 'captureSnapshot'>
-  repository: Pick<DbApi['webQa'], 'list' | 'get' | 'create' | 'addMessage' | 'updateMessage' | 'remove'>
+  repository: Pick<DbApi['webQa'], 'listSessions' | 'getSession' | 'getSnapshot' | 'createSession'
+    | 'appendTurn' | 'updateMessage' | 'ensureAssistantForLastUser'>
   getProfile: () => LLMProfile
   requestCompletion: Completion
 }
@@ -29,8 +28,10 @@ function validProfile(profile: LLMProfile): boolean {
 }
 
 export function createWebQaController(deps: WebQaDependencies) {
-  const sessions = ref<WebQaSessionSummary[]>([])
-  const currentSession = ref<WebQaSessionDetail | null>(null)
+  const sessions = ref<WebQaPageSessionSummary[]>([])
+  const currentSession = ref<WebQaSavedSession | null>(null)
+  const selectedPageId = ref('')
+  const selectedSnapshotId = ref('')
   const busy = ref(false)
   const error = ref('')
   const streamedText = ref('')
@@ -46,13 +47,8 @@ export function createWebQaController(deps: WebQaDependencies) {
     return controller
   }
 
-  function ownsRun(controller: AbortController): boolean {
-    return activeController === controller
-  }
-
-  function requireActive(controller: AbortController) {
-    if (!ownsRun(controller) || controller.signal.aborted) throw new Error('已停止生成')
-  }
+  function ownsRun(controller: AbortController): boolean { return activeController === controller }
+  function active(controller: AbortController): boolean { return ownsRun(controller) && !controller.signal.aborted }
 
   function finishRun(controller: AbortController) {
     if (!ownsRun(controller)) return
@@ -69,25 +65,45 @@ export function createWebQaController(deps: WebQaDependencies) {
     error.value = ''
   }
 
+  function selectSnapshot(pageId: string, snapshotId: string) {
+    detachRun()
+    selectionVersion++
+    selectedPageId.value = pageId
+    selectedSnapshotId.value = snapshotId
+    currentSession.value = null
+    sessions.value = []
+  }
+
   async function refresh() {
-    sessions.value = await deps.repository.list()
+    const pageId = selectedPageId.value
+    if (!pageId) { sessions.value = []; return }
+    const version = selectionVersion
+    const rows = await deps.repository.listSessions(pageId)
+    if (version === selectionVersion) sessions.value = rows
   }
 
   async function load(id: string) {
     detachRun()
     const version = ++selectionVersion
-    const detail = await deps.repository.get(id)
+    let detail = await deps.repository.getSession(id)
     if (version !== selectionVersion) return
     if (detail) {
       for (const message of detail.messages.filter(m => m.role === 'assistant' && m.status === 'streaming')) {
         await deps.repository.updateMessage(message.id, { status: 'interrupted', error: '上次生成未完成，请重试。' })
         if (version !== selectionVersion) return
       }
-      currentSession.value = await deps.repository.get(id)
+      if (detail.messages.at(-1)?.role === 'user') {
+        detail = await deps.repository.ensureAssistantForLastUser(id, globalThis.crypto.randomUUID(), deps.getProfile().id)
+      } else {
+        detail = await deps.repository.getSession(id)
+      }
       if (version !== selectionVersion) return
-    } else {
-      currentSession.value = null
+      if (detail) {
+        selectedPageId.value = detail.pageId
+        selectedSnapshotId.value = detail.snapshotId
+      }
     }
+    currentSession.value = detail
     error.value = ''
     streamedText.value = ''
   }
@@ -96,56 +112,50 @@ export function createWebQaController(deps: WebQaDependencies) {
     detachRun()
     selectionVersion++
     currentSession.value = null
-    streamedText.value = ''
-    error.value = ''
   }
 
-  async function run(question: string, session: WebQaSessionDetail, assistantId: string,
-    retrying: boolean, controller: AbortController): Promise<boolean> {
-    const profile = { ...deps.getProfile() }
+  async function run(question: string, session: WebQaSavedSession, assistantId: string,
+    retrying: boolean, controller: AbortController, profile: LLMProfile): Promise<boolean> {
     let partial = ''
     try {
-      requireActive(controller)
+      if (!active(controller)) throw new Error('已停止生成')
       if (retrying) {
         await deps.repository.updateMessage(assistantId, { content: '', status: 'streaming', error: '', modelId: profile.id })
-      } else {
-        const assistant: WebQaMessage = {
-          id: assistantId, sessionId: session.id, role: 'assistant', content: '', status: 'streaming',
-          error: '', modelId: profile.id, createdAt: Date.now(),
-        }
-        await deps.repository.addMessage(assistant)
       }
-      requireActive(controller)
-      const pending = await deps.repository.get(session.id)
-      requireActive(controller)
-      if (pending && currentSession.value?.id === session.id) currentSession.value = pending
-      const messages = buildWebQaMessages(session.snapshot, pending?.messages ?? session.messages,
-        question, profile.systemPrompt)
+      if (!active(controller)) throw new Error('已停止生成')
+      const snapshot = await deps.repository.getSnapshot(session.snapshotId)
+      if (!snapshot) throw new Error('网页快照不存在')
+      if (!active(controller)) throw new Error('已停止生成')
+      const messages = buildWebQaMessages(snapshot, session.messages, question, profile.systemPrompt)
       const result = await deps.requestCompletion(messages, profile.id, {
         signal: controller.signal,
         onToken: token => {
-          if (controller.signal.aborted) return
+          if (!active(controller)) return
           partial += token
-          if (ownsRun(controller) && currentSession.value?.id === session.id) streamedText.value = partial
+          if (currentSession.value?.id === session.id) streamedText.value = partial
         },
       })
-      requireActive(controller)
+      if (!active(controller)) throw new Error('已停止生成')
       partial = result.content
       if (result.truncated) throw new Error('回答因模型输出长度限制被截断；请重试上一问，或在设置中提高输出上限。')
       await deps.repository.updateMessage(assistantId, {
         content: result.content, status: 'completed', error: '', modelId: profile.id,
       })
-      if (ownsRun(controller) && currentSession.value?.id === session.id) currentSession.value = await deps.repository.get(session.id)
-      if (ownsRun(controller)) await refresh()
+      if (active(controller) && currentSession.value?.id === session.id) {
+        currentSession.value = await deps.repository.getSession(session.id)
+      }
+      if (active(controller)) await refresh().catch(() => {})
       return true
     } catch (cause) {
-      const cancelled = controller.signal.aborted
+      const cancelled = controller.signal.aborted || !ownsRun(controller)
       const message = cancelled ? '已停止生成' : readableError(cause)
       if (ownsRun(controller)) error.value = message
       await deps.repository.updateMessage(assistantId, {
         content: partial, status: cancelled ? 'cancelled' : 'failed', error: message,
       }).catch(() => {})
-      if (ownsRun(controller) && currentSession.value?.id === session.id) currentSession.value = await deps.repository.get(session.id)
+      if (ownsRun(controller) && currentSession.value?.id === session.id) {
+        currentSession.value = await deps.repository.getSession(session.id).catch(() => session)
+      }
       return false
     } finally {
       finishRun(controller)
@@ -154,71 +164,70 @@ export function createWebQaController(deps: WebQaDependencies) {
 
   async function send(question: string): Promise<boolean> {
     if (busy.value || !question.trim()) return false
-    error.value = ''
-    if (!validProfile(deps.getProfile())) {
+    const profile = { ...deps.getProfile() }
+    if (!validProfile(profile)) {
       error.value = '请先在设置中配置可用的对话模型。'
       return false
     }
+    if (!currentSession.value && !selectedSnapshotId.value) {
+      error.value = '请先打开并保存网页。'
+      return false
+    }
     const content = question.trim()
-    let session = currentSession.value
-    let createdSessionId: string | null = null
     const controller = beginRun()
+    const questionId = globalThis.crypto.randomUUID()
+    const assistantId = globalThis.crypto.randomUUID()
+    let saved: WebQaSavedSession
     try {
-      if (!session) {
-        const snapshot = await deps.preview.captureSnapshot()
-        requireActive(controller)
-        session = await deps.repository.create({
-          sessionId: globalThis.crypto.randomUUID(), messageId: globalThis.crypto.randomUUID(),
-          snapshot, question: content, createdAt: Date.now(),
-        })
-        createdSessionId = session.id
-        requireActive(controller)
-        currentSession.value = session
-        await refresh()
-        requireActive(controller)
-      } else {
-        await deps.repository.addMessage({
-          id: globalThis.crypto.randomUUID(), sessionId: session.id, role: 'user', content,
-          status: 'completed', error: '', modelId: '', createdAt: Date.now(),
-        })
-        requireActive(controller)
-        session = (await deps.repository.get(session.id)) ?? session
-        requireActive(controller)
-        currentSession.value = session
-      }
+      const input = { sessionId: currentSession.value?.id ?? globalThis.crypto.randomUUID(),
+        questionId, assistantId, question: content, createdAt: Date.now(), modelId: profile.id }
+      saved = currentSession.value
+        ? await deps.repository.appendTurn(input)
+        : await deps.repository.createSession({ ...input, snapshotId: selectedSnapshotId.value })
     } catch (cause) {
-      if (createdSessionId) {
-        try {
-          await deps.repository.remove(createdSessionId)
-          if (currentSession.value?.id === createdSessionId) currentSession.value = null
-          await refresh()
-        } catch { /* Keep the original preparation error for the user. */ }
-      }
-      if (ownsRun(controller)) error.value = controller.signal.aborted ? '已停止生成' : readableError(cause)
+      if (ownsRun(controller)) error.value = readableError(cause)
       finishRun(controller)
       return false
     }
-    return run(content, session, globalThis.crypto.randomUUID(), false, controller)
+    if (!active(controller)) {
+      await deps.repository.updateMessage(assistantId, {
+        status: 'cancelled', error: '已停止生成',
+      }).catch(() => {})
+      finishRun(controller)
+      return false
+    }
+    currentSession.value = saved
+    await refresh().catch(() => {})
+    if (!active(controller)) {
+      await deps.repository.updateMessage(assistantId, {
+        status: 'cancelled', error: '已停止生成',
+      }).catch(() => {})
+      finishRun(controller)
+      return false
+    }
+    return run(content, saved, assistantId, false, controller, profile)
   }
 
   async function retry(): Promise<boolean> {
-    if (busy.value || !currentSession.value || !validProfile(deps.getProfile())) return false
-    const messages = currentSession.value.messages
+    const session = currentSession.value
+    const profile = { ...deps.getProfile() }
+    if (busy.value || !session || !validProfile(profile)) return false
+    const messages = session.messages
     const index = messages.findLastIndex(m => m.role === 'assistant'
       && (m.status === 'failed' || m.status === 'cancelled' || m.status === 'interrupted'))
     if (index < 1 || messages[index - 1].role !== 'user') return false
-    return run(messages[index - 1].content, currentSession.value, messages[index].id, true, beginRun())
+    return run(messages[index - 1].content, session, messages[index].id, true, beginRun(), profile)
   }
 
   function stop() { activeController?.abort() }
 
-  return { sessions, currentSession, busy, error, streamedText, refresh, load, newSession, send, retry, stop }
+  return { sessions, currentSession, selectedPageId, selectedSnapshotId, busy, error, streamedText,
+    selectSnapshot, refresh, load, newSession, send, retry, stop }
 }
 
 export function useWebQa() {
   const chatStore = useChatStore()
   return createWebQaController({
-    preview: window.preview,
     repository: window.db.webQa,
     getProfile: () => chatStore.chatProfile,
     requestCompletion: (messages, profileId, opts) => chatStore.requestCompletion(messages, profileId, opts),

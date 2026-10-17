@@ -70,10 +70,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import MarkdownContent from './MarkdownContent.vue'
-import type { WebQaSessionDetail, WebQaSessionSummary } from '../types/webQa'
+import type { WebQaMessage, WebQaSessionSummary } from '../types/webQa'
 
 const props = defineProps<{
-  session: WebQaSessionDetail | null
+  session: (WebQaSessionSummary & { messages: WebQaMessage[] }) | null
   sessions: WebQaSessionSummary[]
   busy: boolean
   error: string
