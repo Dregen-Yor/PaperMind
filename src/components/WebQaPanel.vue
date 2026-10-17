@@ -10,10 +10,18 @@
     </header>
 
     <div class="session-toolbar">
+      <label for="web-page-history">网页历史</label>
+      <select id="web-page-history" data-action="history-page" :value="selectedPageId || ''" @change="onPageChange">
+        <option value="">选择已保存网页</option>
+        <option v-for="page in pages || []" :key="page.id" :value="page.id">{{ page.title || page.canonicalUrl }} · {{ page.sessionCount }} 个会话</option>
+      </select>
+      <button v-if="selectedPageId" type="button" data-action="remove-page" title="删除此网页和全部会话" @click="emit('remove-page', selectedPageId)">删除</button>
+    </div>
+    <div class="session-toolbar">
       <label for="web-qa-history">历史会话</label>
       <select id="web-qa-history" :value="session?.id || ''" @change="onHistoryChange">
         <option value="">当前页面的新会话</option>
-        <option v-for="item in sessions" :key="item.id" :value="item.id">{{ item.title || item.finalUrl }}</option>
+        <option v-for="item in sessions" :key="item.id" :value="item.id">{{ 'firstQuestion' in item && item.firstQuestion ? item.firstQuestion : item.title || item.finalUrl }} · {{ formatTime(item.createdAt) }}</option>
       </select>
     </div>
 
@@ -36,7 +44,7 @@
       <div v-if="!session" class="empty-qa">
         <span class="empty-mark" aria-hidden="true">↗</span>
         <h3>从这篇网页开始提问</h3>
-        <p>{{ canAsk ? '输入问题后，会先保存当前网页的完整 DOM 快照。' : '先在左侧打开网页，再从这里提问。' }}</p>
+        <p>{{ canAsk ? '网页已保存，可以开始提问。' : '先在左侧打开或从历史中选择网页，再从这里提问。' }}</p>
       </div>
       <div v-else class="message-list">
         <article v-for="message in session.messages" :key="message.id" class="qa-message" :class="message.role">
@@ -56,7 +64,7 @@
 
     <div class="composer">
       <p v-if="error" class="composer-error" role="alert">{{ error }}</p>
-      <p v-if="!session" class="privacy-note">首次提问会将当前页完整 DOM 发送到所选模型服务，并在本机保存问答。</p>
+      <p v-if="!session" class="privacy-note">提问会将已保存网页的完整 DOM 发送到所选模型服务，并在本机保存问答。</p>
       <textarea v-model="draft" aria-label="问题输入框" rows="3" placeholder="问问这篇网页…" :disabled="busy || !canAsk" @keydown.meta.enter.prevent="submit" @keydown.ctrl.enter.prevent="submit" />
       <div class="composer-footer">
         <span>{{ busy ? '正在生成回答' : '⌘ / Ctrl + Enter 发送' }}</span>
@@ -70,11 +78,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import MarkdownContent from './MarkdownContent.vue'
-import type { WebQaMessage, WebQaSessionSummary } from '../types/webQa'
+import type { WebPageSummary, WebQaMessage, WebQaSessionSummary } from '../types/webQa'
 
 const props = defineProps<{
   session: (WebQaSessionSummary & { messages: WebQaMessage[] }) | null
   sessions: WebQaSessionSummary[]
+  pages?: WebPageSummary[]
+  selectedPageId?: string
   busy: boolean
   error: string
   streamedText: string
@@ -88,6 +98,8 @@ const emit = defineEmits<{
   stop: []
   new: []
   load: [id: string]
+  'select-page': [id: string]
+  'remove-page': [id: string]
   'open-source': []
 }>()
 const draft = ref('')
@@ -115,6 +127,10 @@ function onHistoryChange(event: Event) {
   if (id) emit('load', id)
   else emit('new')
 }
+function onPageChange(event: Event) {
+  const id = (event.target as HTMLSelectElement).value
+  if (id) emit('select-page', id)
+}
 function submit() { if (!props.busy && props.canAsk && draft.value.trim()) emit('send', draft.value.trim()) }
 function clearDraft() { draft.value = '' }
 defineExpose({ clearDraft })
@@ -132,6 +148,7 @@ defineExpose({ clearDraft })
 .session-toolbar { display: flex; align-items: center; gap: 9px; padding: 10px 22px; border-bottom: 1px solid var(--border-light); }
 .session-toolbar label { flex-shrink: 0; color: var(--text-muted); font-size: 11px; }
 .session-toolbar select { min-width: 0; flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; outline-color: var(--accent); background: var(--bg-base); color: var(--text-primary); font-size: 12px; }
+.session-toolbar button { border: 0; color: var(--danger); background: transparent; cursor: pointer; font-size: 11px; }
 .source-card { display: flex; flex-direction: column; gap: 5px; margin: 14px 22px 0; padding: 12px 14px; border-left: 2px solid var(--accent); background: var(--bg-base); }
 .source-card strong { overflow: hidden; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }
 .source-url { overflow: hidden; color: var(--text-muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }

@@ -2,10 +2,10 @@
   <div class="web-preview-view">
     <header class="preview-toolbar" aria-label="网页问答工具栏">
       <div class="navigation-actions">
-        <button type="button" data-action="back" class="icon-button" aria-label="后退" title="后退" :disabled="!previewState.canGoBack" @click="runAction(() => window.preview.back())">
+        <button type="button" data-action="back" class="icon-button" aria-label="后退" title="后退" :disabled="history.mode.value === 'cached' || !previewState.canGoBack" @click="runAction(() => window.preview.back())">
           <ArrowLeft aria-hidden="true" />
         </button>
-        <button type="button" data-action="forward" class="icon-button" aria-label="前进" title="前进" :disabled="!previewState.canGoForward" @click="runAction(() => window.preview.forward())">
+        <button type="button" data-action="forward" class="icon-button" aria-label="前进" title="前进" :disabled="history.mode.value === 'cached' || !previewState.canGoForward" @click="runAction(() => window.preview.forward())">
           <ArrowRight aria-hidden="true" />
         </button>
       </div>
@@ -29,7 +29,7 @@
       </form>
 
       <div class="page-actions">
-        <button type="button" data-action="reload" class="icon-button" aria-label="刷新" title="刷新" :disabled="!previewState.url" @click="runAction(() => window.preview.reload())">
+        <button type="button" data-action="reload" class="icon-button" aria-label="刷新" title="刷新" :disabled="history.mode.value === 'cached' || !previewState.url" @click="runAction(() => window.preview.reload())">
           <Refresh aria-hidden="true" />
         </button>
         <button type="button" data-action="external" class="external-button" aria-label="在系统浏览器打开" title="在系统浏览器打开" :disabled="!address.trim() && !previewState.url" @click="openExternal">
@@ -38,6 +38,13 @@
         </button>
       </div>
     </header>
+
+    <div class="cache-actions">
+      <span>{{ history.mode.value === 'cached' ? '本地缓存阅读' : '在线网页预览' }}</span>
+      <button v-if="history.mode.value === 'live' && previewState.visible && liveDirty" type="button" data-action="save-current" @click="saveCurrent">保存当前网页</button>
+      <button v-if="history.selectedPage.value" type="button" data-action="update-cache" @click="updateCache">更新缓存</button>
+      <button v-if="history.mode.value === 'live' && history.selectedPage.value" type="button" data-action="return-cache" @click="selectPage(history.selectedPage.value.id)">返回缓存</button>
+    </div>
 
     <div v-if="previewState.loading" class="loading-line" role="progressbar" aria-label="正在加载网页" />
     <p v-if="previewState.notice" class="toolbar-notice" role="status">{{ previewState.notice }}</p>
@@ -49,8 +56,9 @@
     <div ref="readerSplit" class="web-reader-split">
       <main id="web-document" class="web-split-left" :class="{ 'mobile-active': mobilePane === 'web' }" :style="{ flexBasis: splitRatio + '%' }" aria-label="网页内容">
         <div class="preview-stage">
-          <div ref="previewSlot" class="preview-slot">
-            <div v-if="!previewState.visible" class="preview-message" :class="{ 'has-error': previewState.error || inputError }">
+          <div ref="previewSlot" class="preview-slot" @dragover.prevent @drop.prevent="onDrop">
+            <WebCachedPreview v-if="history.mode.value === 'cached' && history.selectedSnapshotPreview.value" :snapshot="history.selectedSnapshotPreview.value" @open-source="openSavedSource" />
+            <div v-else-if="!previewState.visible" class="preview-message" :class="{ 'has-error': previewState.error || inputError }">
               <template v-if="previewState.error || inputError">
                 <h1 class="message-title font-display">网页未能打开</h1>
                 <p role="alert">{{ inputError || previewState.error }}</p>
@@ -72,11 +80,12 @@
         @mousedown.prevent="startResize" @keydown.left.prevent="adjustSplit(-2)" @keydown.right.prevent="adjustSplit(2)"
         @keydown.home.prevent="setSplit(30)" @keydown.end.prevent="setSplit(75)" @dblclick="setSplit(58)"><span aria-hidden="true" /></div>
       <aside class="web-split-right" :class="{ 'mobile-active': mobilePane === 'qa' }">
-        <WebQaPanel ref="qaPanel" :session="qa.currentSession.value" :sessions="qa.sessions.value" :busy="qa.busy.value"
+        <WebQaPanel ref="qaPanel" :session="qa.currentSession.value" :sessions="qa.sessions.value"
+          :pages="history.pages.value" :selected-page-id="history.selectedPage.value?.id || ''" :busy="qa.busy.value"
           :error="qa.error.value" :streamed-text="qa.streamedText.value" :can-ask="canAsk"
           :source-changed="sourceChanged" :model-name="chatStore.chatProfile.name"
           @send="sendQuestion" @retry="qa.retry" @stop="qa.stop" @new="startNewSession"
-          @load="loadSession" @open-source="openSavedSource" />
+          @load="loadSession" @select-page="selectPage" @remove-page="removePage" @open-source="openSavedSource" />
       </aside>
     </div>
   </div>
@@ -90,16 +99,21 @@ import type { PreviewBounds, PreviewState } from '../types/webPreview'
 import WebQaPanel from '../components/WebQaPanel.vue'
 import { useWebQa } from '../composables/useWebQa'
 import { useChatStore } from '../stores/chat'
+import { useWebPageHistory } from '../composables/useWebPageHistory'
+import WebCachedPreview from '../components/WebCachedPreview.vue'
+import { ElMessageBox } from 'element-plus'
 
 const window = globalThis.window
 const chatStore = useChatStore()
 const qa = useWebQa()
+const history = useWebPageHistory(window.preview, window.db.webQa, qa)
 const qaPanel = ref<InstanceType<typeof WebQaPanel>>()
 const readerSplit = ref<HTMLElement>()
 const splitRatio = ref(58)
 const mobilePane = ref<'web' | 'qa'>('web')
 const sourceChanged = ref(false)
-const canAsk = computed(() => !!qa.currentSession.value || (previewState.value.visible && !previewState.value.loading))
+const liveDirty = ref(false)
+const canAsk = computed(() => !!qa.currentSession.value || (!!qa.selectedSnapshotId.value && !liveDirty.value))
 const previewSlot = ref<HTMLElement>()
 const addressInput = ref<HTMLInputElement>()
 const address = ref('')
@@ -120,7 +134,9 @@ function measuredBounds(): PreviewBounds {
 }
 
 function syncBounds() {
-  if (previewState.value.visible || previewState.value.loading) {
+  if (history.mode.value === 'cached') {
+    void window.preview.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  } else if (previewState.value.visible || previewState.value.loading) {
     const narrow = globalThis.matchMedia?.('(max-width: 800px)').matches ?? false
     const bounds = narrow && mobilePane.value === 'qa'
       ? { x: 0, y: 0, width: 0, height: 0 }
@@ -160,17 +176,21 @@ function stopResize() {
 
 async function sendQuestion(question: string) {
   if (await qa.send(question)) qaPanel.value?.clearDraft()
+  await Promise.allSettled([qa.refresh(), history.refreshPages()])
 }
 function startNewSession() {
   qa.newSession()
-  sourceChanged.value = false
+  sourceChanged.value = liveDirty.value
 }
 async function loadSession(id: string) {
-  await qa.load(id)
-  sourceChanged.value = !!previewState.value.visible && previewState.value.url !== qa.currentSession.value?.finalUrl
+  try {
+    await history.selectSession(id)
+    sourceChanged.value = false
+    await nextTick(syncBounds)
+  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页会话加载失败' }
 }
 function openSavedSource() {
-  const url = qa.currentSession.value?.finalUrl
+  const url = qa.currentSession.value?.finalUrl ?? history.selectedSnapshotPreview.value?.finalUrl
   if (url) void openUrl(url)
 }
 
@@ -183,6 +203,8 @@ function runAction(action: () => Promise<void>) {
 async function openUrl(url: string) {
   inputError.value = ''
   try {
+    history.mode.value = 'live'
+    liveDirty.value = true
     await window.preview.open(url, measuredBounds())
   } catch (error) {
     inputError.value = error instanceof Error ? error.message : '网页未能打开，请重试。'
@@ -194,10 +216,57 @@ async function openAddress() {
     const url = normalizePreviewUrl(address.value)
     address.value = url
     editing.value = false
-    await openUrl(url)
+    inputError.value = ''
+    const page = await history.openExplicit(url, measuredBounds())
+    address.value = page.canonicalUrl
+    liveDirty.value = false
+    sourceChanged.value = false
   } catch (error) {
     inputError.value = error instanceof Error ? error.message : '请输入有效的 HTTPS 链接'
   }
+}
+
+async function onDrop(event: DragEvent) {
+  const raw = event.dataTransfer?.getData('text/uri-list').split('\n').find(line => line.trim() && !line.startsWith('#'))
+    || event.dataTransfer?.getData('text/plain')
+  if (!raw) return
+  address.value = raw.trim()
+  await openAddress()
+}
+
+async function selectPage(id: string) {
+  try {
+    await history.selectPage(id)
+    address.value = history.selectedPage.value?.canonicalUrl ?? address.value
+    sourceChanged.value = false
+    await nextTick(syncBounds)
+  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页缓存加载失败' }
+}
+
+async function saveCurrent() {
+  try {
+    await history.saveCurrent()
+    liveDirty.value = false
+    sourceChanged.value = false
+  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '当前网页保存失败' }
+}
+
+async function updateCache() {
+  try {
+    await history.refreshPage(measuredBounds())
+    liveDirty.value = false
+    sourceChanged.value = false
+  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页缓存更新失败' }
+}
+
+async function removePage(id: string) {
+  try {
+    await ElMessageBox.confirm('将删除此网页的全部缓存版本及其问答会话。确认删除？', '删除网页历史', { type: 'warning' })
+  } catch { return }
+  try {
+    await history.removePage(id)
+    sourceChanged.value = false
+  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页历史删除失败' }
 }
 
 function restoreAddress() {
@@ -221,10 +290,14 @@ function openExternal() {
 }
 
 onMounted(async () => {
-  void qa.refresh()
+  void history.refreshPages()
   unsubscribe = window.preview.onState(next => {
-    if (qa.currentSession.value && (next.url !== qa.currentSession.value.finalUrl
-      || (next.loading && !previewState.value.loading))) sourceChanged.value = true
+    if (history.mode.value === 'live' && history.selectedPage.value
+      && (next.url !== history.selectedPage.value.canonicalUrl
+        || (next.loading && !previewState.value.loading))) {
+      liveDirty.value = true
+      sourceChanged.value = true
+    }
     previewState.value = next
     if (!editing.value) address.value = next.url
     if (next.visible) inputError.value = ''
@@ -250,6 +323,7 @@ onBeforeUnmount(() => {
 })
 
 watch(splitRatio, () => { void nextTick(syncBounds) })
+watch(() => history.mode.value, () => { void nextTick(syncBounds) })
 </script>
 
 <style scoped>
@@ -263,6 +337,8 @@ watch(splitRatio, () => { void nextTick(syncBounds) })
 .resizer:hover span { background: var(--accent); }
 .web-mode-switch { display: none; }
 .preview-toolbar { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--bg-surface); flex-shrink: 0; }
+.cache-actions { display: flex; align-items: center; gap: 12px; min-height: 35px; padding: 5px 20px; border-bottom: 1px solid var(--border); color: var(--text-muted); background: var(--bg-surface); font-size: 11px; }
+.cache-actions button { border: 0; color: var(--accent); background: transparent; cursor: pointer; font-size: 11px; }
 .navigation-actions, .page-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .icon-button, .external-button, .open-button { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; color: var(--text-secondary); background: transparent; }
 .icon-button { width: 40px; height: 40px; border-radius: var(--radius-sm); }

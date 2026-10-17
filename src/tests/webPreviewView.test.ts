@@ -5,6 +5,7 @@ import type { PreviewApi, PreviewState } from '../types/webPreview'
 import { createPinia, setActivePinia } from 'pinia'
 import App from '../App.vue'
 import router from '../router'
+import { ElMessageBox } from 'element-plus'
 
 const emptyState: PreviewState = {
   url: '', loading: false, canGoBack: false, canGoForward: false,
@@ -15,9 +16,21 @@ let wrapper: VueWrapper | undefined
 let pushState: ((state: PreviewState) => void) | undefined
 let unsubscribe: () => void
 let preview: PreviewApi
+const page = { id: 'page-1', canonicalUrl: 'https://example.org/article', title: '文章',
+  createdAt: 1, lastOpenedAt: 1, latestSnapshotId: 'snap-1', snapshotCount: 1,
+  sessionCount: 0, totalBytes: 80 }
+const cached = { id: 'snap-1', pageId: 'page-1', finalUrl: page.canonicalUrl, title: '本地缓存文章',
+  capturedAt: 1, byteLength: 80, contentHash: 'hash', preview: { truncated: false,
+    blocks: [{ kind: 'paragraph' as const, text: '离线正文' }] } }
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  vi.mocked(window.db.webQa.archive).mockClear()
+  vi.mocked(window.db.webQa.listPages).mockClear()
+  vi.mocked(window.db.webQa.listPages).mockResolvedValue([])
+  vi.mocked(window.db.webQa.archive).mockResolvedValue(page)
+  vi.mocked(window.db.webQa.getPreview).mockResolvedValue(cached)
+  vi.mocked(window.db.webQa.listSessions).mockResolvedValue([])
   unsubscribe = vi.fn()
   preview = {
     open: vi.fn(async () => {}),
@@ -71,14 +84,106 @@ describe('HTML preview page', () => {
     expect(wrapper.get('.app-shell').classes()).toContain('is-reading')
   })
 
-  it('opens a pasted domain as HTTPS in the measured native slot', async () => {
+  it('archives an actively opened HTTPS link after load and capture', async () => {
     wrapper = mount(WebPreviewView)
     await wrapper.get('[aria-label="网页地址"]').setValue(' example.org/article ')
+    expect(window.db.webQa.archive).not.toHaveBeenCalled()
     await wrapper.get('[aria-label="网页地址"]').trigger('keydown.enter')
     await flushPromises()
-    expect(preview.open).toHaveBeenCalledWith('https://example.org/article', {
+    expect(preview.openAndCapture).toHaveBeenCalledWith('https://example.org/article', {
       x: 72, y: 64, width: 900, height: 700,
     })
+    expect(window.db.webQa.archive).toHaveBeenCalledOnce()
+  })
+
+  it('archives a dropped HTTPS link but leaves site navigation unsaved', async () => {
+    wrapper = mount(WebPreviewView)
+    await wrapper.get('.preview-slot').trigger('drop', {
+      dataTransfer: { getData: (type: string) => type === 'text/uri-list' ? 'https://example.org/article' : '' },
+    })
+    await flushPromises()
+    expect(preview.openAndCapture).toHaveBeenCalledOnce()
+    expect(window.db.webQa.archive).toHaveBeenCalledOnce()
+    pushState?.({ ...emptyState, url: 'https://example.org/other', visible: true })
+    await flushPromises()
+    expect(window.db.webQa.archive).toHaveBeenCalledOnce()
+  })
+
+  it('accepts a plain-text link drop when no URI list is supplied', async () => {
+    wrapper = mount(WebPreviewView)
+    await wrapper.get('.preview-slot').trigger('drop', {
+      dataTransfer: { getData: (type: string) => type === 'text/plain' ? 'https://example.org/article' : '' },
+    })
+    await flushPromises()
+    expect(preview.openAndCapture).toHaveBeenCalledWith('https://example.org/article', expect.any(Object))
+  })
+
+  it('opens a saved page from text-only cache without loading the original URL', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue('page-1')
+    await flushPromises()
+    expect(wrapper.text()).toContain('本地缓存文章')
+    expect(wrapper.text()).toContain('离线正文')
+    expect(preview.open).not.toHaveBeenCalled()
+    expect(preview.setBounds).toHaveBeenCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+  })
+
+  it('groups distinct sessions under a page and opens each saved answer from cache', async () => {
+    const sessions = ['s1', 's2'].map((id, index) => ({ id, pageId: page.id,
+      snapshotId: cached.id, finalUrl: cached.finalUrl, title: cached.title,
+      capturedAt: 1, byteLength: 80, createdAt: index + 1, updatedAt: index + 1,
+      firstQuestion: `问题 ${index + 1}` }))
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    vi.mocked(window.db.webQa.listSessions).mockResolvedValue(sessions)
+    vi.mocked(window.db.webQa.getSession).mockImplementation(async id => ({ ...sessions.find(s => s.id === id)!,
+      messages: [{ id: `m-${id}`, sessionId: id, role: 'user', content: `问题 ${id}`,
+        status: 'completed', error: '', modelId: '', createdAt: 1 },
+      { id: `a-${id}`, sessionId: id, role: 'assistant', content: `回答 ${id}`,
+        status: 'completed', error: '', modelId: 'model-a', createdAt: 2 }] }))
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await flushPromises()
+    expect(wrapper.get('#web-qa-history').findAll('option')).toHaveLength(3)
+    await wrapper.get('#web-qa-history').setValue('s2')
+    await flushPromises()
+    expect(wrapper.text()).toContain('问题 s2')
+    expect(preview.open).not.toHaveBeenCalled()
+  })
+
+  it('requires Save after unsaved site navigation before starting a new session', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    wrapper = mount(WebPreviewView)
+    await wrapper.get('[aria-label="网页地址"]').setValue('example.org/article')
+    await wrapper.get('[aria-label="网页地址"]').trigger('keydown.enter')
+    await flushPromises()
+    pushState?.({ ...emptyState, url: 'https://example.org/other', visible: true })
+    await wrapper.get('[data-action="new-session"]').trigger('click')
+    expect(wrapper.get('[data-action="send-question"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-action="save-current"]').exists()).toBe(true)
+    await wrapper.get('[data-action="save-current"]').trigger('click')
+    await flushPromises()
+    expect(preview.captureSnapshot).toHaveBeenCalledOnce()
+    expect(window.db.webQa.archive).toHaveBeenCalledTimes(2)
+  })
+
+  it('deletes a page only after confirmation', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce(new Error('cancel'))
+      .mockResolvedValueOnce('confirm' as never)
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await flushPromises()
+    await wrapper.get('[data-action="remove-page"]').trigger('click')
+    await flushPromises()
+    expect(window.db.webQa.removePage).not.toHaveBeenCalled()
+    await wrapper.get('[data-action="remove-page"]').trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledTimes(2)
+    expect(window.db.webQa.removePage).toHaveBeenCalledWith(page.id)
   })
 
   it('explains HTTP input without asking Electron to load it', async () => {

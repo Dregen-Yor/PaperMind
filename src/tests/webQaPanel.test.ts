@@ -20,7 +20,7 @@ describe('web QA panel', () => {
     } })
     await wrapper.get('[aria-label="问题输入框"]').setValue('问题')
     expect(wrapper.get('[data-action="send-question"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('先在左侧打开网页')
+    expect(wrapper.text()).toContain('先在左侧打开或从历史中选择网页')
   })
 
   it('keeps restored history visible and marks it as pinned when the page changed', () => {
