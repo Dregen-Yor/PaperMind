@@ -24,9 +24,46 @@ beforeEach(() => {
   db().docling.save.mockClear()
   db().abstractCheckpoint.get.mockReset().mockResolvedValue(null)
   db().abstractCheckpoint.save.mockReset().mockResolvedValue(undefined)
+  db().paperAbstract.get.mockReset().mockResolvedValue(null)
+  db().paperAbstract.save.mockReset().mockImplementation(async (report: any) => ({ ...report, updatedAt: 1 }))
   db().chat.updateMessage.mockClear()
 })
 describe('native /abstract Docling integration', () => {
+  it('reuses a saved single-paper summary without a configured model or Docling service', async () => {
+    db().paperAbstract.get.mockResolvedValue({
+      paperId: 'paper', content: '# Existing report', sources: [{ label: '文1', paperId: 'paper' }],
+      truncated: false, updatedAt: 1,
+    })
+    global.fetch = vi.fn()
+    const store = useChatStore(); await store.init()
+    const conv = await store.newConversation('t', ['paper'])
+    await store.sendMessage(conv.id, '/abstract')
+    expect(conv.messages.at(-1)?.content).toBe('# Existing report')
+    expect(db().docling.convert).not.toHaveBeenCalled()
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
+  it('saves a new single-paper summary for direct use in another conversation', async () => {
+    const reports = new Map<string, any>()
+    db().paperAbstract.get.mockImplementation(async (id: string) => reports.get(id) ?? null)
+    db().paperAbstract.save.mockImplementation(async (report: any) => {
+      const saved = { ...report, updatedAt: 1 }
+      reports.set(report.paperId, saved)
+      return saved
+    })
+    global.fetch = vi.fn().mockResolvedValue(ok('# First report {{cite:text-1}}'))
+    const store = await configure()
+    const first = await store.newConversation('first', ['paper'])
+    await store.sendMessage(first.id, '/abstract')
+    const second = await store.newConversation('second', ['paper'])
+    global.fetch = vi.fn().mockRejectedValue(new Error('model must not run again'))
+    await store.sendMessage(second.id, '/abstract')
+    expect(second.messages.at(-1)?.content).toBe(first.messages.at(-1)?.content)
+    expect(reports.get('paper')?.content).toBe(first.messages.at(-1)?.content)
+    expect(db().docling.convert).toHaveBeenCalledTimes(1)
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
   it('uses the active chat model and preserves paper/page references', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout')
     const request = vi.fn().mockResolvedValue(ok('## 解读\nEvidence {{cite:text-1}}'))
@@ -92,6 +129,9 @@ describe('native /abstract Docling integration', () => {
     expect(target.content).toContain('Beginning')
     expect(target.content).toContain('Continued')
     expect(target.truncated).toBe(false)
+    expect(db().paperAbstract.save).toHaveBeenLastCalledWith(expect.objectContaining({
+      paperId: 'paper', content: target.content, truncated: false,
+    }))
     expect(db().index.get).not.toHaveBeenCalled()
   })
   it('keeps separate titles and sources for multiple papers', async () => {

@@ -24,7 +24,7 @@ describe('saved paper abstracts', () => {
     } finally { db.close() }
   })
 
-  it('does not treat an old /abstract chat answer as a current report', () => {
+  it('shows an existing single-paper /abstract answer when no dedicated report exists', () => {
     const db = new Database(':memory:')
     db.pragma('foreign_keys = ON')
     db.exec(SCHEMA)
@@ -37,7 +37,11 @@ describe('saved paper abstracts', () => {
     addMessage.run('question', 'conv', 'user', '普通问题', '[]', '', 3)
     addMessage.run('ordinary-answer', 'conv', 'assistant', '普通回答', '[]', '', 4)
     try {
-      expect(createPaperAbstractRepository(db).get('paper')).toBeNull()
+      expect(createPaperAbstractRepository(db).get('paper')).toEqual({
+        paperId: 'paper', content: '# Existing report',
+        sources: [{ label: '文1', paperId: 'paper', startPage: 0 }],
+        truncated: false, updatedAt: 2,
+      })
       expect(db.prepare('SELECT COUNT(*) AS count FROM paper_abstracts').get()).toEqual({ count: 0 })
     } finally { db.close() }
   })
@@ -68,7 +72,9 @@ describe('saved paper abstracts', () => {
     db.prepare('INSERT INTO conversations (id,title,paper_ids,created_at) VALUES (?,?,?,?)').run('failed', '问答', '["paper"]', 0)
     const addMessage = db.prepare('INSERT INTO messages (id,conversation_id,role,content,sources,error,timestamp) VALUES (?,?,?,?,?,?,?)')
     addMessage.run('u1', 'multi', 'user', '/abstract', '[]', '', 1)
-    addMessage.run('a1', 'multi', 'assistant', '# Combined', '[]', '', 2)
+    addMessage.run('a1', 'multi', 'assistant', '# Combined', JSON.stringify([
+      { label: '文1', paperId: 'paper' }, { label: '文2' },
+    ]), '', 2)
     addMessage.run('u2', 'failed', 'user', '/abstract', '[]', '', 3)
     addMessage.run('a2', 'failed', 'assistant', '# Failure', '[]', 'request failed', 4)
     try { expect(createPaperAbstractRepository(db).get('paper')).toBeNull() } finally { db.close() }

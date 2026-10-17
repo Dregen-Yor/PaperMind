@@ -1270,6 +1270,12 @@ export const useChatStore = defineStore('chat', () => {
     try { return await task } finally { paperAbstractJobs.delete(paperId) }
   }
 
+  async function singlePaperAbstract(paperId: string, force = false): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
+    const saved = force ? null : await window.db.paperAbstract.get(paperId)
+    const report = saved ?? await generatePaperAbstract(paperId, force)
+    return { content: report.content, sources: report.sources, truncated: report.truncated, context: '' }
+  }
+
   // ---------- Send Message (RAG 3-call pipeline) ----------
 
   async function collectIndexedPapers(conv: Conversation, signal?: AbortSignal): Promise<{ papers: IndexedPaper[]; paperIds: string[] }> {
@@ -1433,7 +1439,9 @@ export const useChatStore = defineStore('chat', () => {
         return userMessage
       }
       if (normalized === '/abstract') {
-        const result = await generateAbstract(conv)
+        const result = conv.paperIds.length === 1
+          ? await singlePaperAbstract(conv.paperIds[0])
+          : await generateAbstract(conv)
         await addMessage(convId, 'assistant', result.content, result.sources, { truncated: result.truncated, context: result.context })
         return result.content
       }
@@ -1457,7 +1465,9 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     try {
-      const result = await generateAbstract(conv)
+      const result = conv.paperIds.length === 1
+        ? await singlePaperAbstract(conv.paperIds[0], true)
+        : await generateAbstract(conv)
       await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '', truncated: result.truncated, context: result.context })
     } catch (error) {
       await updateMessage(convId, messageId, { content: '', error: errorMessageOf(error) })
@@ -1479,6 +1489,9 @@ export const useChatStore = defineStore('chat', () => {
       const result = await generateAbstract(conv, resume)
       const sources = [...new Map([...(target.sources ?? []), ...result.sources].map(ref => [`${ref.paperId}:${ref.startPage}`, ref])).values()]
       await updateMessage(convId, messageId, { content: target.content + '\n\n' + result.content, sources, truncated: result.truncated, context: result.context })
+      if (resume.paperIds.length === 1) {
+        await window.db.paperAbstract.save({ paperId: resume.paperIds[0], content: target.content, sources, truncated: result.truncated })
+      }
       return
     }
 
