@@ -57,6 +57,49 @@ describe('web QA run lifecycle', () => {
     expect(h.requestCompletion).toHaveBeenCalledTimes(1)
   })
 
+  it('cancels a pending capture before new-session navigation can send to the model', async () => {
+    const h = harness()
+    let finishCapture!: (snapshot: typeof source) => void
+    h.captureSnapshot.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve }))
+    const pending = h.qa.send('放弃的问题')
+    expect(h.qa.busy.value).toBe(true)
+    h.qa.newSession()
+    finishCapture({ ...source })
+    expect(await pending).toBe(false)
+    expect(h.repository.create).not.toHaveBeenCalled()
+    expect(h.requestCompletion).not.toHaveBeenCalled()
+    expect(h.qa.currentSession.value).toBeNull()
+  })
+
+  it('stops a pending capture before it can call the model', async () => {
+    const h = harness()
+    let finishCapture!: (snapshot: typeof source) => void
+    h.captureSnapshot.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve }))
+    const pending = h.qa.send('停止的问题')
+    h.qa.stop()
+    finishCapture({ ...source })
+    expect(await pending).toBe(false)
+    expect(h.repository.create).not.toHaveBeenCalled()
+    expect(h.requestCompletion).not.toHaveBeenCalled()
+  })
+
+  it('removes an initial session saved after the user leaves during persistence', async () => {
+    const h = harness()
+    const save = h.repository.create.getMockImplementation()!
+    let finishSave!: () => void
+    h.repository.create.mockImplementationOnce(async input => {
+      await new Promise<void>(resolve => { finishSave = resolve })
+      return save(input)
+    })
+    const pending = h.qa.send('保存时放弃')
+    await vi.waitFor(() => expect(h.repository.create).toHaveBeenCalledOnce())
+    h.qa.newSession()
+    finishSave()
+    expect(await pending).toBe(false)
+    expect(h.data.size).toBe(0)
+    expect(h.requestCompletion).not.toHaveBeenCalled()
+  })
+
   it('captures once and keeps the original snapshot after the visible page changes', async () => {
     const h = harness()
     expect(await h.qa.send('第一问')).toBe(true)
@@ -113,6 +156,45 @@ describe('web QA run lifecycle', () => {
     expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('cancelled')
     expect(await h.qa.retry()).toBe(true)
     expect(h.requestCompletion.mock.calls[1][0].at(-1)?.content).toBe('停止这次回答')
+  })
+
+  it('does not show one session’s stream beneath another saved session', async () => {
+    const h = harness()
+    await h.qa.send('A 的第一问')
+    const aId = h.qa.currentSession.value!.id
+    h.qa.newSession()
+    await h.qa.send('B 的第一问')
+    const bId = h.qa.currentSession.value!.id
+    await h.qa.load(aId)
+    let finishAnswer!: (answer: { content: string; truncated: boolean }) => void
+    h.requestCompletion.mockImplementationOnce((_messages, _profileId, options) => new Promise(resolve => {
+      finishAnswer = resolve
+      queueMicrotask(() => options?.onToken?.('A 的部分回答'))
+    }))
+    const pending = h.qa.send('A 的第二问')
+    await vi.waitFor(() => expect(h.qa.streamedText.value).toBe('A 的部分回答'))
+    await h.qa.load(bId)
+    expect(h.qa.currentSession.value?.id).toBe(bId)
+    expect(h.qa.streamedText.value).toBe('')
+    finishAnswer({ content: 'A 的完整回答', truncated: false })
+    expect(await pending).toBe(false)
+    expect(h.qa.currentSession.value?.id).toBe(bId)
+    expect(h.qa.streamedText.value).toBe('')
+    const a = await h.repository.get(aId)
+    expect(a?.messages.at(-1)?.status).toBe('cancelled')
+    expect(a?.messages.at(-1)?.content).toBe('A 的部分回答')
+  })
+
+  it('preserves a truncated response as retryable incomplete output', async () => {
+    const h = harness()
+    h.requestCompletion.mockResolvedValueOnce({ content: '不完整的回答', truncated: true })
+    expect(await h.qa.send('请完整解释')).toBe(false)
+    const partial = h.qa.currentSession.value?.messages.at(-1)
+    expect(partial?.status).toBe('failed')
+    expect(partial?.content).toBe('不完整的回答')
+    expect(partial?.error).toContain('截断')
+    expect(await h.qa.retry()).toBe(true)
+    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content === '不完整的回答')).toBe(false)
   })
 
   it('uses a new page only after starting a new session and restores the old one unchanged', async () => {

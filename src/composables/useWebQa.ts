@@ -35,19 +35,56 @@ export function createWebQaController(deps: WebQaDependencies) {
   const error = ref('')
   const streamedText = ref('')
   let activeController: AbortController | null = null
-  let preparing = false
+  let selectionVersion = 0
+
+  function beginRun(): AbortController {
+    const controller = new AbortController()
+    activeController = controller
+    busy.value = true
+    streamedText.value = ''
+    error.value = ''
+    return controller
+  }
+
+  function ownsRun(controller: AbortController): boolean {
+    return activeController === controller
+  }
+
+  function requireActive(controller: AbortController) {
+    if (!ownsRun(controller) || controller.signal.aborted) throw new Error('已停止生成')
+  }
+
+  function finishRun(controller: AbortController) {
+    if (!ownsRun(controller)) return
+    activeController = null
+    busy.value = false
+    streamedText.value = ''
+  }
+
+  function detachRun() {
+    activeController?.abort()
+    activeController = null
+    busy.value = false
+    streamedText.value = ''
+    error.value = ''
+  }
 
   async function refresh() {
     sessions.value = await deps.repository.list()
   }
 
   async function load(id: string) {
+    detachRun()
+    const version = ++selectionVersion
     const detail = await deps.repository.get(id)
+    if (version !== selectionVersion) return
     if (detail) {
       for (const message of detail.messages.filter(m => m.role === 'assistant' && m.status === 'streaming')) {
         await deps.repository.updateMessage(message.id, { status: 'interrupted', error: '上次生成未完成，请重试。' })
+        if (version !== selectionVersion) return
       }
       currentSession.value = await deps.repository.get(id)
+      if (version !== selectionVersion) return
     } else {
       currentSession.value = null
     }
@@ -56,20 +93,19 @@ export function createWebQaController(deps: WebQaDependencies) {
   }
 
   function newSession() {
-    activeController?.abort()
+    detachRun()
+    selectionVersion++
     currentSession.value = null
     streamedText.value = ''
     error.value = ''
   }
 
-  async function run(question: string, session: WebQaSessionDetail, assistantId: string, retrying: boolean): Promise<boolean> {
+  async function run(question: string, session: WebQaSessionDetail, assistantId: string,
+    retrying: boolean, controller: AbortController): Promise<boolean> {
     const profile = { ...deps.getProfile() }
-    const controller = new AbortController()
-    activeController = controller
-    busy.value = true
-    streamedText.value = ''
-    error.value = ''
+    let partial = ''
     try {
+      requireActive(controller)
       if (retrying) {
         await deps.repository.updateMessage(assistantId, { content: '', status: 'streaming', error: '', modelId: profile.id })
       } else {
@@ -79,39 +115,45 @@ export function createWebQaController(deps: WebQaDependencies) {
         }
         await deps.repository.addMessage(assistant)
       }
+      requireActive(controller)
       const pending = await deps.repository.get(session.id)
+      requireActive(controller)
       if (pending && currentSession.value?.id === session.id) currentSession.value = pending
       const messages = buildWebQaMessages(session.snapshot, pending?.messages ?? session.messages,
         question, profile.systemPrompt)
       const result = await deps.requestCompletion(messages, profile.id, {
         signal: controller.signal,
-        onToken: token => { if (!controller.signal.aborted) streamedText.value += token },
+        onToken: token => {
+          if (controller.signal.aborted) return
+          partial += token
+          if (ownsRun(controller) && currentSession.value?.id === session.id) streamedText.value = partial
+        },
       })
-      if (controller.signal.aborted) throw new Error('已停止生成')
+      requireActive(controller)
+      partial = result.content
+      if (result.truncated) throw new Error('回答因模型输出长度限制被截断；请重试上一问，或在设置中提高输出上限。')
       await deps.repository.updateMessage(assistantId, {
         content: result.content, status: 'completed', error: '', modelId: profile.id,
       })
-      if (currentSession.value?.id === session.id) currentSession.value = await deps.repository.get(session.id)
-      await refresh()
-      streamedText.value = ''
+      if (ownsRun(controller) && currentSession.value?.id === session.id) currentSession.value = await deps.repository.get(session.id)
+      if (ownsRun(controller)) await refresh()
       return true
     } catch (cause) {
       const cancelled = controller.signal.aborted
-      error.value = cancelled ? '已停止生成' : readableError(cause)
+      const message = cancelled ? '已停止生成' : readableError(cause)
+      if (ownsRun(controller)) error.value = message
       await deps.repository.updateMessage(assistantId, {
-        content: streamedText.value, status: cancelled ? 'cancelled' : 'failed', error: error.value,
+        content: partial, status: cancelled ? 'cancelled' : 'failed', error: message,
       }).catch(() => {})
-      if (currentSession.value?.id === session.id) currentSession.value = await deps.repository.get(session.id)
-      streamedText.value = ''
+      if (ownsRun(controller) && currentSession.value?.id === session.id) currentSession.value = await deps.repository.get(session.id)
       return false
     } finally {
-      if (activeController === controller) activeController = null
-      busy.value = false
+      finishRun(controller)
     }
   }
 
   async function send(question: string): Promise<boolean> {
-    if (busy.value || preparing || !question.trim()) return false
+    if (busy.value || !question.trim()) return false
     error.value = ''
     if (!validProfile(deps.getProfile())) {
       error.value = '请先在设置中配置可用的对话模型。'
@@ -119,40 +161,53 @@ export function createWebQaController(deps: WebQaDependencies) {
     }
     const content = question.trim()
     let session = currentSession.value
-    preparing = true
+    let createdSessionId: string | null = null
+    const controller = beginRun()
     try {
       if (!session) {
         const snapshot = await deps.preview.captureSnapshot()
+        requireActive(controller)
         session = await deps.repository.create({
           sessionId: globalThis.crypto.randomUUID(), messageId: globalThis.crypto.randomUUID(),
           snapshot, question: content, createdAt: Date.now(),
         })
+        createdSessionId = session.id
+        requireActive(controller)
         currentSession.value = session
         await refresh()
+        requireActive(controller)
       } else {
         await deps.repository.addMessage({
           id: globalThis.crypto.randomUUID(), sessionId: session.id, role: 'user', content,
           status: 'completed', error: '', modelId: '', createdAt: Date.now(),
         })
+        requireActive(controller)
         session = (await deps.repository.get(session.id)) ?? session
+        requireActive(controller)
         currentSession.value = session
       }
     } catch (cause) {
-      error.value = readableError(cause)
+      if (createdSessionId) {
+        try {
+          await deps.repository.remove(createdSessionId)
+          if (currentSession.value?.id === createdSessionId) currentSession.value = null
+          await refresh()
+        } catch { /* Keep the original preparation error for the user. */ }
+      }
+      if (ownsRun(controller)) error.value = controller.signal.aborted ? '已停止生成' : readableError(cause)
+      finishRun(controller)
       return false
-    } finally {
-      preparing = false
     }
-    return run(content, session, globalThis.crypto.randomUUID(), false)
+    return run(content, session, globalThis.crypto.randomUUID(), false, controller)
   }
 
   async function retry(): Promise<boolean> {
-    if (busy.value || preparing || !currentSession.value || !validProfile(deps.getProfile())) return false
+    if (busy.value || !currentSession.value || !validProfile(deps.getProfile())) return false
     const messages = currentSession.value.messages
     const index = messages.findLastIndex(m => m.role === 'assistant'
       && (m.status === 'failed' || m.status === 'cancelled' || m.status === 'interrupted'))
     if (index < 1 || messages[index - 1].role !== 'user') return false
-    return run(messages[index - 1].content, currentSession.value, messages[index].id, true)
+    return run(messages[index - 1].content, currentSession.value, messages[index].id, true, beginRun())
   }
 
   function stop() { activeController?.abort() }
