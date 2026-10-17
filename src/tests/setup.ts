@@ -2,6 +2,21 @@
 import { vi } from 'vitest'
 
 const mockDb = {
+  webQa: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn().mockResolvedValue(null),
+    create: vi.fn().mockImplementation(input => Promise.resolve({
+      id: input.sessionId, snapshotId: input.sessionId, snapshot: input.snapshot,
+      finalUrl: input.snapshot.finalUrl, title: input.snapshot.title,
+      capturedAt: input.snapshot.capturedAt, byteLength: input.snapshot.byteLength,
+      createdAt: input.createdAt, updatedAt: input.createdAt,
+      messages: [{ id: input.messageId, sessionId: input.sessionId, role: 'user',
+        content: input.question, status: 'completed', error: '', modelId: '', createdAt: input.createdAt }],
+    })),
+    addMessage: vi.fn().mockResolvedValue(undefined),
+    updateMessage: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
+  },
   docling: {
     convert: vi.fn().mockRejectedValue(new Error('未配置测试解析结果')),
     save: vi.fn().mockImplementation((_id, record) => Promise.resolve(record)),

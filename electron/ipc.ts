@@ -1,7 +1,7 @@
 import { app, dialog, ipcMain } from 'electron'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
-import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, getPaperAbstractRepository, exportAll, clearAll, importAll } from './db'
+import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, getPaperAbstractRepository, getWebQaRepository, exportAll, clearAll, importAll } from './db'
 import { createDoclingFacade } from './docling'
 import { testDoclingConnection } from './doclingClient'
 import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
@@ -23,7 +23,14 @@ export function registerIpc() {
   })
   const abstractCheckpoint = getAbstractCheckpointRepository()
   const paperAbstract = getPaperAbstractRepository()
+  const webQa = getWebQaRepository()
   const handlers = {
+    'webQa:list': () => webQa.list(),
+    'webQa:get': (_e, id) => webQa.get(id),
+    'webQa:create': (_e, input) => webQa.create(input),
+    'webQa:addMessage': (_e, message) => { webQa.addMessage(message) },
+    'webQa:updateMessage': (_e, id, patch) => { webQa.updateMessage(id, patch) },
+    'webQa:remove': (_e, id) => { webQa.remove(id) },
     'docling:convert': (_e, id) => docling.convert(id),
     'docling:save': (_e, id, record) => docling.save(id, record),
     'docling:readAsset': (_e, id) => docling.readAsset(id),

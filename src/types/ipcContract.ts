@@ -3,6 +3,7 @@ import type { PaperAbstractReport } from '../utils/paperAbstract'
 import type { ChatMessageWrite, ChatMessagePatch } from './chatRun'
 import type { PreviewBounds, PreviewSnapshot } from './webPreview'
 import type { Conversation } from './chat'
+import type { WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaSessionDetail, WebQaSessionSummary } from './webQa'
 import type { Paper, KnowledgeBase, Highlight } from './paper'
 
 export type PaperCreateInput = Paper & { fileData: string }
@@ -10,6 +11,14 @@ export type ChatConversationWrite = Omit<Conversation, 'messages'>
 
 // One contract for renderer callers, preload wrappers, and main handlers.
 export interface DbApi {
+  webQa: {
+    list: () => Promise<WebQaSessionSummary[]>
+    get: (id: string) => Promise<WebQaSessionDetail | null>
+    create: (input: WebQaCreateInput) => Promise<WebQaSessionDetail>
+    addMessage: (message: WebQaMessage) => Promise<void>
+    updateMessage: (id: string, patch: WebQaMessagePatch) => Promise<void>
+    remove: (id: string) => Promise<void>
+  }
   docling: {
     convert: (paperId: string) => Promise<DoclingRecord>
     save: (paperId: string, record: DoclingRecord) => Promise<DoclingRecord>

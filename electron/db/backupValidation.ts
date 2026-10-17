@@ -1,6 +1,8 @@
 import { isSafePaperId } from '../paperProtocol'
+import { createHash } from 'crypto'
 import type { PaperCreateInput } from '../../src/types/ipcContract'
 import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun'
+import type { WebQaBackup } from '../../src/types/webQa'
 
 const runStatuses = new Set(['preparing', 'streaming', 'completed', 'failed', 'cancelled', 'interrupted'])
 
@@ -47,6 +49,44 @@ function uniqueId(value: string, seen: Set<string>, detail: string) {
   seen.add(value)
 }
 
+export function validateWebQaBackup(value: unknown): asserts value is WebQaBackup {
+  const backup = object(value, 'webQa')
+  const snapshots = entries(backup.snapshots, 'webQa.snapshots')
+  const sessions = entries(backup.sessions, 'webQa.sessions')
+  const messages = entries(backup.messages, 'webQa.messages')
+  const snapshotIds = new Set<string>()
+  const sessionIds = new Set<string>()
+  const messageIds = new Set<string>()
+  for (const s of snapshots) {
+    uniqueId(string(s.id, '网页快照 ID'), snapshotIds, '网页快照 ID')
+    const url = string(s.finalUrl, '网页快照地址')
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) invalid('网页快照地址')
+    } catch { invalid('网页快照地址') }
+    text(s.title, '网页标题')
+    const html = text(s.html, '网页快照内容')
+    if (!Number.isSafeInteger(s.capturedAt) || Number(s.capturedAt) < 0) invalid('网页快照时间')
+    if (Buffer.byteLength(html, 'utf8') !== s.byteLength || Number(s.byteLength) > 8 * 1024 * 1024) invalid('网页快照大小')
+    if (createHash('sha256').update(html, 'utf8').digest('hex') !== s.contentHash) invalid('网页快照指纹')
+  }
+  for (const s of sessions) {
+    uniqueId(string(s.id, '网页会话 ID'), sessionIds, '网页会话 ID')
+    if (!snapshotIds.has(string(s.snapshotId, '网页快照 ID'))) invalid('网页快照不存在')
+    if (!Number.isSafeInteger(s.createdAt) || !Number.isSafeInteger(s.updatedAt)) invalid('网页会话时间')
+  }
+  for (const m of messages) {
+    uniqueId(string(m.id, '网页消息 ID'), messageIds, '网页消息 ID')
+    if (!sessionIds.has(string(m.sessionId, '网页会话 ID'))) invalid('网页会话不存在')
+    if (m.role !== 'user' && m.role !== 'assistant') invalid('网页消息角色')
+    text(m.content, '网页消息内容')
+    if (!['completed', 'streaming', 'failed', 'cancelled', 'interrupted'].includes(String(m.status))) invalid('网页消息状态')
+    text(m.error, '网页消息错误')
+    text(m.modelId, '网页消息模型')
+    if (!Number.isSafeInteger(m.createdAt)) invalid('网页消息时间')
+  }
+}
+
 export function validatePaperCreateInput(value: unknown): asserts value is PaperCreateInput {
   const paper = object(value, '论文')
   paperId(paper.id, '论文 ID')
@@ -90,6 +130,7 @@ export function validateChatMessagePatch(value: unknown): asserts value is ChatM
 export function validateBackupInput(value: unknown): void {
   const data = object(value, '顶层对象')
   if (data.version !== 1) throw new Error('不支持的备份文件格式（version 必须为 1）')
+  if (data.webQa !== undefined) validateWebQaBackup(data.webQa)
 
   const bases = entries(data.knowledgeBases, 'knowledgeBases')
   const baseIds = new Set<string>()

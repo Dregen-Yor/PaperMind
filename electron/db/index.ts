@@ -6,6 +6,7 @@ import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
 import { createAbstractCheckpointRepository } from './abstractCheckpoint'
 import { createPaperAbstractRepository, PAPER_ABSTRACT_PIPELINE_VERSION } from './paperAbstract'
+import { createWebQaRepository } from './webQa'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
@@ -365,6 +366,7 @@ export const treeApi = {
 export const getDoclingRepository = () => createDoclingRepository(db)
 export const getAbstractCheckpointRepository = () => createAbstractCheckpointRepository(db)
 export const getPaperAbstractRepository = () => createPaperAbstractRepository(db)
+export const getWebQaRepository = () => createWebQaRepository(db)
 
 /** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
 export function exportAll(opts: { includeApiKey?: boolean } = {}) {
@@ -385,6 +387,7 @@ export function exportAll(opts: { includeApiKey?: boolean } = {}) {
     paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
     docling: getDoclingRepository().exportBackup(),
     paperAbstracts: db.prepare('SELECT * FROM paper_abstracts').all(),
+    webQa: getWebQaRepository().exportBackup(),
     settings: opts.includeApiKey ? settingsRows : stripApiKeysFromSettings(settingsRows),
   }
 }
@@ -395,7 +398,7 @@ export function clearAll() {
     const file = storedPaperFilePath(paper.id, paper.file_path, papersDir)
     if (file) unlinkSync(file)
   }
-  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+  db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
   db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
     .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
 }
@@ -412,13 +415,14 @@ export function importAll(input: unknown) {
   const trees = Array.isArray(data.paperTrees) ? data.paperTrees : []
   const settings = Array.isArray(data.settings) ? data.settings : []
   const paperAbstracts = Array.isArray(data.paperAbstracts) ? data.paperAbstracts : []
+  const webQa = data.webQa ?? { snapshots: [], sessions: [], messages: [] }
 
   for (const paper of papers) checkedPaperDestination(paper.id, true)
 
   // First validate and insert in one transaction. A nested malformed record
   // must not overwrite or create any PDF before SQLite rejects the backup.
   const insert = db.transaction(() => {
-    db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -474,6 +478,7 @@ export function importAll(input: unknown) {
     }
 
     getDoclingRepository().importBackup(data.docling)
+    getWebQaRepository().importBackup(webQa)
 
     for (const row of paperAbstracts) {
       getPaperAbstractRepository().save({

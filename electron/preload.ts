@@ -6,6 +6,14 @@ const invoke: TypedInvoke = (channel, ...args) => ipcRenderer.invoke(channel, ..
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db: DbApi = {
+  webQa: {
+    list: () => invoke('webQa:list'),
+    get: id => invoke('webQa:get', id),
+    create: input => invoke('webQa:create', input),
+    addMessage: message => invoke('webQa:addMessage', message),
+    updateMessage: (id, patch) => invoke('webQa:updateMessage', id, patch),
+    remove: id => invoke('webQa:remove', id),
+  },
   docling: {
     convert: (paperId: string) => invoke('docling:convert', paperId),
     save: (paperId, record) => invoke('docling:save', paperId, record),
