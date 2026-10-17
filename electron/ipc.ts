@@ -25,6 +25,17 @@ export function registerIpc() {
   const paperAbstract = getPaperAbstractRepository()
   const webQa = getWebQaRepository()
   const handlers = {
+    'webQa:listPages': () => webQa.listPages(),
+    'webQa:archive': (_e, snapshot, openedAt) => webQa.archive(snapshot, openedAt),
+    'webQa:getPreview': (_e, id) => webQa.getPreview(id),
+    'webQa:getSnapshot': (_e, id) => webQa.getSnapshot(id),
+    'webQa:listSessions': (_e, pageId) => webQa.listSessions(pageId),
+    'webQa:getSession': (_e, id) => webQa.getSession(id),
+    'webQa:createSession': (_e, input) => webQa.createSession(input),
+    'webQa:appendTurn': (_e, input) => webQa.appendTurn(input),
+    'webQa:ensureAssistantForLastUser': (_e, sessionId, assistantId, modelId) => webQa.ensureAssistantForLastUser(sessionId, assistantId, modelId),
+    'webQa:removeSession': (_e, id) => { webQa.removeSession(id) },
+    'webQa:removePage': (_e, id) => { webQa.removePage(id) },
     'webQa:list': () => webQa.list(),
     'webQa:get': (_e, id) => webQa.get(id),
     'webQa:create': (_e, input) => webQa.create(input),

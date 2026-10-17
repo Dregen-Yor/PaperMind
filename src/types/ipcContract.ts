@@ -3,7 +3,7 @@ import type { PaperAbstractReport } from '../utils/paperAbstract'
 import type { ChatMessageWrite, ChatMessagePatch } from './chatRun'
 import type { PreviewBounds, PreviewSnapshot } from './webPreview'
 import type { Conversation } from './chat'
-import type { WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaSessionDetail, WebQaSessionSummary } from './webQa'
+import type { WebPageSummary, WebQaAppendInput, WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaNewSessionInput, WebQaPageSessionSummary, WebQaSavedSession, WebQaSessionDetail, WebQaSessionSummary, WebSnapshotPreview } from './webQa'
 import type { Paper, KnowledgeBase, Highlight } from './paper'
 
 export type PaperCreateInput = Paper & { fileData: string }
@@ -12,6 +12,17 @@ export type ChatConversationWrite = Omit<Conversation, 'messages'>
 // One contract for renderer callers, preload wrappers, and main handlers.
 export interface DbApi {
   webQa: {
+    listPages: () => Promise<WebPageSummary[]>
+    archive: (snapshot: PreviewSnapshot, openedAt: number) => Promise<WebPageSummary>
+    getPreview: (snapshotId: string) => Promise<WebSnapshotPreview | null>
+    getSnapshot: (snapshotId: string) => Promise<PreviewSnapshot | null>
+    listSessions: (pageId: string) => Promise<WebQaPageSessionSummary[]>
+    getSession: (id: string) => Promise<WebQaSavedSession | null>
+    createSession: (input: WebQaNewSessionInput) => Promise<WebQaSavedSession>
+    appendTurn: (input: WebQaAppendInput) => Promise<WebQaSavedSession>
+    ensureAssistantForLastUser: (sessionId: string, assistantId: string, modelId: string) => Promise<WebQaSavedSession>
+    removeSession: (id: string) => Promise<void>
+    removePage: (id: string) => Promise<void>
     list: () => Promise<WebQaSessionSummary[]>
     get: (id: string) => Promise<WebQaSessionDetail | null>
     create: (input: WebQaCreateInput) => Promise<WebQaSessionDetail>

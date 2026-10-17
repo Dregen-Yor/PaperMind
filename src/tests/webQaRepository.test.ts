@@ -20,6 +20,46 @@ function setup() {
 }
 
 describe('web QA repository', () => {
+  it('archives a page before any dialogue, deduplicates its DOM, and versions changed content', () => {
+    const { db, repo } = setup()
+    const first = repo.archive({ ...snapshot, finalUrl: 'https://EXAMPLE.org/article#part' }, 100)
+    expect(repo.listPages()).toHaveLength(1)
+    expect(repo.listPages()[0]).not.toHaveProperty('html')
+    expect(repo.listSessions(first.id)).toEqual([])
+    const again = repo.archive({ ...snapshot, finalUrl: 'https://example.org/article' }, 200)
+    expect(again.id).toBe(first.id)
+    expect(again.latestSnapshotId).toBe(first.latestSnapshotId)
+    expect(again.snapshotCount).toBe(1)
+    const changedHtml = '<html><body><p>第二版正文</p></body></html>'
+    const changed = repo.archive({ ...snapshot, html: changedHtml,
+      byteLength: Buffer.byteLength(changedHtml, 'utf8'),
+      contentHash: createHash('sha256').update(changedHtml).digest('hex') }, 300)
+    expect(changed.snapshotCount).toBe(2)
+    expect(changed.latestSnapshotId).not.toBe(first.latestSnapshotId)
+    expect(repo.getPreview(first.latestSnapshotId)?.preview.blocks[0].text).toContain('动态正文')
+    expect(repo.getSnapshot(first.latestSnapshotId)?.html).toBe(html)
+    db.close()
+  })
+
+  it('shares one immutable snapshot across sessions and keeps it after deleting one session', () => {
+    const { db, repo } = setup()
+    const page = repo.archive(snapshot, 100)
+    const first = repo.createSession({ sessionId: 's1', questionId: 'q1', assistantId: 'a1',
+      snapshotId: page.latestSnapshotId, question: '第一问', createdAt: 110, modelId: 'model-a' })
+    const second = repo.createSession({ sessionId: 's2', questionId: 'q2', assistantId: 'a2',
+      snapshotId: page.latestSnapshotId, question: '第二问', createdAt: 120, modelId: 'model-a' })
+    expect(first.snapshotId).toBe(second.snapshotId)
+    expect(repo.listSessions(page.id).map(session => session.firstQuestion)).toEqual(['第二问', '第一问'])
+    expect(repo.getSession('s1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(repo.getSession('s1')).not.toHaveProperty('snapshot')
+    repo.removeSession('s1')
+    expect(repo.getSnapshot(page.latestSnapshotId)?.html).toBe(html)
+    expect(repo.listSessions(page.id)).toHaveLength(1)
+    repo.removePage(page.id)
+    expect(repo.getSession('s2')).toBeNull()
+    expect(repo.getSnapshot(page.latestSnapshotId)).toBeNull()
+    db.close()
+  })
   it('creates one immutable snapshot with ordered messages and cascades removal', () => {
     const { db, repo } = setup()
     const session = repo.create({ sessionId: 's1', messageId: 'm1', snapshot, question: '结论？', createdAt: 20 })

@@ -1,5 +1,57 @@
 import type { PreviewSnapshot } from './webPreview'
 
+export type WebPreviewBlock = {
+  kind: 'heading' | 'paragraph' | 'list' | 'quote' | 'code'
+  text: string
+  level?: number
+}
+
+export type WebReadPreview = { blocks: WebPreviewBlock[]; truncated: boolean }
+
+export interface WebPageSummary {
+  id: string
+  canonicalUrl: string
+  title: string
+  createdAt: number
+  lastOpenedAt: number
+  latestSnapshotId: string
+  snapshotCount: number
+  sessionCount: number
+  totalBytes: number
+}
+
+export interface WebSnapshotPreview {
+  id: string
+  pageId: string
+  finalUrl: string
+  title: string
+  capturedAt: number
+  byteLength: number
+  contentHash: string
+  preview: WebReadPreview
+}
+
+export interface WebQaPageSessionSummary extends WebQaSessionSummary {
+  pageId: string
+  firstQuestion: string
+}
+
+export interface WebQaSavedSession extends WebQaPageSessionSummary {
+  messages: WebQaMessage[]
+}
+
+export interface WebQaNewSessionInput {
+  sessionId: string
+  questionId: string
+  assistantId: string
+  snapshotId: string
+  question: string
+  createdAt: number
+  modelId: string
+}
+
+export type WebQaAppendInput = Omit<WebQaNewSessionInput, 'snapshotId'>
+
 export type WebQaMessageStatus = 'completed' | 'streaming' | 'failed' | 'cancelled' | 'interrupted'
 
 export interface WebQaMessage {

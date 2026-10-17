@@ -7,6 +7,17 @@ const invoke: TypedInvoke = (channel, ...args) => ipcRenderer.invoke(channel, ..
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db: DbApi = {
   webQa: {
+    listPages: () => invoke('webQa:listPages'),
+    archive: (snapshot, openedAt) => invoke('webQa:archive', snapshot, openedAt),
+    getPreview: id => invoke('webQa:getPreview', id),
+    getSnapshot: id => invoke('webQa:getSnapshot', id),
+    listSessions: pageId => invoke('webQa:listSessions', pageId),
+    getSession: id => invoke('webQa:getSession', id),
+    createSession: input => invoke('webQa:createSession', input),
+    appendTurn: input => invoke('webQa:appendTurn', input),
+    ensureAssistantForLastUser: (sessionId, assistantId, modelId) => invoke('webQa:ensureAssistantForLastUser', sessionId, assistantId, modelId),
+    removeSession: id => invoke('webQa:removeSession', id),
+    removePage: id => invoke('webQa:removePage', id),
     list: () => invoke('webQa:list'),
     get: id => invoke('webQa:get', id),
     create: input => invoke('webQa:create', input),

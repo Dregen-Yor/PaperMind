@@ -10,7 +10,7 @@ type Completion = (messages: Array<{ role: string; content: string }>, profileId
 
 interface WebQaDependencies {
   preview: Pick<PreviewApi, 'captureSnapshot'>
-  repository: DbApi['webQa']
+  repository: Pick<DbApi['webQa'], 'list' | 'get' | 'create' | 'addMessage' | 'updateMessage' | 'remove'>
   getProfile: () => LLMProfile
   requestCompletion: Completion
 }
