@@ -81,10 +81,17 @@ describe('same backup import task before and after IPC boundary changes', () => 
         contentHash: createHash('sha256').update(html).digest('hex') },
     })
     const saved = exportAll()
+    expect(saved.webQa.pages).toHaveLength(1)
+    expect(saved.webQa.snapshots[0].pageId).toBe(saved.webQa.pages[0].id)
     clearAll()
     expect(getWebQaRepository().list()).toHaveLength(0)
+    expect(getWebQaRepository().listPages()).toHaveLength(0)
     importAll(saved)
     expect(getWebQaRepository().get('web-s1')?.snapshot.html).toBe(html)
+
+    const invalidPage = structuredClone(saved)
+    invalidPage.webQa.snapshots[0].pageId = 'missing'
+    expect(() => importAll(invalidPage)).toThrow('网页')
     expect(getWebQaRepository().get('web-s1')?.messages[0].content).toBe('文章结论？')
 
     const invalid = structuredClone(saved)

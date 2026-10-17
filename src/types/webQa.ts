@@ -92,7 +92,8 @@ export interface WebQaCreateInput {
 export type WebQaMessagePatch = Partial<Pick<WebQaMessage, 'content' | 'status' | 'error' | 'modelId'>>
 
 export interface WebQaBackup {
-  snapshots: Array<{ id: string } & PreviewSnapshot>
+  pages: Array<Pick<WebPageSummary, 'id' | 'canonicalUrl' | 'title' | 'createdAt' | 'lastOpenedAt'>>
+  snapshots: Array<{ id: string; pageId: string; lastSeenAt: number; preview: WebReadPreview } & PreviewSnapshot>
   sessions: Array<{ id: string; snapshotId: string; createdAt: number; updatedAt: number }>
   messages: WebQaMessage[]
 }

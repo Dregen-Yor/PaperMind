@@ -113,7 +113,7 @@
       <!-- ── 数据管理 ── -->
       <section class="settings-card">
         <h3>数据管理</h3>
-        <p class="card-desc">所有论文与对话数据存储在本地，可随时导出备份。</p>
+        <p class="card-desc">论文、网页缓存与对话数据存储在本地，可随时导出备份。</p>
         <div class="action-row">
           <el-button @click="exportDialogVisible = true">导出数据</el-button>
           <el-button @click="triggerImport">导入数据</el-button>
@@ -130,7 +130,7 @@
 
       <!-- ── 导出备份 Dialog ── -->
       <el-dialog v-model="exportDialogVisible" title="导出备份" width="460px">
-        <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、对话与消息、高亮、索引与语义树、Docling 解析与原图、全部设置。</p>
+        <p class="card-desc">备份包含：知识库、论文（含 PDF 原文）、网页缓存与网页会话、对话与消息、高亮、索引与语义树、Docling 解析与原图、全部设置。</p>
         <el-checkbox v-model="exportIncludeApiKey">包含 API Key / Token（明文，分享前请谨慎）</el-checkbox>
         <template #footer>
           <el-button @click="exportDialogVisible = false">取消</el-button>
@@ -425,7 +425,7 @@ async function onImportFile(e: Event) {
 }
 
 async function clearData() {
-  await ElMessageBox.confirm('将删除所有论文、对话和配置，此操作不可恢复。确认继续？', '清空数据', { type: 'warning' })
+  await ElMessageBox.confirm('将删除所有论文、网页缓存、对话和配置，此操作不可恢复。确认继续？', '清空数据', { type: 'warning' })
   await window.db.data.clear()
   ElMessage.success('已清空，刷新后生效')
   setTimeout(() => location.reload(), 800)

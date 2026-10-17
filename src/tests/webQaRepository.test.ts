@@ -83,10 +83,53 @@ describe('web QA repository', () => {
     source.repo.create({ sessionId: 's1', messageId: 'm1', snapshot, question: '结论？', createdAt: 20 })
     source.repo.addMessage({ id: 'm2', sessionId: 's1', role: 'assistant', content: '', status: 'failed', error: '超出上下文', modelId: 'model-a', createdAt: 21 })
     const backup = source.repo.exportBackup()
+    expect(backup.pages).toHaveLength(1)
+    expect(backup.snapshots[0].pageId).toBe(backup.pages[0].id)
     const target = setup()
     target.repo.importBackup(backup)
     expect(target.repo.get('s1')?.snapshot.html).toBe(html)
     expect(target.repo.get('s1')?.messages[1].status).toBe('failed')
+    source.db.close()
+    target.db.close()
+  })
+
+  it('imports the old backup shape without page rows while keeping original IDs', () => {
+    const source = setup()
+    source.repo.create({ sessionId: 's1', messageId: 'm1', snapshot, question: '旧问题', createdAt: 20 })
+    const old = source.repo.exportBackup() as any
+    delete old.pages
+    for (const row of old.snapshots) {
+      delete row.pageId
+      delete row.preview
+      delete row.lastSeenAt
+    }
+    const target = setup()
+    target.repo.importBackup(old)
+    expect(target.repo.get('s1')?.messages[0].id).toBe('m1')
+    expect(target.repo.listPages()[0].canonicalUrl).toBe(snapshot.finalUrl)
+    source.db.close()
+    target.db.close()
+  })
+
+  it('restores two cached versions with separate conversations under one page', () => {
+    const source = setup()
+    const first = source.repo.archive(snapshot, 100)
+    source.repo.createSession({ sessionId: 's1', questionId: 'q1', assistantId: 'a1',
+      snapshotId: first.latestSnapshotId, question: '初版？', createdAt: 110, modelId: 'model-a' })
+    const nextHtml = '<html><body><main><p>修订后的内容</p></main></body></html>'
+    const second = source.repo.archive({ ...snapshot, html: nextHtml,
+      contentHash: createHash('sha256').update(nextHtml).digest('hex'),
+      byteLength: Buffer.byteLength(nextHtml, 'utf8'), capturedAt: 200 }, 200)
+    source.repo.createSession({ sessionId: 's2', questionId: 'q2', assistantId: 'a2',
+      snapshotId: second.latestSnapshotId, question: '新版？', createdAt: 210, modelId: 'model-a' })
+    const saved = source.repo.exportBackup()
+    const target = setup()
+    target.repo.importBackup(saved)
+    expect(target.repo.listPages()).toHaveLength(1)
+    expect(target.repo.listPages()[0].snapshotCount).toBe(2)
+    expect(target.repo.listSessions(saved.pages[0].id).map(s => s.firstQuestion)).toEqual(['新版？', '初版？'])
+    expect(target.repo.getSnapshot(saved.snapshots[0].id)?.html).toBe(html)
+    expect(target.repo.getSnapshot(saved.snapshots[1].id)?.html).toBe(nextHtml)
     source.db.close()
     target.db.close()
   })

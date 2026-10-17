@@ -400,7 +400,7 @@ export function clearAll() {
     const file = storedPaperFilePath(paper.id, paper.file_path, papersDir)
     if (file) unlinkSync(file)
   }
-  db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+  db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM web_pages; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
   db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
     .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
 }
@@ -417,14 +417,14 @@ export function importAll(input: unknown) {
   const trees = Array.isArray(data.paperTrees) ? data.paperTrees : []
   const settings = Array.isArray(data.settings) ? data.settings : []
   const paperAbstracts = Array.isArray(data.paperAbstracts) ? data.paperAbstracts : []
-  const webQa = data.webQa ?? { snapshots: [], sessions: [], messages: [] }
+  const webQa = data.webQa ?? { pages: [], snapshots: [], sessions: [], messages: [] }
 
   for (const paper of papers) checkedPaperDestination(paper.id, true)
 
   // First validate and insert in one transaction. A nested malformed record
   // must not overwrite or create any PDF before SQLite rejects the backup.
   const insert = db.transaction(() => {
-    db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM web_pages; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
       db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')

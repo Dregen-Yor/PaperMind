@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'crypto'
 import type { PreviewSnapshot } from '../../src/types/webPreview'
 import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
 import type { WebPageSummary, WebQaAppendInput, WebQaBackup, WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaNewSessionInput, WebQaPageSessionSummary, WebQaSavedSession, WebQaSessionDetail, WebQaSessionSummary, WebReadPreview, WebSnapshotPreview } from '../../src/types/webQa'
-import { validateWebQaBackup } from './backupValidation'
+import { normalizeWebQaBackup } from './backupValidation'
 import { extractWebReadPreview } from '../../src/utils/webReadPreview'
 
 type SessionRow = { id: string; snapshot_id: string; final_url: string; title: string; captured_at: number; byte_length: number; created_at: number; updated_at: number }
@@ -252,9 +252,15 @@ export function createWebQaRepository(db: Database.Database) {
   }
 
   const exportBackup = (): WebQaBackup => ({
-    snapshots: (db.prepare('SELECT * FROM web_snapshots').all() as SnapshotRow[]).map(r => ({
+    pages: (db.prepare('SELECT * FROM web_pages').all() as PageRow[]).map(r => ({
+      id: r.id, canonicalUrl: r.canonical_url, title: r.title,
+      createdAt: r.created_at, lastOpenedAt: r.last_opened_at,
+    })),
+    snapshots: (db.prepare('SELECT * FROM web_snapshots').all() as PreviewRow[]).map(r => ({
       id: r.id, finalUrl: r.final_url, title: r.title, html: r.html, capturedAt: r.captured_at,
-      contentHash: r.content_hash, byteLength: r.byte_length,
+      contentHash: r.content_hash, byteLength: r.byte_length, pageId: r.page_id,
+      lastSeenAt: r.last_seen_at,
+      preview: r.preview_json ? JSON.parse(r.preview_json) as WebReadPreview : { blocks: [], truncated: false },
     })),
     sessions: (db.prepare('SELECT * FROM web_qa_sessions').all() as Array<{ id: string; snapshot_id: string; created_at: number; updated_at: number }>).map(r => ({
       id: r.id, snapshotId: r.snapshot_id, createdAt: r.created_at, updatedAt: r.updated_at,
@@ -262,16 +268,22 @@ export function createWebQaRepository(db: Database.Database) {
     messages: (db.prepare('SELECT * FROM web_qa_messages').all() as MessageRow[]).map(mapMessage),
   })
 
-  const importBackup = (backup: WebQaBackup): void => {
-    validateWebQaBackup(backup)
+  const importBackup = (input: unknown): void => {
+    const backup = normalizeWebQaBackup(input)
     db.transaction(() => {
-      db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots;')
+      db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM web_pages;')
+      for (const p of backup.pages) db.prepare(`INSERT INTO web_pages
+        (id, canonical_url, title, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?)`)
+        .run(p.id, p.canonicalUrl, p.title, p.createdAt, p.lastOpenedAt)
       for (const s of backup.snapshots) {
-        const pageId = pageForSnapshot(s)
+        let preview: WebReadPreview
+        try { preview = extractWebReadPreview(s.html) }
+        catch { preview = { blocks: [], truncated: false } }
         db.prepare(`INSERT INTO web_snapshots
           (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)`)
-          .run(s.id, pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash, s.byteLength, s.capturedAt)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(s.id, s.pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash,
+            s.byteLength, JSON.stringify(preview), s.lastSeenAt)
       }
       for (const s of backup.sessions) db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)')
         .run(s.id, s.snapshotId, s.createdAt, s.updatedAt)

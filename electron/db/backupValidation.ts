@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 import type { PaperCreateInput } from '../../src/types/ipcContract'
 import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun'
 import type { WebQaBackup } from '../../src/types/webQa'
+import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
 
 const runStatuses = new Set(['preparing', 'streaming', 'completed', 'failed', 'cancelled', 'interrupted'])
 
@@ -49,42 +50,103 @@ function uniqueId(value: string, seen: Set<string>, detail: string) {
   seen.add(value)
 }
 
-export function validateWebQaBackup(value: unknown): asserts value is WebQaBackup {
+export function normalizeWebQaBackup(value: unknown): WebQaBackup {
   const backup = object(value, 'webQa')
+  const hasPages = backup.pages !== undefined
+  const pageRows = entries(backup.pages, 'webQa.pages')
   const snapshots = entries(backup.snapshots, 'webQa.snapshots')
   const sessions = entries(backup.sessions, 'webQa.sessions')
   const messages = entries(backup.messages, 'webQa.messages')
+  const pages: WebQaBackup['pages'] = []
+  const pageIds = new Set<string>()
+  const pageByUrl = new Map<string, string>()
   const snapshotIds = new Set<string>()
   const sessionIds = new Set<string>()
   const messageIds = new Set<string>()
-  for (const s of snapshots) {
-    uniqueId(string(s.id, '网页快照 ID'), snapshotIds, '网页快照 ID')
-    const url = string(s.finalUrl, '网页快照地址')
+  const id = (value: unknown, detail: string): string => {
+    const result = string(value, detail)
+    if (!/^[\w-]{1,128}$/.test(result)) invalid(detail)
+    return result
+  }
+  const time = (value: unknown, detail: string): number => {
+    if (!Number.isSafeInteger(value) || Number(value) < 0) invalid(detail)
+    return Number(value)
+  }
+  for (const p of pageRows) {
+    const pageId = id(p.id, '网页 ID')
+    uniqueId(pageId, pageIds, '网页 ID')
+    const canonicalUrl = string(p.canonicalUrl, '网页地址')
     try {
-      const parsed = new URL(url)
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) invalid('网页快照地址')
+      if (canonicalWebPageUrl(canonicalUrl) !== canonicalUrl) invalid('网页地址')
+    } catch { invalid('网页地址') }
+    if (pageByUrl.has(canonicalUrl)) invalid('网页地址重复')
+    pageByUrl.set(canonicalUrl, pageId)
+    pages.push({ id: pageId, canonicalUrl, title: text(p.title, '网页标题'),
+      createdAt: time(p.createdAt, '网页创建时间'), lastOpenedAt: time(p.lastOpenedAt, '网页打开时间') })
+  }
+  const normalizedSnapshots: WebQaBackup['snapshots'] = []
+  for (const s of snapshots) {
+    const snapshotId = id(s.id, '网页快照 ID')
+    uniqueId(snapshotId, snapshotIds, '网页快照 ID')
+    const url = string(s.finalUrl, '网页快照地址')
+    let canonical: string
+    try {
+      canonical = canonicalWebPageUrl(url)
     } catch { invalid('网页快照地址') }
-    text(s.title, '网页标题')
+    const title = text(s.title, '网页标题')
     const html = text(s.html, '网页快照内容')
-    if (!Number.isSafeInteger(s.capturedAt) || Number(s.capturedAt) < 0) invalid('网页快照时间')
+    const capturedAt = time(s.capturedAt, '网页快照时间')
     if (Buffer.byteLength(html, 'utf8') !== s.byteLength || Number(s.byteLength) > 8 * 1024 * 1024) invalid('网页快照大小')
     if (createHash('sha256').update(html, 'utf8').digest('hex') !== s.contentHash) invalid('网页快照指纹')
+    let pageId: string
+    if (hasPages) {
+      pageId = id(s.pageId, '网页 ID')
+      if (!pageIds.has(pageId) || pageByUrl.get(canonical!) !== pageId) invalid('网页快照引用的网页不存在或地址不匹配')
+    } else {
+      pageId = pageByUrl.get(canonical!) ?? createHash('sha256').update(`web-page:${canonical!}`).digest('hex')
+      if (!pageByUrl.has(canonical!)) {
+        pageByUrl.set(canonical!, pageId)
+        pageIds.add(pageId)
+        pages.push({ id: pageId, canonicalUrl: canonical!, title,
+          createdAt: capturedAt, lastOpenedAt: capturedAt })
+      } else {
+        const page = pages.find(row => row.id === pageId)!
+        if (capturedAt > page.lastOpenedAt) { page.lastOpenedAt = capturedAt; page.title = title }
+      }
+    }
+    normalizedSnapshots.push({ id: snapshotId, pageId, finalUrl: url, title, html,
+      capturedAt, contentHash: String(s.contentHash), byteLength: Number(s.byteLength),
+      lastSeenAt: time(s.lastSeenAt ?? capturedAt, '网页快照最近查看时间'),
+      preview: { blocks: [], truncated: false } })
   }
+  const normalizedSessions: WebQaBackup['sessions'] = []
   for (const s of sessions) {
-    uniqueId(string(s.id, '网页会话 ID'), sessionIds, '网页会话 ID')
-    if (!snapshotIds.has(string(s.snapshotId, '网页快照 ID'))) invalid('网页快照不存在')
-    if (!Number.isSafeInteger(s.createdAt) || !Number.isSafeInteger(s.updatedAt)) invalid('网页会话时间')
+    const sessionId = id(s.id, '网页会话 ID')
+    uniqueId(sessionId, sessionIds, '网页会话 ID')
+    const snapshotId = id(s.snapshotId, '网页快照 ID')
+    if (!snapshotIds.has(snapshotId)) invalid('网页快照不存在')
+    normalizedSessions.push({ id: sessionId, snapshotId,
+      createdAt: time(s.createdAt, '网页会话时间'), updatedAt: time(s.updatedAt, '网页会话时间') })
   }
+  const normalizedMessages: WebQaBackup['messages'] = []
   for (const m of messages) {
-    uniqueId(string(m.id, '网页消息 ID'), messageIds, '网页消息 ID')
-    if (!sessionIds.has(string(m.sessionId, '网页会话 ID'))) invalid('网页会话不存在')
+    const messageId = id(m.id, '网页消息 ID')
+    uniqueId(messageId, messageIds, '网页消息 ID')
+    const sessionId = id(m.sessionId, '网页会话 ID')
+    if (!sessionIds.has(sessionId)) invalid('网页会话不存在')
     if (m.role !== 'user' && m.role !== 'assistant') invalid('网页消息角色')
-    text(m.content, '网页消息内容')
+    const content = text(m.content, '网页消息内容')
     if (!['completed', 'streaming', 'failed', 'cancelled', 'interrupted'].includes(String(m.status))) invalid('网页消息状态')
-    text(m.error, '网页消息错误')
-    text(m.modelId, '网页消息模型')
-    if (!Number.isSafeInteger(m.createdAt)) invalid('网页消息时间')
+    normalizedMessages.push({ id: messageId, sessionId, role: m.role, content,
+      status: m.status as WebQaBackup['messages'][number]['status'],
+      error: text(m.error, '网页消息错误'), modelId: text(m.modelId, '网页消息模型'),
+      createdAt: time(m.createdAt, '网页消息时间') })
   }
+  return { pages, snapshots: normalizedSnapshots, sessions: normalizedSessions, messages: normalizedMessages }
+}
+
+export function validateWebQaBackup(value: unknown): void {
+  normalizeWebQaBackup(value)
 }
 
 export function validatePaperCreateInput(value: unknown): asserts value is PaperCreateInput {
