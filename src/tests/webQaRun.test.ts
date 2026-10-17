@@ -35,7 +35,11 @@ function harness() {
   const profile = { id: 'model-a', name: 'Model A', provider: 'openai' as const, model: 'model-a',
     apiKey: 'test', baseUrl: 'https://api.example.org', systemPrompt: '请用中文回答',
     temperature: 0, maxTokens: 0, topK: 0 }
-  const requestCompletion = vi.fn(async (_messages: Array<{ role: string; content: string }>) => ({ content: '回答', truncated: false }))
+  const requestCompletion = vi.fn(async (
+    _messages: Array<{ role: string; content: string }>,
+    _profileId?: string,
+    _options?: { signal?: AbortSignal; onToken?: (token: string) => void },
+  ) => ({ content: '回答', truncated: false }))
   const qa = createWebQaController({ preview: { captureSnapshot }, repository, getProfile: () => profile, requestCompletion })
   return { qa, data, captureSnapshot, repository, profile, requestCompletion }
 }
@@ -87,8 +91,8 @@ describe('web QA run lifecycle', () => {
 
   it('marks a stopped stream as cancelled and can retry the same question', async () => {
     const h = harness()
-    h.requestCompletion.mockImplementationOnce((_messages, _profileId, options) => new Promise((_resolve, reject) => {
-      options.signal.addEventListener('abort', () => reject(new Error('aborted')))
+    h.requestCompletion.mockImplementationOnce((_messages, _profileId, options) => new Promise<{ content: string; truncated: boolean }>((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
     }))
     const pending = h.qa.send('停止这次回答')
     await vi.waitFor(() => expect(h.requestCompletion).toHaveBeenCalledOnce())

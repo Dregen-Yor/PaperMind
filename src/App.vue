@@ -82,7 +82,7 @@ onMounted(async () => {
 
 const navItems = [
   { path: '/library', icon: Collection, label: '文献库' },
-  { path: '/web-preview', icon: Link, label: '网页预览' },
+  { path: '/web-preview', icon: Link, label: '网页问答' },
   { path: '/chat', icon: ChatDotRound, label: '论文问答' },
 ]
 </script>

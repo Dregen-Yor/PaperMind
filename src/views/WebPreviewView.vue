@@ -1,6 +1,6 @@
 <template>
   <div class="web-preview-view">
-    <header class="preview-toolbar" aria-label="网页预览工具栏">
+    <header class="preview-toolbar" aria-label="网页问答工具栏">
       <div class="navigation-actions">
         <button type="button" data-action="back" class="icon-button" aria-label="后退" title="后退" :disabled="!previewState.canGoBack" @click="runAction(() => window.preview.back())">
           <ArrowLeft aria-hidden="true" />
@@ -42,34 +42,64 @@
     <div v-if="previewState.loading" class="loading-line" role="progressbar" aria-label="正在加载网页" />
     <p v-if="previewState.notice" class="toolbar-notice" role="status">{{ previewState.notice }}</p>
     <p v-if="inputError && previewState.visible" class="toolbar-notice" role="alert">{{ inputError }}</p>
-    <main class="preview-stage" aria-label="网页内容">
-      <div ref="previewSlot" class="preview-slot">
-        <div v-if="!previewState.visible" class="preview-message" :class="{ 'has-error': previewState.error || inputError }">
-          <template v-if="previewState.error || inputError">
-            <h1 class="message-title font-display">网页未能打开</h1>
-            <p role="alert">{{ inputError || previewState.error }}</p>
-            <div class="message-actions">
-              <button v-if="previewState.url" type="button" data-action="retry" class="primary-action" @click="retry">重试</button>
-              <button v-if="previewState.url" type="button" class="secondary-action" @click="openExternal">在系统浏览器打开</button>
+    <div class="web-mode-switch" role="group" aria-label="网页问答视图">
+      <button type="button" aria-label="显示网页面板" :class="{ active: mobilePane === 'web' }" @click="setMobilePane('web')">网页</button>
+      <button type="button" aria-label="显示问答面板" :class="{ active: mobilePane === 'qa' }" @click="setMobilePane('qa')">问答</button>
+    </div>
+    <div ref="readerSplit" class="web-reader-split">
+      <main id="web-document" class="web-split-left" :class="{ 'mobile-active': mobilePane === 'web' }" :style="{ flexBasis: splitRatio + '%' }" aria-label="网页内容">
+        <div class="preview-stage">
+          <div ref="previewSlot" class="preview-slot">
+            <div v-if="!previewState.visible" class="preview-message" :class="{ 'has-error': previewState.error || inputError }">
+              <template v-if="previewState.error || inputError">
+                <h1 class="message-title font-display">网页未能打开</h1>
+                <p role="alert">{{ inputError || previewState.error }}</p>
+                <div class="message-actions">
+                  <button v-if="previewState.url" type="button" data-action="retry" class="primary-action" @click="retry">重试</button>
+                  <button v-if="previewState.url" type="button" class="secondary-action" @click="openExternal">在系统浏览器打开</button>
+                </div>
+              </template>
+              <template v-else>
+                <h1 class="message-title font-display">从链接开始阅读</h1>
+                <p>粘贴 HTTPS 链接，按 Enter 预览原网页</p>
+              </template>
             </div>
-          </template>
-          <template v-else>
-            <h1 class="message-title font-display">从链接开始阅读</h1>
-            <p>粘贴 HTTPS 链接，按 Enter 预览原网页</p>
-          </template>
+          </div>
         </div>
-      </div>
-    </main>
+      </main>
+      <div class="resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整网页与问答面板宽度"
+        aria-controls="web-document" :aria-valuenow="Math.round(splitRatio)" aria-valuemin="30" aria-valuemax="75"
+        @mousedown.prevent="startResize" @keydown.left.prevent="adjustSplit(-2)" @keydown.right.prevent="adjustSplit(2)"
+        @keydown.home.prevent="setSplit(30)" @keydown.end.prevent="setSplit(75)" @dblclick="setSplit(58)"><span aria-hidden="true" /></div>
+      <aside class="web-split-right" :class="{ 'mobile-active': mobilePane === 'qa' }">
+        <WebQaPanel ref="qaPanel" :session="qa.currentSession.value" :sessions="qa.sessions.value" :busy="qa.busy.value"
+          :error="qa.error.value" :streamed-text="qa.streamedText.value" :can-ask="canAsk"
+          :source-changed="sourceChanged" :model-name="chatStore.chatProfile.name"
+          @send="sendQuestion" @retry="qa.retry" @stop="qa.stop" @new="startNewSession"
+          @load="loadSession" @open-source="openSavedSource" />
+      </aside>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowLeft, ArrowRight, Refresh, TopRight } from '@element-plus/icons-vue'
 import { isAllowedExternalUrl, normalizePreviewUrl } from '../utils/webPreviewUrl'
 import type { PreviewBounds, PreviewState } from '../types/webPreview'
+import WebQaPanel from '../components/WebQaPanel.vue'
+import { useWebQa } from '../composables/useWebQa'
+import { useChatStore } from '../stores/chat'
 
 const window = globalThis.window
+const chatStore = useChatStore()
+const qa = useWebQa()
+const qaPanel = ref<InstanceType<typeof WebQaPanel>>()
+const readerSplit = ref<HTMLElement>()
+const splitRatio = ref(58)
+const mobilePane = ref<'web' | 'qa'>('web')
+const sourceChanged = ref(false)
+const canAsk = computed(() => !!qa.currentSession.value || (previewState.value.visible && !previewState.value.loading))
 const previewSlot = ref<HTMLElement>()
 const addressInput = ref<HTMLInputElement>()
 const address = ref('')
@@ -91,8 +121,57 @@ function measuredBounds(): PreviewBounds {
 
 function syncBounds() {
   if (previewState.value.visible || previewState.value.loading) {
-    void window.preview.setBounds(measuredBounds())
+    const narrow = globalThis.matchMedia?.('(max-width: 800px)').matches ?? false
+    const bounds = narrow && mobilePane.value === 'qa'
+      ? { x: 0, y: 0, width: 0, height: 0 }
+      : measuredBounds()
+    void window.preview.setBounds(bounds)
   }
+}
+
+function setMobilePane(pane: 'web' | 'qa') {
+  mobilePane.value = pane
+  void nextTick(syncBounds)
+}
+
+function setSplit(value: number) {
+  splitRatio.value = Math.min(75, Math.max(30, value))
+  void nextTick(syncBounds)
+}
+
+function adjustSplit(delta: number) { setSplit(splitRatio.value + delta) }
+
+let resizing = false
+function startResize() {
+  resizing = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+function onMove(event: MouseEvent) {
+  if (!resizing || !readerSplit.value) return
+  const bounds = readerSplit.value.getBoundingClientRect()
+  setSplit(((event.clientX - bounds.left) / bounds.width) * 100)
+}
+function stopResize() {
+  resizing = false
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+}
+
+async function sendQuestion(question: string) {
+  if (await qa.send(question)) qaPanel.value?.clearDraft()
+}
+function startNewSession() {
+  qa.newSession()
+  sourceChanged.value = false
+}
+async function loadSession(id: string) {
+  await qa.load(id)
+  sourceChanged.value = !!previewState.value.visible && previewState.value.url !== qa.currentSession.value?.finalUrl
+}
+function openSavedSource() {
+  const url = qa.currentSession.value?.finalUrl
+  if (url) void openUrl(url)
 }
 
 function runAction(action: () => Promise<void>) {
@@ -142,7 +221,10 @@ function openExternal() {
 }
 
 onMounted(async () => {
+  void qa.refresh()
   unsubscribe = window.preview.onState(next => {
+    if (qa.currentSession.value && (next.url !== qa.currentSession.value.finalUrl
+      || (next.loading && !previewState.value.loading))) sourceChanged.value = true
     previewState.value = next
     if (!editing.value) address.value = next.url
     if (next.visible) inputError.value = ''
@@ -150,20 +232,36 @@ onMounted(async () => {
   observer = new ResizeObserver(syncBounds)
   if (previewSlot.value) observer.observe(previewSlot.value)
   window.addEventListener('resize', syncBounds)
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', stopResize)
   await nextTick()
   addressInput.value?.focus()
 })
 
 onBeforeUnmount(() => {
+  qa.stop()
+  stopResize()
   observer?.disconnect()
   window.removeEventListener('resize', syncBounds)
+  window.removeEventListener('mousemove', onMove)
+  window.removeEventListener('mouseup', stopResize)
   unsubscribe?.()
   void window.preview.close()
 })
+
+watch(splitRatio, () => { void nextTick(syncBounds) })
 </script>
 
 <style scoped>
 .web-preview-view { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-base); }
+.web-reader-split { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.web-split-left { height: 100%; min-width: 0; overflow: hidden; flex-grow: 0; flex-shrink: 1; }
+.web-split-right { display: flex; flex: 1; min-width: 300px; height: 100%; overflow: hidden; border-left: 1px solid var(--border); }
+.resizer { display: flex; align-items: center; justify-content: center; width: 7px; flex-shrink: 0; border-left: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--bg-elevated); cursor: col-resize; }
+.resizer span { width: 2px; height: 30px; border-radius: 2px; background: var(--border-light); }
+.resizer:hover, .resizer:focus-visible { background: var(--accent-dim); }
+.resizer:hover span { background: var(--accent); }
+.web-mode-switch { display: none; }
 .preview-toolbar { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--bg-surface); flex-shrink: 0; }
 .navigation-actions, .page-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .icon-button, .external-button, .open-button { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; color: var(--text-secondary); background: transparent; }
@@ -181,7 +279,7 @@ onBeforeUnmount(() => {
 .external-button { gap: 6px; height: 40px; padding: 0 10px; border-radius: var(--radius-sm); font-size: 12px; white-space: nowrap; }
 .loading-line { height: 2px; flex-shrink: 0; background: linear-gradient(90deg, transparent 0%, var(--accent) 45%, transparent 90%); background-size: 180% 100%; animation: loading-move 1.2s linear infinite; }
 .toolbar-notice { padding: 7px 20px; border-bottom: 1px solid var(--border); color: var(--danger); background: var(--danger-dim); font-size: 12px; }
-.preview-stage { flex: 1; min-height: 0; padding: 12px; background: var(--bg-reader); }
+.preview-stage { height: 100%; min-height: 0; padding: 12px; background: var(--bg-reader); }
 .preview-slot { position: relative; width: 100%; height: 100%; min-height: 0; background: var(--bg-surface); }
 .preview-message { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 10px; width: min(520px, calc(100% - 48px)); height: 100%; margin: 0 auto; color: var(--text-secondary); }
 .message-title { font-size: clamp(23px, 3vw, 30px); line-height: 1.25; font-weight: 500; color: var(--text-primary); }
@@ -194,6 +292,15 @@ onBeforeUnmount(() => {
 .secondary-action:hover { background: var(--accent-dim); }
 @keyframes loading-move { from { background-position: 180% 0; } to { background-position: -180% 0; } }
 @media (max-width: 760px) { .preview-toolbar { gap: 6px; padding: 9px 12px; } .external-button span { display: none; } .external-button { width: 40px; padding: 0; } }
+@media (max-width: 800px) {
+  .web-mode-switch { display: flex; gap: 8px; padding: 7px 18px; border-bottom: 1px solid var(--border); background: var(--bg-surface); }
+  .web-mode-switch button { flex: 1; padding: 9px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 12px; }
+  .web-mode-switch button.active { background: var(--accent-dim); color: var(--accent); }
+  .web-split-left, .web-split-right { display: none; flex-basis: 100% !important; width: 100%; min-width: 0; }
+  .web-split-left.mobile-active { display: block; }
+  .web-split-right.mobile-active { display: flex; }
+  .resizer { display: none; }
+}
 @media (max-width: 520px) { .preview-toolbar { flex-wrap: wrap; min-height: 100px; } .address-form { order: -1; flex-basis: 100%; } .page-actions { margin-left: auto; } .preview-stage { padding: 8px; } }
 @media (prefers-reduced-motion: reduce) { .loading-line { animation: none; background: var(--accent); } }
 </style>
