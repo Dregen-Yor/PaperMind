@@ -68,7 +68,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import MarkdownContent from './MarkdownContent.vue'
 import type { WebQaSessionDetail, WebQaSessionSummary } from '../types/webQa'
 
@@ -91,6 +91,17 @@ const emit = defineEmits<{
   'open-source': []
 }>()
 const draft = ref('')
+watch(() => [props.session?.id, props.session?.messages.at(-1)?.status] as const,
+  ([id, status], [oldId, oldStatus]) => {
+    if (id !== oldId) {
+      draft.value = ''
+      return
+    }
+    if (status === 'completed' && oldStatus !== 'completed') {
+      const lastQuestion = props.session?.messages.findLast(message => message.role === 'user')?.content
+      if (draft.value === lastQuestion) draft.value = ''
+    }
+  })
 const canRetry = computed(() => {
   const last = props.session?.messages.at(-1)
   return !props.busy && last?.role === 'assistant'

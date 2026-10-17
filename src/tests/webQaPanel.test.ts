@@ -33,4 +33,20 @@ describe('web QA panel', () => {
     expect(wrapper.get('[data-action="new-session"]').text()).toContain('新建问答')
     expect(wrapper.text()).toContain('旧页')
   })
+
+  it('clears a retried question draft after its answer completes', async () => {
+    const failed: WebQaSessionDetail = { ...session, messages: [
+      { ...session.messages[0], content: '重试问题' },
+      { id: 'm2', sessionId: 's1', role: 'assistant', content: '', status: 'failed',
+        error: '超时', modelId: 'model-a', createdAt: 2 },
+    ] }
+    const wrapper = mount(WebQaPanel, { props: {
+      session: failed, sessions: [failed], busy: false, error: '', streamedText: '',
+      canAsk: true, sourceChanged: false, modelName: 'Model A',
+    }, global: { stubs: { MarkdownContent: true } } })
+    await wrapper.get('[aria-label="问题输入框"]').setValue('重试问题')
+    await wrapper.setProps({ session: { ...failed, messages: [failed.messages[0],
+      { ...failed.messages[1], content: '回答', status: 'completed', error: '' }] } })
+    expect((wrapper.get('[aria-label="问题输入框"]').element as HTMLTextAreaElement).value).toBe('')
+  })
 })

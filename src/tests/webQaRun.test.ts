@@ -45,6 +45,18 @@ function harness() {
 }
 
 describe('web QA run lifecycle', () => {
+  it('accepts only one initial send while the page snapshot is being captured', async () => {
+    const h = harness()
+    let finishCapture!: (snapshot: typeof source) => void
+    h.captureSnapshot.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve }))
+    const first = h.qa.send('第一问')
+    expect(await h.qa.send('重复提交')).toBe(false)
+    finishCapture({ ...source })
+    expect(await first).toBe(true)
+    expect(h.repository.create).toHaveBeenCalledTimes(1)
+    expect(h.requestCompletion).toHaveBeenCalledTimes(1)
+  })
+
   it('captures once and keeps the original snapshot after the visible page changes', async () => {
     const h = harness()
     expect(await h.qa.send('第一问')).toBe(true)
@@ -101,5 +113,24 @@ describe('web QA run lifecycle', () => {
     expect(h.qa.currentSession.value?.messages.at(-1)?.status).toBe('cancelled')
     expect(await h.qa.retry()).toBe(true)
     expect(h.requestCompletion.mock.calls[1][0].at(-1)?.content).toBe('停止这次回答')
+  })
+
+  it('uses a new page only after starting a new session and restores the old one unchanged', async () => {
+    const h = harness()
+    await h.qa.send('旧页第一问')
+    const oldId = h.qa.currentSession.value!.id
+    h.qa.newSession()
+    const newHtml = '<html><main>新页</main></html>'
+    h.captureSnapshot.mockResolvedValueOnce({ ...source, finalUrl: 'https://example.org/new', html: newHtml })
+    await h.qa.send('新页第一问')
+    const newId = h.qa.currentSession.value!.id
+    expect(newId).not.toBe(oldId)
+    expect(h.requestCompletion.mock.calls[0][0].some(m => m.content.includes(oldHtml))).toBe(true)
+    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content.includes(newHtml))).toBe(true)
+    expect(h.requestCompletion.mock.calls[1][0].some(m => m.content.includes(oldHtml))).toBe(false)
+    await h.qa.load(oldId)
+    await h.qa.send('旧页第二问')
+    expect(h.requestCompletion.mock.calls[2][0].some(m => m.content.includes(oldHtml))).toBe(true)
+    expect(h.captureSnapshot).toHaveBeenCalledTimes(2)
   })
 })

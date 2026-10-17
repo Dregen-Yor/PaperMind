@@ -35,6 +35,7 @@ export function createWebQaController(deps: WebQaDependencies) {
   const error = ref('')
   const streamedText = ref('')
   let activeController: AbortController | null = null
+  let preparing = false
 
   async function refresh() {
     sessions.value = await deps.repository.list()
@@ -110,7 +111,7 @@ export function createWebQaController(deps: WebQaDependencies) {
   }
 
   async function send(question: string): Promise<boolean> {
-    if (busy.value || !question.trim()) return false
+    if (busy.value || preparing || !question.trim()) return false
     error.value = ''
     if (!validProfile(deps.getProfile())) {
       error.value = '请先在设置中配置可用的对话模型。'
@@ -118,6 +119,7 @@ export function createWebQaController(deps: WebQaDependencies) {
     }
     const content = question.trim()
     let session = currentSession.value
+    preparing = true
     try {
       if (!session) {
         const snapshot = await deps.preview.captureSnapshot()
@@ -138,12 +140,14 @@ export function createWebQaController(deps: WebQaDependencies) {
     } catch (cause) {
       error.value = readableError(cause)
       return false
+    } finally {
+      preparing = false
     }
     return run(content, session, globalThis.crypto.randomUUID(), false)
   }
 
   async function retry(): Promise<boolean> {
-    if (busy.value || !currentSession.value || !validProfile(deps.getProfile())) return false
+    if (busy.value || preparing || !currentSession.value || !validProfile(deps.getProfile())) return false
     const messages = currentSession.value.messages
     const index = messages.findLastIndex(m => m.role === 'assistant'
       && (m.status === 'failed' || m.status === 'cancelled' || m.status === 'interrupted'))

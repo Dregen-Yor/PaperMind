@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { join } from 'path'
 import { tmpdir } from 'os'
 import Database from 'better-sqlite3'
+import { createHash } from 'crypto'
 
 const appPath = vi.hoisted(() => ({
   userData: '',
@@ -14,7 +15,7 @@ vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: (...args: unknown[]) => unknown) => appPath.handlers.set(channel, handler) },
 }))
 
-import { exportAll, importAll, initDb, paperApi } from '../../electron/db'
+import { clearAll, exportAll, getWebQaRepository, importAll, initDb, paperApi } from '../../electron/db'
 import { registerIpc } from '../../electron/ipc'
 
 const taskRoot = mkdtempSync(join(tmpdir(), 'papermind-ipc-contract-'))
@@ -69,6 +70,27 @@ describe('same backup import task before and after IPC boundary changes', () => 
       outsideWrite: false,
       previousPaperRetained: true,
     })
+  })
+
+  it('round-trips web QA through the global backup and rejects broken snapshot references before clearing data', () => {
+    const html = '<!DOCTYPE html><html>动态正文</html>'
+    getWebQaRepository().create({
+      sessionId: 'web-s1', messageId: 'web-m1', question: '文章结论？', createdAt: 10,
+      snapshot: { finalUrl: 'https://example.org/article', title: '文章', html,
+        capturedAt: 9, byteLength: Buffer.byteLength(html, 'utf8'),
+        contentHash: createHash('sha256').update(html).digest('hex') },
+    })
+    const saved = exportAll()
+    clearAll()
+    expect(getWebQaRepository().list()).toHaveLength(0)
+    importAll(saved)
+    expect(getWebQaRepository().get('web-s1')?.snapshot.html).toBe(html)
+    expect(getWebQaRepository().get('web-s1')?.messages[0].content).toBe('文章结论？')
+
+    const invalid = structuredClone(saved)
+    invalid.webQa.sessions[0].snapshotId = 'missing'
+    expect(() => importAll(invalid)).toThrow('网页快照')
+    expect(getWebQaRepository().get('web-s1')?.snapshot.html).toBe(html)
   })
 
   it('keeps files untouched when a nested Docling record makes import fail', () => {
