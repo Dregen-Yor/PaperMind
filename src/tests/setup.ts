@@ -6,6 +6,7 @@ const mockDb = {
     listPages: vi.fn().mockResolvedValue([]),
     archive: vi.fn().mockRejectedValue(new Error('未配置网页归档测试结果')),
     getPreview: vi.fn().mockResolvedValue(null),
+    findAppearance: vi.fn().mockResolvedValue(null),
     getSnapshot: vi.fn().mockResolvedValue(null),
     listSessions: vi.fn().mockResolvedValue([]),
     getSession: vi.fn().mockResolvedValue(null),

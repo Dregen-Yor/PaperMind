@@ -30,6 +30,7 @@ beforeEach(() => {
   vi.mocked(window.db.webQa.listPages).mockResolvedValue([])
   vi.mocked(window.db.webQa.archive).mockResolvedValue(page)
   vi.mocked(window.db.webQa.getPreview).mockResolvedValue(cached)
+  vi.mocked(window.db.webQa.findAppearance).mockResolvedValue(null)
   vi.mocked(window.db.webQa.listSessions).mockResolvedValue([])
   unsubscribe = vi.fn()
   preview = {
@@ -39,6 +40,7 @@ beforeEach(() => {
       capturedAt: 1, contentHash: 'hash', byteLength: 13,
     })),
     setBounds: vi.fn(async () => {}),
+    showCached: vi.fn(async () => false),
     back: vi.fn(async () => {}),
     forward: vi.fn(async () => {}),
     reload: vi.fn(async () => {}),
@@ -127,7 +129,131 @@ describe('HTML preview page', () => {
     expect(wrapper.text()).toContain('本地缓存文章')
     expect(wrapper.text()).toContain('离线正文')
     expect(preview.open).not.toHaveBeenCalled()
+    expect(preview.showCached).toHaveBeenCalledWith('snap-1', expect.objectContaining({ width: 900 }))
     expect(preview.setBounds).toHaveBeenCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+  })
+
+  it('shows a saved full-page archive in the native preview instead of text-only blocks', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    vi.mocked(preview.showCached).mockResolvedValue(true)
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue('page-1')
+    await flushPromises()
+    expect(preview.showCached).toHaveBeenCalledWith('snap-1', {
+      x: 72, y: 64, width: 900, height: 700,
+    })
+    expect(wrapper.text()).toContain('本地原貌缓存')
+    expect(wrapper.find('.cached-page').exists()).toBe(false)
+    expect(preview.setBounds).toHaveBeenCalledWith({ x: 72, y: 64, width: 900, height: 700 })
+  })
+
+  it('explains why original appearance fell back to readable text', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    vi.mocked(window.db.webQa.getPreview).mockResolvedValue({ ...cached, hasOriginalAppearance: true })
+    vi.mocked(preview.showCached).mockRejectedValueOnce(new Error('archive unavailable'))
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue('page-1')
+    await flushPromises()
+    expect(wrapper.text()).toContain('原貌缓存加载失败')
+    expect(wrapper.text()).toContain('archive unavailable')
+    expect(wrapper.text()).toContain('离线正文')
+  })
+
+  it('finds a matching appearance for an old conversation after the page changed again', async () => {
+    const newerPage = { ...page, latestSnapshotId: 'snap-3', snapshotCount: 3, sessionCount: 1 }
+    const oldSession = { id: 'old-session', pageId: page.id, snapshotId: 'snap-1',
+      finalUrl: cached.finalUrl, title: cached.title, capturedAt: 1, byteLength: 80,
+      createdAt: 1, updatedAt: 2, firstQuestion: '旧问题' }
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([newerPage])
+    vi.mocked(window.db.webQa.listSessions).mockResolvedValue([oldSession])
+    vi.mocked(window.db.webQa.getPreview).mockImplementation(async id => id === 'snap-3'
+      ? { ...cached, id: 'snap-3', contentHash: 'changed' } : cached)
+    vi.mocked(window.db.webQa.findAppearance).mockResolvedValue({ ...cached, id: 'snap-2', hasOriginalAppearance: true })
+    vi.mocked(window.db.webQa.getSession).mockResolvedValue({ ...oldSession,
+      messages: [{ id: 'old-q', sessionId: oldSession.id, role: 'user', content: '旧问题',
+        status: 'completed', error: '', modelId: '', createdAt: 1 },
+      { id: 'old-a', sessionId: oldSession.id, role: 'assistant', content: '旧回答',
+        status: 'completed', error: '', modelId: 'model-a', createdAt: 2 }] })
+    vi.mocked(preview.showCached).mockResolvedValue(true)
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await flushPromises()
+    await wrapper.get('#web-qa-history').setValue(oldSession.id)
+    await flushPromises()
+    expect(preview.showCached).toHaveBeenLastCalledWith('snap-2', expect.any(Object))
+    expect(window.db.webQa.findAppearance).toHaveBeenCalledWith(page.id, cached.contentHash)
+    expect(wrapper.text()).toContain('外观来自同内容缓存')
+    expect(wrapper.text()).toContain('旧问题')
+  })
+
+  it('does not let a stale cache load replace a newer live open', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    let completeCache!: (shown: boolean) => void
+    vi.mocked(preview.showCached).mockReturnValueOnce(new Promise(resolve => { completeCache = resolve }))
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await wrapper.get('[aria-label="网页地址"]').setValue('https://example.org/new')
+    await wrapper.get('[aria-label="网页地址"]').trigger('keydown.enter')
+    await flushPromises()
+    completeCache(true)
+    await flushPromises()
+    expect(wrapper.text()).toContain('在线网页预览')
+    expect(wrapper.text()).not.toContain('本地原貌缓存')
+  })
+
+  it('keeps the live source open when an older session cache finishes later', async () => {
+    const session = { id: 's1', pageId: page.id, snapshotId: cached.id,
+      finalUrl: cached.finalUrl, title: cached.title, capturedAt: 1, byteLength: 80,
+      createdAt: 1, updatedAt: 2, firstQuestion: '问题' }
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    vi.mocked(window.db.webQa.listSessions).mockResolvedValue([session])
+    vi.mocked(window.db.webQa.getSession).mockResolvedValue({ ...session, messages: [
+      { id: 'q1', sessionId: session.id, role: 'user', content: '问题', status: 'completed', error: '', modelId: '', createdAt: 1 },
+      { id: 'a1', sessionId: session.id, role: 'assistant', content: '回答', status: 'completed', error: '', modelId: '', createdAt: 2 },
+    ] })
+    vi.mocked(preview.showCached).mockResolvedValueOnce(true)
+    let completeCache!: (shown: boolean) => void
+    vi.mocked(preview.showCached).mockReturnValueOnce(new Promise(resolve => { completeCache = resolve }))
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await flushPromises()
+    await wrapper.get('#web-qa-history').setValue(session.id)
+    await flushPromises()
+    await wrapper.get('.source-card button').trigger('click')
+    await flushPromises()
+    expect(preview.open).toHaveBeenCalledWith(cached.finalUrl, expect.any(Object))
+    pushState?.({ ...emptyState, url: cached.finalUrl, visible: true })
+    completeCache(true)
+    await flushPromises()
+    expect(wrapper.text()).toContain('在线网页预览')
+    expect(wrapper.find('[data-action="save-current"]').exists()).toBe(true)
+  })
+
+  it('does not let an older archive refresh overwrite a newer opened address', async () => {
+    const secondPage = { ...page, id: 'page-2', canonicalUrl: 'https://example.org/new',
+      latestSnapshotId: 'snap-2' }
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    let finishFirstRefresh!: (pages: typeof page[]) => void
+    vi.mocked(window.db.webQa.listPages)
+      .mockReturnValueOnce(new Promise(resolve => { finishFirstRefresh = resolve }))
+      .mockResolvedValueOnce([page, secondPage])
+    vi.mocked(window.db.webQa.archive).mockResolvedValueOnce(page).mockResolvedValueOnce(secondPage)
+    await wrapper.get('[aria-label="网页地址"]').setValue(page.canonicalUrl)
+    await wrapper.get('[aria-label="网页地址"]').trigger('keydown.enter')
+    await flushPromises()
+    await wrapper.get('[aria-label="网页地址"]').setValue(secondPage.canonicalUrl)
+    await wrapper.get('[aria-label="网页地址"]').trigger('keydown.enter')
+    await flushPromises()
+    finishFirstRefresh([page, secondPage])
+    await flushPromises()
+    expect((wrapper.get('[aria-label="网页地址"]').element as HTMLInputElement).value).toBe(secondPage.canonicalUrl)
+    expect(wrapper.text()).not.toContain('网页选择已变化')
   })
 
   it('groups distinct sessions under a page and opens each saved answer from cache', async () => {

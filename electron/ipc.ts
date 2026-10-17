@@ -28,6 +28,7 @@ export function registerIpc() {
     'webQa:listPages': () => webQa.listPages(),
     'webQa:archive': (_e, snapshot, openedAt) => webQa.archive(snapshot, openedAt),
     'webQa:getPreview': (_e, id) => webQa.getPreview(id),
+    'webQa:findAppearance': (_e, pageId, contentHash) => webQa.findAppearance(pageId, contentHash),
     'webQa:getSnapshot': (_e, id) => webQa.getSnapshot(id),
     'webQa:listSessions': (_e, pageId) => webQa.listSessions(pageId),
     'webQa:getSession': (_e, id) => webQa.getSession(id),
@@ -66,6 +67,16 @@ export function registerIpc() {
     'preview:open': (e, url, bounds) => previewControllerForSender(e.sender).open(url, bounds),
     'preview:openAndCapture': (e, url, bounds) => previewControllerForSender(e.sender).openAndCapture(url, bounds),
     'preview:setBounds': (e, bounds) => previewControllerForSender(e.sender).setBounds(bounds),
+    'preview:showCached': async (e, snapshotId, bounds) => {
+      const controller = previewControllerForSender(e.sender)
+      const archive = webQa.getArchive(snapshotId)
+      if (!archive) {
+        controller.close()
+        return false
+      }
+      await controller.showCached(archive, bounds)
+      return true
+    },
     'preview:back': e => previewControllerForSender(e.sender).back(),
     'preview:forward': e => previewControllerForSender(e.sender).forward(),
     'preview:reload': e => previewControllerForSender(e.sender).reload(),

@@ -139,15 +139,15 @@ defineExpose({ clearDraft })
 </script>
 
 <style scoped>
-.web-qa-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-surface); color: var(--text-primary); }
-.qa-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 82px; padding: 14px 22px 12px; border-bottom: 1px solid var(--border); }
+.web-qa-panel { display: flex; flex-direction: column; width: 100%; min-width: 0; height: 100%; min-height: 0; overflow: hidden; background: var(--bg-surface); color: var(--text-primary); }
+.qa-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 82px; padding: 14px 22px 12px; border-bottom: 1px solid var(--border); }
 .qa-eyebrow, .source-kicker { display: block; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .15em; }
 .qa-heading h2 { margin: 3px 0 1px; font-family: var(--font-reading); font-size: 20px; line-height: 1.2; }
 .model-name { color: var(--text-muted); font-size: 11px; }
 .new-button, .source-meta button, .source-warning button, .retry-button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; }
 .new-button { flex-shrink: 0; padding: 8px 0; font-weight: 600; }
 .new-button:hover, .source-meta button:hover, .source-warning button:hover, .retry-button:hover { text-decoration: underline; }
-.session-toolbar { display: flex; align-items: center; gap: 9px; padding: 10px 22px; border-bottom: 1px solid var(--border-light); }
+.session-toolbar { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px 22px; border-bottom: 1px solid var(--border-light); }
 .session-toolbar label { flex-shrink: 0; color: var(--text-muted); font-size: 11px; }
 .session-toolbar select { min-width: 0; flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; outline-color: var(--accent); background: var(--bg-base); color: var(--text-primary); font-size: 12px; }
 .session-toolbar button { border: 0; color: var(--danger); background: transparent; cursor: pointer; font-size: 11px; }
@@ -155,21 +155,21 @@ defineExpose({ clearDraft })
 .source-card { display: flex; flex-direction: column; gap: 5px; margin: 14px 22px 0; padding: 12px 14px; border-left: 2px solid var(--accent); background: var(--bg-base); }
 .source-card strong { overflow: hidden; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }
 .source-url { overflow: hidden; color: var(--text-muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
-.source-meta { display: flex; align-items: center; gap: 12px; color: var(--text-muted); font-size: 10px; }
+.source-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--text-muted); font-size: 10px; }
 .source-meta button { margin-left: auto; font-size: 10px; }
 .source-warning { margin: 10px 22px 0; padding: 9px 12px; border: 1px solid var(--accent-dim); border-radius: 5px; color: var(--accent); background: var(--bg-base); font-size: 11px; line-height: 1.6; }
 .source-warning button { display: block; padding: 3px 0 0; font-weight: 600; }
-.qa-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px; }
+.qa-scroll { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 18px 22px; }
 .empty-qa { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; min-height: 100%; max-width: 340px; margin: 0 auto; }
 .empty-mark { margin-bottom: 12px; color: var(--accent); font-family: var(--font-reading); font-size: 34px; }
 .empty-qa h3 { font-family: var(--font-reading); font-size: 21px; font-weight: 500; }
 .empty-qa p { margin-top: 8px; color: var(--text-muted); font-size: 12px; line-height: 1.8; }
-.message-list { display: flex; flex-direction: column; gap: 20px; }
-.qa-message { max-width: 100%; }
-.qa-message.user { align-self: flex-end; max-width: 88%; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px 12px 2px 12px; background: var(--bg-base); }
+.message-list { display: flex; flex-direction: column; min-width: 0; gap: 20px; }
+.qa-message { min-width: 0; max-width: 100%; }
+.qa-message.user { align-self: flex-end; width: max-content; max-width: 88%; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px 12px 2px 12px; background: var(--bg-base); }
 .qa-message.assistant { align-self: stretch; }
 .message-role { display: block; margin-bottom: 6px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
-.message-body { color: var(--text-primary); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.message-body { max-width: 100%; overflow-x: auto; color: var(--text-primary); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
 .message-body.plain { white-space: pre-wrap; }
 .message-status { color: var(--text-muted); font-size: 12px; }
 .message-error, .composer-error { color: var(--danger); font-size: 12px; line-height: 1.5; }

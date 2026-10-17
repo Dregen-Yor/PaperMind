@@ -20,6 +20,94 @@ function setup() {
 }
 
 describe('web QA repository', () => {
+  it('keeps older conversations on their original DOM-only snapshot when adding original appearance', () => {
+    const { db, repo } = setup()
+    const page = repo.archive(snapshot, 100)
+    expect(repo.getArchive(page.latestSnapshotId)).toBeNull()
+    repo.createSession({ sessionId: 'older-session', questionId: 'older-q', assistantId: 'older-a',
+      snapshotId: page.latestSnapshotId, question: '旧问题', createdAt: 110, modelId: 'model-a' })
+    const archiveMhtml = Buffer.from('MIME-Version: 1.0\nContent-Type: multipart/related\n').toString('base64')
+    const upgraded = repo.archive({ ...snapshot, archiveMhtml }, 200)
+    expect(upgraded.latestSnapshotId).not.toBe(page.latestSnapshotId)
+    expect(upgraded.snapshotCount).toBe(2)
+    expect(repo.getArchive(page.latestSnapshotId)).toBeNull()
+    expect(repo.getSession('older-session')?.snapshotId).toBe(page.latestSnapshotId)
+    expect(repo.getArchive(upgraded.latestSnapshotId)?.toString()).toContain('multipart/related')
+    expect(repo.getPreview(upgraded.latestSnapshotId)?.hasOriginalAppearance).toBe(true)
+    const backup = repo.exportBackup()
+    expect(backup.snapshots.find(s => s.id === upgraded.latestSnapshotId)?.archiveMhtml).toBe(archiveMhtml)
+    repo.importBackup(backup)
+    expect(repo.getArchive(page.latestSnapshotId)).toBeNull()
+    expect(repo.getArchive(upgraded.latestSnapshotId)?.toString()).toContain('multipart/related')
+    db.close()
+  })
+
+  it('versions changed page styling and deduplicates only the same MHTML appearance', () => {
+    const { db, repo } = setup()
+    const mhtml = (boundary: string, date: string, cid: string, css: string) => Buffer.from([
+      'From: <Saved by Blink>', `Date: ${date}`,
+      `Content-Type: multipart/related; boundary="${boundary}"`, '',
+      `--${boundary}`, 'Content-Type: text/html', `Content-ID: <${cid}>`, '',
+      `<link href="cid:css=\r\n-${cid}">`, `--${boundary}`, 'Content-Type: text/css',
+      `Content-Location: cid:css-${cid}`, '', css,
+      `--${boundary}--`, '',
+    ].join('\r\n')).toString('base64')
+    const first = repo.archive({ ...snapshot,
+      archiveMhtml: mhtml('boundary-a', 'Sat, 17 Oct 2026 10:00:00 GMT', 'a@mhtml.blink', 'body{color:red}') }, 100)
+    const same = repo.archive({ ...snapshot,
+      archiveMhtml: mhtml('boundary-b', 'Sat, 17 Oct 2026 10:01:00 GMT', 'b@mhtml.blink', 'body{color:red}') }, 200)
+    expect(same.latestSnapshotId).toBe(first.latestSnapshotId)
+    expect(same.snapshotCount).toBe(1)
+    const changed = repo.archive({ ...snapshot,
+      archiveMhtml: mhtml('boundary-c', 'Sat, 17 Oct 2026 10:02:00 GMT', 'c@mhtml.blink', 'body{color:blue}') }, 300)
+    expect(changed.latestSnapshotId).not.toBe(first.latestSnapshotId)
+    expect(changed.snapshotCount).toBe(2)
+    expect(repo.getArchive(first.latestSnapshotId)?.toString()).toContain('color:red')
+    expect(repo.getArchive(changed.latestSnapshotId)?.toString()).toContain('color:blue')
+    db.close()
+  })
+
+  it('keeps separate versions when identical assets are referenced differently', () => {
+    const { db, repo } = setup()
+    const mhtml = (boundary: string, selected: 'red' | 'blue') => Buffer.from([
+      'From: <Saved by Blink>', 'Date: Sat, 17 Oct 2026 10:00:00 GMT',
+      `Content-Type: multipart/related; boundary="${boundary}"`, '',
+      `--${boundary}`, 'Content-Type: text/html', 'Content-ID: <root@mhtml.blink>', '',
+      `<link href="cid:${selected}@mhtml.blink">`,
+      `--${boundary}`, 'Content-Type: text/css', 'Content-Location: cid:red@mhtml.blink', '',
+      'body{color:red}',
+      `--${boundary}`, 'Content-Type: text/css', 'Content-Location: cid:blue@mhtml.blink', '',
+      'body{color:blue}', `--${boundary}--`, '',
+    ].join('\r\n')).toString('base64')
+    const first = repo.archive({ ...snapshot, archiveMhtml: mhtml('boundary-a', 'red') }, 100)
+    const changed = repo.archive({ ...snapshot, archiveMhtml: mhtml('boundary-b', 'blue') }, 200)
+    expect(changed.latestSnapshotId).not.toBe(first.latestSnapshotId)
+    expect(changed.snapshotCount).toBe(2)
+    db.close()
+  })
+
+  it('finds a matching original appearance even when a different page version is latest', () => {
+    const { db, repo } = setup()
+    const older = repo.archive(snapshot, 100)
+    const matching = repo.archive({ ...snapshot,
+      archiveMhtml: Buffer.from('MIME-Version: 1.0\nContent-Type: multipart/related\nA').toString('base64') }, 200)
+    const changedHtml = '<html><body>新版</body></html>'
+    repo.archive({ ...snapshot, html: changedHtml, byteLength: Buffer.byteLength(changedHtml),
+      contentHash: createHash('sha256').update(changedHtml).digest('hex'),
+      archiveMhtml: Buffer.from('MIME-Version: 1.0\nContent-Type: multipart/related\nB').toString('base64') }, 300)
+    expect(repo.findAppearance(older.id, snapshot.contentHash)?.id).toBe(matching.latestSnapshotId)
+    db.close()
+  })
+
+  it('keeps the original appearance when creating a session through the legacy API', () => {
+    const { db, repo } = setup()
+    const archiveMhtml = Buffer.from('MIME-Version: 1.0\n').toString('base64')
+    repo.create({ sessionId: 'legacy-session', messageId: 'q1', snapshot: { ...snapshot, archiveMhtml },
+      question: '核心观点？', createdAt: 20 })
+    expect(repo.getArchive('legacy-session')?.toString()).toContain('MIME-Version')
+    db.close()
+  })
+
   it('archives a page before any dialogue, deduplicates its DOM, and versions changed content', () => {
     const { db, repo } = setup()
     const first = repo.archive({ ...snapshot, finalUrl: 'https://EXAMPLE.org/article#part' }, 100)

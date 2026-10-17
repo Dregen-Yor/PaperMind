@@ -16,6 +16,7 @@ describe('cached webpage preview', () => {
     expect(wrapper.text()).toContain('<script>alert(1)</script> 正文')
     expect(wrapper.find('script').exists()).toBe(false)
     expect(wrapper.text()).toContain('缓存预览已截断')
+    expect(wrapper.text()).toContain('更新缓存')
     await wrapper.get('[data-action="open-source"]').trigger('click')
     expect(wrapper.emitted('open-source')).toHaveLength(1)
   })

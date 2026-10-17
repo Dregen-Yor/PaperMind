@@ -40,7 +40,8 @@
     </header>
 
     <div class="cache-actions">
-      <span>{{ history.mode.value === 'cached' ? '本地缓存阅读' : '在线网页预览' }}</span>
+      <span>{{ history.mode.value === 'cached' ? (history.nativeCached.value ? '本地原貌缓存' : '本地缓存阅读') : '在线网页预览' }}</span>
+      <span v-if="history.mode.value === 'cached' && history.appearanceNotice.value" class="appearance-notice">{{ history.appearanceNotice.value }}</span>
       <button v-if="history.mode.value === 'live' && previewState.visible && liveDirty" type="button" data-action="save-current" @click="saveCurrent">保存当前网页</button>
       <button v-if="history.selectedPage.value" type="button" data-action="update-cache" @click="updateCache">更新缓存</button>
       <button v-if="history.mode.value === 'live' && history.selectedPage.value" type="button" data-action="return-cache" @click="selectPage(history.selectedPage.value.id)">返回缓存</button>
@@ -57,7 +58,7 @@
       <main id="web-document" class="web-split-left" :class="{ 'mobile-active': mobilePane === 'web' }" :style="{ flexBasis: splitRatio + '%' }" aria-label="网页内容">
         <div class="preview-stage">
           <div ref="previewSlot" class="preview-slot" @dragover.prevent @drop.prevent="onDrop">
-            <WebCachedPreview v-if="history.mode.value === 'cached' && history.selectedSnapshotPreview.value" :snapshot="history.selectedSnapshotPreview.value" @open-source="openSavedSource" />
+            <WebCachedPreview v-if="history.mode.value === 'cached' && !history.nativeCached.value && history.selectedSnapshotPreview.value" :snapshot="history.selectedSnapshotPreview.value" :load-error="history.cacheLoadError.value" @open-source="openSavedSource" />
             <div v-else-if="!previewState.visible" class="preview-message" :class="{ 'has-error': previewState.error || inputError }">
               <template v-if="previewState.error || inputError">
                 <h1 class="message-title font-display">网页未能打开</h1>
@@ -126,6 +127,7 @@ const previewState = ref<PreviewState>({
 })
 let unsubscribe: (() => void) | undefined
 let observer: ResizeObserver | undefined
+const superseded = (error: unknown) => error instanceof Error && error.message === '网页选择已变化'
 
 function measuredBounds(): PreviewBounds {
   const rect = previewSlot.value?.getBoundingClientRect()
@@ -136,7 +138,10 @@ function measuredBounds(): PreviewBounds {
 
 function syncBounds() {
   if (history.mode.value === 'cached') {
-    void window.preview.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    const narrow = globalThis.matchMedia?.('(max-width: 800px)').matches ?? false
+    const bounds = history.nativeCached.value && (!narrow || mobilePane.value === 'web')
+      ? measuredBounds() : { x: 0, y: 0, width: 0, height: 0 }
+    void window.preview.setBounds(bounds)
   } else if (previewState.value.visible || previewState.value.loading) {
     const narrow = globalThis.matchMedia?.('(max-width: 800px)').matches ?? false
     const bounds = narrow && mobilePane.value === 'qa'
@@ -185,11 +190,11 @@ function startNewSession() {
 }
 async function loadSession(id: string) {
   try {
-    await history.selectSession(id)
+    if (!await history.selectSession(id, measuredBounds())) return
     liveDirty.value = false
     sourceChanged.value = false
     await nextTick(syncBounds)
-  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页会话加载失败' }
+  } catch (cause) { if (!superseded(cause)) inputError.value = cause instanceof Error ? cause.message : '网页会话加载失败' }
 }
 function openSavedSource() {
   const url = qa.currentSession.value?.finalUrl ?? history.selectedSnapshotPreview.value?.finalUrl
@@ -205,11 +210,10 @@ function runAction(action: () => Promise<void>) {
 async function openUrl(url: string) {
   inputError.value = ''
   try {
-    history.mode.value = 'live'
     liveDirty.value = true
-    await window.preview.open(url, measuredBounds())
+    await history.openLive(url, measuredBounds())
   } catch (error) {
-    inputError.value = error instanceof Error ? error.message : '网页未能打开，请重试。'
+    if (!superseded(error)) inputError.value = error instanceof Error ? error.message : '网页未能打开，请重试。'
   }
 }
 
@@ -224,7 +228,7 @@ async function openAddress() {
     liveDirty.value = false
     sourceChanged.value = false
   } catch (error) {
-    inputError.value = error instanceof Error ? error.message : '请输入有效的 HTTPS 链接'
+    if (!superseded(error)) inputError.value = error instanceof Error ? error.message : '请输入有效的 HTTPS 链接'
   }
 }
 
@@ -238,12 +242,12 @@ async function onDrop(event: DragEvent) {
 
 async function selectPage(id: string) {
   try {
-    await history.selectPage(id)
+    if (!await history.selectPage(id, measuredBounds())) return
     liveDirty.value = false
     address.value = history.selectedPage.value?.canonicalUrl ?? address.value
     sourceChanged.value = false
     await nextTick(syncBounds)
-  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页缓存加载失败' }
+  } catch (cause) { if (!superseded(cause)) inputError.value = cause instanceof Error ? cause.message : '网页缓存加载失败' }
 }
 
 async function saveCurrent() {
@@ -251,7 +255,7 @@ async function saveCurrent() {
     await history.saveCurrent()
     liveDirty.value = false
     sourceChanged.value = false
-  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '当前网页保存失败' }
+  } catch (cause) { if (!superseded(cause)) inputError.value = cause instanceof Error ? cause.message : '当前网页保存失败' }
 }
 
 async function updateCache() {
@@ -259,7 +263,7 @@ async function updateCache() {
     await history.refreshPage(measuredBounds())
     liveDirty.value = false
     sourceChanged.value = false
-  } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页缓存更新失败' }
+  } catch (cause) { if (!superseded(cause)) inputError.value = cause instanceof Error ? cause.message : '网页缓存更新失败' }
 }
 
 async function removePage(id: string) {
@@ -333,7 +337,7 @@ watch(() => history.mode.value, () => { void nextTick(syncBounds) })
 .web-preview-view { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-base); }
 .web-reader-split { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .web-split-left { height: 100%; min-width: 0; overflow: hidden; flex-grow: 0; flex-shrink: 1; }
-.web-split-right { display: flex; flex: 1; min-width: 300px; height: 100%; overflow: hidden; border-left: 1px solid var(--border); }
+.web-split-right { display: flex; flex: 1; min-width: 340px; height: 100%; overflow: hidden; border-left: 1px solid var(--border); }
 .resizer { display: flex; align-items: center; justify-content: center; width: 7px; flex-shrink: 0; border-left: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--bg-elevated); cursor: col-resize; }
 .resizer span { width: 2px; height: 30px; border-radius: 2px; background: var(--border-light); }
 .resizer:hover, .resizer:focus-visible { background: var(--accent-dim); }
@@ -342,6 +346,7 @@ watch(() => history.mode.value, () => { void nextTick(syncBounds) })
 .preview-toolbar { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--bg-surface); flex-shrink: 0; }
 .cache-actions { display: flex; align-items: center; gap: 12px; min-height: 35px; padding: 5px 20px; border-bottom: 1px solid var(--border); color: var(--text-muted); background: var(--bg-surface); font-size: 11px; }
 .cache-actions button { border: 0; color: var(--accent); background: transparent; cursor: pointer; font-size: 11px; }
+.appearance-notice { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); }
 .navigation-actions, .page-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .icon-button, .external-button, .open-button { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; color: var(--text-secondary); background: transparent; }
 .icon-button { width: 40px; height: 40px; border-radius: var(--radius-sm); }

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'crypto'
+import { readFileSync, writeFileSync } from 'fs'
 import type { BrowserWindow } from 'electron'
 import { previewControllerForSender, registerPreviewWindow, unregisterPreviewWindow } from '../../electron/webPreview'
 
@@ -8,6 +9,7 @@ const fake = vi.hoisted(() => ({
   permissionHandler: undefined as undefined | ((_contents: unknown, permission: string, callback: (allowed: boolean) => void) => void),
   permissionCheckHandler: undefined as undefined | ((_contents: unknown, permission: string) => boolean),
   sessionHandlers: new Map<string, (...args: any[]) => void>(),
+  requestHandlers: [] as Array<(details: { url: string; resourceType: string }, callback: (result: { cancel: boolean }) => void) => void>,
   externalOpen: vi.fn(async (_url: string) => {}),
   windowBySender: new Map<object, object>(),
 }))
@@ -19,6 +21,7 @@ vi.mock('electron', () => ({
       setPermissionRequestHandler: (handler: typeof fake.permissionHandler) => { fake.permissionHandler = handler },
       setPermissionCheckHandler: (handler: typeof fake.permissionCheckHandler) => { fake.permissionCheckHandler = handler },
       on: (name: string, handler: (...args: any[]) => void) => { fake.sessionHandlers.set(name, handler) },
+      webRequest: { onBeforeRequest: (handler: typeof fake.requestHandlers[number]) => { fake.requestHandlers.push(handler) } },
     }),
   },
   shell: { openExternal: fake.externalOpen },
@@ -46,6 +49,7 @@ vi.mock('electron', () => ({
       }
       setWindowOpenHandler(handler: (details: { url: string }) => { action: string }) { this.windowOpenHandler = handler }
       loadURL = vi.fn(async (url: string) => { this.currentUrl = url })
+      savePage = vi.fn(async (path: string) => { writeFileSync(path, 'MIME-Version: 1.0\nContent-Type: multipart/related\n') })
       executeJavaScript = vi.fn(async () => ({
         doctype: '<!DOCTYPE html>', html: '<html><body>动态正文</body></html>',
         title: '文章', url: this.currentUrl,
@@ -73,6 +77,7 @@ function appWindow() {
 beforeEach(() => {
   fake.views.length = 0
   fake.sessionHandlers.clear()
+  fake.requestHandlers.length = 0
   fake.permissionHandler = undefined
   fake.permissionCheckHandler = undefined
   fake.externalOpen.mockClear()
@@ -215,6 +220,75 @@ describe('isolated HTML preview controller', () => {
     expect(result.byteLength).toBe(Buffer.byteLength(result.html, 'utf8'))
     expect(result.contentHash).toBe(createHash('sha256').update(result.html).digest('hex'))
     expect(result.capturedAt).toBeGreaterThan(0)
+    expect(Buffer.from(result.archiveMhtml!, 'base64').toString()).toContain('multipart/related')
+    expect(contents.savePage).toHaveBeenCalledWith(expect.stringMatching(/\.mhtml$/), 'MHTML')
+  })
+
+  it('keeps the DOM and conversation source when complete-page saving fails', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('did-stop-loading')
+    contents.savePage.mockRejectedValueOnce(new Error('disk unavailable'))
+    const snapshot = await controller.captureSnapshot()
+    expect(snapshot.html).toContain('动态正文')
+    expect(snapshot.archiveMhtml).toBeUndefined()
+    expect(controller.getState().notice).toContain('原貌')
+  })
+
+  it('rejects a capture when the page DOM changes while its archive is saved', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    const contents = fake.views[0].webContents
+    contents.emit('did-stop-loading')
+    contents.executeJavaScript.mockResolvedValueOnce({
+      doctype: '<!DOCTYPE html>', html: '<html><body>第一版</body></html>',
+      title: '文章', url: contents.currentUrl,
+    }).mockResolvedValueOnce({
+      doctype: '<!DOCTYPE html>', html: '<html><body>第二版</body></html>',
+      title: '文章', url: contents.currentUrl,
+    })
+    await expect(controller.captureSnapshot()).rejects.toThrow('网页已变化')
+  })
+
+  it('renders an archived page in a separate native view and closes the live page', async () => {
+    const win = appWindow()
+    const controller = registerPreviewWindow(win)
+    const bounds = { x: 80, y: 64, width: 700, height: 500 }
+    await controller.open('https://example.org/article', bounds)
+    const bytes = Buffer.from('MIME-Version: 1.0\nContent-Type: multipart/related\n')
+    await controller.showCached(bytes, bounds)
+    expect(fake.views).toHaveLength(2)
+    expect(fake.views[1].options.webPreferences).toMatchObject({ javascript: false, nodeIntegration: false, sandbox: true })
+    const cachedUrl = fake.views[1].webContents.loadURL.mock.calls[0][0] as string
+    expect(cachedUrl).toMatch(/^file:.*\.mhtml$/)
+    expect(readFileSync(new URL(cachedUrl)).equals(bytes)).toBe(true)
+    const filter = fake.requestHandlers.at(-1)!
+    const decision = vi.fn()
+    filter({ url: 'https://example.org/tracker', resourceType: 'image' }, decision)
+    expect(decision).toHaveBeenLastCalledWith({ cancel: true })
+    filter({ url: 'file:///Users/test/private.txt', resourceType: 'image' }, decision)
+    expect(decision).toHaveBeenLastCalledWith({ cancel: true })
+    filter({ url: cachedUrl, resourceType: 'mainFrame' }, decision)
+    expect(decision).toHaveBeenLastCalledWith({ cancel: false })
+    expect((win.contentView as any).removeChildView).toHaveBeenCalledWith(fake.views[0])
+    expect(fake.views[0].webContents.close).toHaveBeenCalledOnce()
+    fake.views[0].webContents.emit('did-navigate', {}, 'https://example.org/article')
+    expect((win.contentView as any).addChildView).toHaveBeenCalledTimes(2)
+    await expect(controller.captureSnapshot()).rejects.toThrow()
+    controller.close()
+    expect(fake.views[1].webContents.close).toHaveBeenCalledOnce()
+  })
+
+  it('creates a fresh live view when leaving cached mode', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    const bounds = { x: 80, y: 64, width: 700, height: 500 }
+    await controller.open('https://example.org/article', bounds)
+    await controller.showCached(Buffer.from('MIME-Version: 1.0\n'), bounds)
+    await controller.open('https://example.org/article', bounds)
+    expect(fake.views).toHaveLength(3)
+    expect(fake.views[1].webContents.close).toHaveBeenCalledOnce()
+    expect(fake.views[2].webContents.loadURL).toHaveBeenCalledWith('https://example.org/article')
   })
 
   it('captures a redirected HTTPS page from one explicit open', async () => {

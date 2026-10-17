@@ -22,12 +22,14 @@ export interface PreviewSnapshot {
   capturedAt: number
   contentHash: string
   byteLength: number
+  archiveMhtml?: string
 }
 
 export interface PreviewApi {
   open: (url: string, bounds: PreviewBounds) => Promise<void>
   openAndCapture: (url: string, bounds: PreviewBounds) => Promise<PreviewSnapshot>
   setBounds: (bounds: PreviewBounds) => Promise<void>
+  showCached: (snapshotId: string, bounds: PreviewBounds) => Promise<boolean>
   back: () => Promise<void>
   forward: () => Promise<void>
   reload: () => Promise<void>

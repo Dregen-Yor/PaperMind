@@ -98,6 +98,10 @@ export function normalizeWebQaBackup(value: unknown): WebQaBackup {
     const capturedAt = time(s.capturedAt, '网页快照时间')
     if (Buffer.byteLength(html, 'utf8') !== s.byteLength || Number(s.byteLength) > 8 * 1024 * 1024) invalid('网页快照大小')
     if (createHash('sha256').update(html, 'utf8').digest('hex') !== s.contentHash) invalid('网页快照指纹')
+    const archiveMhtml = s.archiveMhtml === undefined ? undefined : string(s.archiveMhtml, '网页原貌缓存')
+    if (archiveMhtml !== undefined && (!/^[A-Za-z0-9+/]+={0,2}$/.test(archiveMhtml)
+      || archiveMhtml.length % 4 !== 0 || Buffer.byteLength(archiveMhtml, 'base64') > 32 * 1024 * 1024
+      || Buffer.from(archiveMhtml, 'base64').toString('base64') !== archiveMhtml)) invalid('网页原貌缓存')
     let pageId: string
     if (hasPages) {
       pageId = id(s.pageId, '网页 ID')
@@ -114,7 +118,7 @@ export function normalizeWebQaBackup(value: unknown): WebQaBackup {
         if (capturedAt > page.lastOpenedAt) { page.lastOpenedAt = capturedAt; page.title = title }
       }
     }
-    normalizedSnapshots.push({ id: snapshotId, pageId, finalUrl: url, title, html,
+    normalizedSnapshots.push({ id: snapshotId, pageId, finalUrl: url, title, html, archiveMhtml,
       capturedAt, contentHash: String(s.contentHash), byteLength: Number(s.byteLength),
       lastSeenAt: time(s.lastSeenAt ?? capturedAt, '网页快照最近查看时间'),
       preview: { blocks: [], truncated: false } })

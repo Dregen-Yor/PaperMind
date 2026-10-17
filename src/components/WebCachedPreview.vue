@@ -7,6 +7,8 @@
       <button type="button" data-action="open-source" @click="emit('open-source')">打开原网页 ↗</button>
     </header>
     <div class="cached-body">
+      <p v-if="loadError" class="cached-note" role="status">{{ loadError }}</p>
+      <p v-else-if="!snapshot.hasOriginalAppearance" class="cached-note">这份旧缓存只保存了阅读内容。点击上方“更新缓存”可保存网站原貌；已有对话仍依据原快照。</p>
       <p v-if="!snapshot.preview.blocks.length" class="cached-note">缓存预览不可用；已保存的问答会话仍可查看。</p>
       <article v-for="(block, index) in snapshot.preview.blocks" :key="index" class="cached-block">
         <component :is="`h${Math.min(6, Math.max(1, block.level ?? 2))}`" v-if="block.kind === 'heading'">{{ block.text }}</component>
@@ -21,7 +23,7 @@
 
 <script setup lang="ts">
 import type { WebSnapshotPreview } from '../types/webQa'
-defineProps<{ snapshot: WebSnapshotPreview }>()
+defineProps<{ snapshot: WebSnapshotPreview; loadError?: string }>()
 const emit = defineEmits<{ 'open-source': [] }>()
 </script>
 

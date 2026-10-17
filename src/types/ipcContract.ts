@@ -15,6 +15,7 @@ export interface DbApi {
     listPages: () => Promise<WebPageSummary[]>
     archive: (snapshot: PreviewSnapshot, openedAt: number) => Promise<WebPageSummary>
     getPreview: (snapshotId: string) => Promise<WebSnapshotPreview | null>
+    findAppearance: (pageId: string, contentHash: string) => Promise<WebSnapshotPreview | null>
     getSnapshot: (snapshotId: string) => Promise<PreviewSnapshot | null>
     listSessions: (pageId: string) => Promise<WebQaPageSessionSummary[]>
     getSession: (id: string) => Promise<WebQaSavedSession | null>
@@ -101,6 +102,7 @@ export interface PreviewInvokeApi {
   open: (url: string, bounds: PreviewBounds) => Promise<void>
   openAndCapture: (url: string, bounds: PreviewBounds) => Promise<PreviewSnapshot>
   setBounds: (bounds: PreviewBounds) => Promise<void>
+  showCached: (snapshotId: string, bounds: PreviewBounds) => Promise<boolean>
   back: () => Promise<void>
   forward: () => Promise<void>
   reload: () => Promise<void>

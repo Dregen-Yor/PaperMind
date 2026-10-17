@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS web_snapshots (
   content_hash TEXT NOT NULL,
   byte_length INTEGER NOT NULL,
   preview_json TEXT NOT NULL DEFAULT '',
+  archive_mhtml BLOB,
+  appearance_hash TEXT NOT NULL DEFAULT '',
   last_seen_at INTEGER NOT NULL,
   FOREIGN KEY (page_id) REFERENCES web_pages(id) ON DELETE CASCADE
 );

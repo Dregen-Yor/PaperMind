@@ -28,6 +28,7 @@ export interface WebSnapshotPreview {
   capturedAt: number
   byteLength: number
   contentHash: string
+  hasOriginalAppearance?: boolean
   preview: WebReadPreview
 }
 

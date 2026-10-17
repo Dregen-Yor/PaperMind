@@ -5,13 +5,15 @@ import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
 import type { WebPageSummary, WebQaAppendInput, WebQaBackup, WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaNewSessionInput, WebQaPageSessionSummary, WebQaSavedSession, WebQaSessionDetail, WebQaSessionSummary, WebReadPreview, WebSnapshotPreview } from '../../src/types/webQa'
 import { normalizeWebQaBackup } from './backupValidation'
 import { extractWebReadPreview } from '../../src/utils/webReadPreview'
+import { archiveAppearanceHash } from './webArchiveHash'
 
 type SessionRow = { id: string; snapshot_id: string; final_url: string; title: string; captured_at: number; byte_length: number; created_at: number; updated_at: number }
 type SnapshotRow = { id: string; final_url: string; title: string; html: string; captured_at: number; content_hash: string; byte_length: number }
 type MessageRow = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; status: WebQaMessage['status']; error: string; model_id: string; created_at: number }
 type PageRow = { id: string; canonical_url: string; title: string; created_at: number; last_opened_at: number; latest_snapshot_id: string; snapshot_count: number; session_count: number; total_bytes: number }
 type PageSessionRow = SessionRow & { page_id: string; first_question: string }
-type PreviewRow = SnapshotRow & { page_id: string; preview_json: string; last_seen_at: number }
+type PreviewRow = SnapshotRow & { page_id: string; preview_json: string; has_original_appearance: number }
+type BackupSnapshotRow = SnapshotRow & { page_id: string; preview_json: string; last_seen_at: number; archive_mhtml: Buffer | null }
 const statuses = new Set(['completed', 'streaming', 'failed', 'cancelled', 'interrupted'])
 const validId = (v: unknown): v is string => typeof v === 'string' && /^[\w-]{1,128}$/.test(v)
 const validTime = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0
@@ -24,6 +26,11 @@ function checkSnapshot(s: PreviewSnapshot) {
   } catch { throw new Error('网页快照地址无效') }
   if (Buffer.byteLength(s.html, 'utf8') !== s.byteLength || s.byteLength > 8 * 1024 * 1024) throw new Error('网页快照大小无效')
   if (createHash('sha256').update(s.html, 'utf8').digest('hex') !== s.contentHash) throw new Error('网页快照指纹无效')
+  if (s.archiveMhtml !== undefined) {
+    if (typeof s.archiveMhtml !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(s.archiveMhtml)
+      || s.archiveMhtml.length % 4 !== 0 || Buffer.byteLength(s.archiveMhtml, 'base64') > 32 * 1024 * 1024
+      || Buffer.from(s.archiveMhtml, 'base64').toString('base64') !== s.archiveMhtml) throw new Error('网页原貌缓存无效')
+  }
 }
 
 function checkMessage(m: WebQaMessage) {
@@ -54,7 +61,7 @@ export function createWebQaRepository(db: Database.Database) {
     (SELECT id FROM web_snapshots WHERE page_id=p.id ORDER BY last_seen_at DESC, captured_at DESC, id DESC LIMIT 1) AS latest_snapshot_id,
     (SELECT COUNT(*) FROM web_snapshots WHERE page_id=p.id) AS snapshot_count,
     (SELECT COUNT(*) FROM web_qa_sessions s JOIN web_snapshots v ON v.id=s.snapshot_id WHERE v.page_id=p.id) AS session_count,
-    (SELECT COALESCE(SUM(byte_length),0) FROM web_snapshots WHERE page_id=p.id) AS total_bytes
+    (SELECT COALESCE(SUM(byte_length + COALESCE(length(archive_mhtml),0)),0) FROM web_snapshots WHERE page_id=p.id) AS total_bytes
     FROM web_pages p`
   const listPages = (): WebPageSummary[] => (db.prepare(`${pageSummaryQuery} ORDER BY p.last_opened_at DESC, p.id DESC`).all() as PageRow[]).map(mapPage)
   const getPage = (id: string): WebPageSummary | null => {
@@ -76,16 +83,20 @@ export function createWebQaRepository(db: Database.Database) {
         db.prepare('INSERT INTO web_pages (id, canonical_url, title, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?)')
           .run(id, canonical, snapshot.title, openedAt, openedAt)
       }
-      const existing = db.prepare('SELECT id FROM web_snapshots WHERE page_id=? AND content_hash=? ORDER BY captured_at DESC LIMIT 1')
-        .get(id, snapshot.contentHash) as { id: string } | undefined
+      const archiveBytes = snapshot.archiveMhtml ? Buffer.from(snapshot.archiveMhtml, 'base64') : null
+      const appearanceHash = archiveBytes ? archiveAppearanceHash(archiveBytes) : ''
+      const existing = db.prepare(`SELECT id FROM web_snapshots
+        WHERE page_id=? AND content_hash=? AND appearance_hash=? ORDER BY captured_at DESC LIMIT 1`)
+        .get(id, snapshot.contentHash, appearanceHash) as { id: string } | undefined
       if (existing) {
         db.prepare('UPDATE web_snapshots SET last_seen_at=? WHERE id=?').run(openedAt, existing.id)
       } else {
         db.prepare(`INSERT INTO web_snapshots
-          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), id, snapshot.finalUrl,
+          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), id, snapshot.finalUrl,
             snapshot.title, snapshot.html, snapshot.capturedAt, snapshot.contentHash,
-            snapshot.byteLength, JSON.stringify(preview), openedAt)
+            snapshot.byteLength, JSON.stringify(preview), openedAt,
+            archiveBytes, appearanceHash)
       }
       return id
     })()
@@ -94,7 +105,8 @@ export function createWebQaRepository(db: Database.Database) {
 
   const getPreview = (snapshotId: string): WebSnapshotPreview | null => {
     const row = db.prepare(`SELECT id, page_id, final_url, title, captured_at,
-      content_hash, byte_length, preview_json FROM web_snapshots WHERE id=?`).get(snapshotId) as PreviewRow | undefined
+      content_hash, byte_length, preview_json, archive_mhtml IS NOT NULL AS has_original_appearance
+      FROM web_snapshots WHERE id=?`).get(snapshotId) as PreviewRow | undefined
     if (!row) return null
     let preview: WebReadPreview
     if (row.preview_json) {
@@ -106,7 +118,20 @@ export function createWebQaRepository(db: Database.Database) {
       db.prepare('UPDATE web_snapshots SET preview_json=? WHERE id=?').run(JSON.stringify(preview), snapshotId)
     }
     return { id: row.id, pageId: row.page_id, finalUrl: row.final_url, title: row.title,
-      capturedAt: row.captured_at, byteLength: row.byte_length, contentHash: row.content_hash, preview }
+      capturedAt: row.captured_at, byteLength: row.byte_length, contentHash: row.content_hash,
+      hasOriginalAppearance: !!row.has_original_appearance, preview }
+  }
+
+  const findAppearance = (pageId: string, contentHash: string): WebSnapshotPreview | null => {
+    const row = db.prepare(`SELECT id FROM web_snapshots WHERE page_id=? AND content_hash=?
+      AND archive_mhtml IS NOT NULL ORDER BY last_seen_at DESC, captured_at DESC, id DESC LIMIT 1`)
+      .get(pageId, contentHash) as { id: string } | undefined
+    return row ? getPreview(row.id) : null
+  }
+
+  const getArchive = (snapshotId: string): Buffer | null => {
+    const row = db.prepare('SELECT archive_mhtml FROM web_snapshots WHERE id=?').get(snapshotId) as { archive_mhtml: Buffer | null } | undefined
+    return row?.archive_mhtml ?? null
   }
 
   const getSnapshot = (snapshotId: string): PreviewSnapshot | null => {
@@ -212,9 +237,11 @@ export function createWebQaRepository(db: Database.Database) {
       const s = input.snapshot
       const pageId = pageForSnapshot(s)
       db.prepare(`INSERT INTO web_snapshots
-        (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)`)
-        .run(input.sessionId, pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash, s.byteLength, s.capturedAt)
+        (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`)
+        .run(input.sessionId, pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash,
+          s.byteLength, s.capturedAt, s.archiveMhtml ? Buffer.from(s.archiveMhtml, 'base64') : null,
+          s.archiveMhtml ? archiveAppearanceHash(Buffer.from(s.archiveMhtml, 'base64')) : '')
       db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)').run(input.sessionId, input.sessionId, input.createdAt, input.createdAt)
       db.prepare('INSERT INTO web_qa_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(input.messageId, input.sessionId, 'user', input.question, 'completed', '', '', input.createdAt)
@@ -246,9 +273,10 @@ export function createWebQaRepository(db: Database.Database) {
       id: r.id, canonicalUrl: r.canonical_url, title: r.title,
       createdAt: r.created_at, lastOpenedAt: r.last_opened_at,
     })),
-    snapshots: (db.prepare('SELECT * FROM web_snapshots').all() as PreviewRow[]).map(r => ({
+    snapshots: (db.prepare('SELECT * FROM web_snapshots').all() as BackupSnapshotRow[]).map(r => ({
       id: r.id, finalUrl: r.final_url, title: r.title, html: r.html, capturedAt: r.captured_at,
       contentHash: r.content_hash, byteLength: r.byte_length, pageId: r.page_id,
+      archiveMhtml: r.archive_mhtml?.toString('base64'),
       lastSeenAt: r.last_seen_at,
       preview: r.preview_json ? JSON.parse(r.preview_json) as WebReadPreview : { blocks: [], truncated: false },
     })),
@@ -270,10 +298,12 @@ export function createWebQaRepository(db: Database.Database) {
         try { preview = extractWebReadPreview(s.html) }
         catch { preview = { blocks: [], truncated: false } }
         db.prepare(`INSERT INTO web_snapshots
-          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(s.id, s.pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash,
-            s.byteLength, JSON.stringify(preview), s.lastSeenAt)
+            s.byteLength, JSON.stringify(preview), s.lastSeenAt,
+            s.archiveMhtml ? Buffer.from(s.archiveMhtml, 'base64') : null,
+            s.archiveMhtml ? archiveAppearanceHash(Buffer.from(s.archiveMhtml, 'base64')) : '')
       }
       for (const s of backup.sessions) db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)')
         .run(s.id, s.snapshotId, s.createdAt, s.updatedAt)
@@ -281,7 +311,7 @@ export function createWebQaRepository(db: Database.Database) {
         .run(m.id, m.sessionId, m.role, m.content, m.status, m.error, m.modelId, m.createdAt)
     })()
   }
-  return { listPages, archive, getPreview, getSnapshot, listSessions, getSession,
+  return { listPages, archive, getPreview, findAppearance, getSnapshot, getArchive, listSessions, getSession,
     createSession, appendTurn, ensureAssistantForLastUser, removeSession, removePage,
     list, get, create, addMessage, updateMessage, remove, exportBackup, importBackup }
 }

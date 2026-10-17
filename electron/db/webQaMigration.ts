@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
+import { archiveAppearanceHash } from './webArchiveHash'
 
 type LegacySnapshot = {
   id: string
@@ -13,9 +14,25 @@ type LegacySnapshot = {
 }
 
 export function migrateWebPageHistory(db: Database.Database): void {
+  const backfillAppearance = () => {
+    const ids = db.prepare(`SELECT id FROM web_snapshots
+      WHERE archive_mhtml IS NOT NULL AND appearance_hash NOT LIKE 'v2:%'`).all() as Array<{ id: string }>
+    const read = db.prepare('SELECT archive_mhtml FROM web_snapshots WHERE id=?')
+    const update = db.prepare('UPDATE web_snapshots SET appearance_hash=? WHERE id=?')
+    db.transaction(() => {
+      for (const { id } of ids) {
+        const row = read.get(id) as { archive_mhtml: Buffer }
+        update.run(archiveAppearanceHash(row.archive_mhtml), id)
+      }
+    })()
+  }
   const columns = (db.prepare('PRAGMA table_info(web_snapshots)').all() as Array<{ name: string }>).map(row => row.name)
   if (columns.includes('page_id')) {
+    if (!columns.includes('archive_mhtml')) db.exec('ALTER TABLE web_snapshots ADD COLUMN archive_mhtml BLOB')
+    if (!columns.includes('appearance_hash')) db.exec("ALTER TABLE web_snapshots ADD COLUMN appearance_hash TEXT NOT NULL DEFAULT ''")
+    backfillAppearance()
     db.exec('CREATE INDEX IF NOT EXISTS idx_web_snapshots_page ON web_snapshots(page_id, last_seen_at DESC)')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_web_snapshots_appearance ON web_snapshots(page_id, content_hash, appearance_hash)')
     db.exec('CREATE INDEX IF NOT EXISTS idx_web_qa_sessions_snapshot ON web_qa_sessions(snapshot_id)')
     return
   }
@@ -42,6 +59,8 @@ export function migrateWebPageHistory(db: Database.Database): void {
           byte_length INTEGER NOT NULL,
           preview_json TEXT NOT NULL DEFAULT '',
           last_seen_at INTEGER NOT NULL,
+          archive_mhtml BLOB,
+          appearance_hash TEXT NOT NULL DEFAULT '',
           FOREIGN KEY (page_id) REFERENCES web_pages(id) ON DELETE CASCADE
         );
         CREATE TABLE web_qa_sessions_next (
@@ -88,5 +107,6 @@ export function migrateWebPageHistory(db: Database.Database): void {
     db.pragma('foreign_keys = ON')
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_web_snapshots_page ON web_snapshots(page_id, last_seen_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_web_snapshots_appearance ON web_snapshots(page_id, content_hash, appearance_hash)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_web_qa_sessions_snapshot ON web_qa_sessions(snapshot_id)')
 }
