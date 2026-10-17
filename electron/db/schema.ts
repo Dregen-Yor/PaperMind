@@ -132,18 +132,29 @@ CREATE INDEX IF NOT EXISTS idx_papers_kb ON papers(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_paper ON highlights(paper_id);
 
+CREATE TABLE IF NOT EXISTS web_pages (
+  id TEXT PRIMARY KEY,
+  canonical_url TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_opened_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS web_snapshots (
   id TEXT PRIMARY KEY,
+  page_id TEXT NOT NULL,
   final_url TEXT NOT NULL,
   title TEXT NOT NULL,
   html TEXT NOT NULL,
   captured_at INTEGER NOT NULL,
   content_hash TEXT NOT NULL,
-  byte_length INTEGER NOT NULL
+  byte_length INTEGER NOT NULL,
+  preview_json TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL,
+  FOREIGN KEY (page_id) REFERENCES web_pages(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS web_qa_sessions (
   id TEXT PRIMARY KEY,
-  snapshot_id TEXT NOT NULL UNIQUE,
+  snapshot_id TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   FOREIGN KEY (snapshot_id) REFERENCES web_snapshots(id) ON DELETE CASCADE

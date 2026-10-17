@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import type { PreviewSnapshot } from '../../src/types/webPreview'
+import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
 import type { WebQaBackup, WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaSessionDetail, WebQaSessionSummary } from '../../src/types/webQa'
 import { validateWebQaBackup } from './backupValidation'
 
@@ -37,6 +38,16 @@ const mapMessage = (r: MessageRow): WebQaMessage => ({
 })
 
 export function createWebQaRepository(db: Database.Database) {
+  const pageForSnapshot = (snapshot: PreviewSnapshot): string => {
+    const canonical = canonicalWebPageUrl(snapshot.finalUrl)
+    const found = db.prepare('SELECT id FROM web_pages WHERE canonical_url=?').get(canonical) as { id: string } | undefined
+    if (found) return found.id
+    const id = randomUUID()
+    db.prepare('INSERT INTO web_pages (id, canonical_url, title, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, canonical, snapshot.title, snapshot.capturedAt, snapshot.capturedAt)
+    return id
+  }
+
   const list = (): WebQaSessionSummary[] => (db.prepare(`
     SELECT s.*, p.final_url, p.title, p.captured_at, p.byte_length
     FROM web_qa_sessions s JOIN web_snapshots p ON p.id=s.snapshot_id
@@ -61,8 +72,11 @@ export function createWebQaRepository(db: Database.Database) {
     checkSnapshot(input.snapshot)
     db.transaction(() => {
       const s = input.snapshot
-      db.prepare('INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(input.sessionId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash, s.byteLength)
+      const pageId = pageForSnapshot(s)
+      db.prepare(`INSERT INTO web_snapshots
+        (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)`)
+        .run(input.sessionId, pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash, s.byteLength, s.capturedAt)
       db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)').run(input.sessionId, input.sessionId, input.createdAt, input.createdAt)
       db.prepare('INSERT INTO web_qa_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(input.messageId, input.sessionId, 'user', input.question, 'completed', '', '', input.createdAt)
@@ -89,10 +103,13 @@ export function createWebQaRepository(db: Database.Database) {
 
   const remove = (id: string): void => {
     db.transaction(() => {
-      const row = db.prepare('SELECT snapshot_id FROM web_qa_sessions WHERE id=?').get(id) as { snapshot_id: string } | undefined
+      const row = db.prepare(`SELECT s.snapshot_id, p.page_id FROM web_qa_sessions s
+        JOIN web_snapshots p ON p.id=s.snapshot_id WHERE s.id=?`).get(id) as { snapshot_id: string; page_id: string } | undefined
       if (!row) return
       db.prepare('DELETE FROM web_qa_sessions WHERE id=?').run(id)
       db.prepare('DELETE FROM web_snapshots WHERE id=?').run(row.snapshot_id)
+      db.prepare('DELETE FROM web_pages WHERE id=? AND NOT EXISTS (SELECT 1 FROM web_snapshots WHERE page_id=?)')
+        .run(row.page_id, row.page_id)
     })()
   }
 
@@ -111,8 +128,13 @@ export function createWebQaRepository(db: Database.Database) {
     validateWebQaBackup(backup)
     db.transaction(() => {
       db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots;')
-      for (const s of backup.snapshots) db.prepare('INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(s.id, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash, s.byteLength)
+      for (const s of backup.snapshots) {
+        const pageId = pageForSnapshot(s)
+        db.prepare(`INSERT INTO web_snapshots
+          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)`)
+          .run(s.id, pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash, s.byteLength, s.capturedAt)
+      }
       for (const s of backup.sessions) db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)')
         .run(s.id, s.snapshotId, s.createdAt, s.updatedAt)
       for (const m of backup.messages) db.prepare('INSERT INTO web_qa_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)')

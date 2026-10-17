@@ -7,6 +7,7 @@ import { createDoclingRepository } from './docling'
 import { createAbstractCheckpointRepository } from './abstractCheckpoint'
 import { createPaperAbstractRepository, PAPER_ABSTRACT_PIPELINE_VERSION } from './paperAbstract'
 import { createWebQaRepository } from './webQa'
+import { migrateWebPageHistory } from './webQaMigration'
 import { normalizeSourceList } from '../../src/utils/sourceRef'
 import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
@@ -40,6 +41,7 @@ export function initDb() {
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   db.exec(SCHEMA)
+  migrateWebPageHistory(db)
 
   // Migration: highlight character offsets (added 2026-08-16)
   const highlightCols = (db.prepare('PRAGMA table_info(highlights)').all() as Array<{ name: string }>).map(c => c.name)
