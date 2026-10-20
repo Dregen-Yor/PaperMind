@@ -88,6 +88,7 @@ PaperMind/
 
 - 各模块的详细说明见同级目录下的 `CLAUDE.md`（架构、IPC 约定、检索链路口径）。
 - 离线评测见 [`bench/README.md`](./bench/README.md)（需配置 `BENCH_*` 环境变量）。
+- 备份恢复、删除与 PDF 文件一致性的实现及故障验证见 [数据库恢复测试说明](docs/testing/database-recovery.md)。
 - 应用图标母版为 `assets/papermind-icon.svg`，改后运行 `npm run icons:generate` 与 `npm run icons:check`，并提交 `assets/icons` 内的平台产物；逐平台验收见 [`docs/testing/app-branding.md`](./docs/testing/app-branding.md)。
 - 修改数据模型或新增 IPC 通道时，需同步 `electron/db/schema.ts`、`electron/db/index.ts`、`electron/preload.ts`、`src/types/db.d.ts` 四处。
 

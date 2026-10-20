@@ -4,6 +4,7 @@ import type { PaperCreateInput } from '../../src/types/ipcContract'
 import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun'
 import type { WebQaBackup } from '../../src/types/webQa'
 import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
+import { normalizeDoclingSettings } from '../../src/utils/doclingDocument'
 
 const runStatuses = new Set(['preparing', 'streaming', 'completed', 'failed', 'cancelled', 'interrupted'])
 
@@ -48,6 +49,79 @@ function alias(row: Record<string, unknown>, snake: string, camel: string): unkn
 function uniqueId(value: string, seen: Set<string>, detail: string) {
   if (seen.has(value)) invalid(`${detail} 重复`)
   seen.add(value)
+}
+
+function validateLlmSettings(value: unknown, detail: string, legacy: boolean) {
+  const config = object(value, detail)
+  // The single-config migration supplies id, name and topK, but does not merge
+  // the remaining connection fields with the default profile.
+  if (!legacy || config.id !== undefined) string(config.id, `${detail}.id`)
+  if (!legacy || config.name !== undefined) text(config.name, `${detail}.name`)
+  if (typeof config.provider !== 'string' || !['openai', 'anthropic', 'ollama'].includes(config.provider)) invalid(`${detail}.provider`)
+  for (const key of ['model', 'apiKey', 'baseUrl', 'systemPrompt']) text(config[key], `${detail}.${key}`)
+  if (typeof config.temperature !== 'number' || !Number.isFinite(config.temperature)) invalid(`${detail}.temperature`)
+  // Older backups can omit maxTokens; init normalizes it to unlimited. Keep
+  // numeric legacy sentinels and fractions for that same normalization path.
+  if (config.maxTokens !== undefined && (typeof config.maxTokens !== 'number' || !Number.isFinite(config.maxTokens))) invalid(`${detail}.maxTokens`)
+  if (!legacy || config.topK !== undefined) {
+    if (!Number.isSafeInteger(config.topK) || Number(config.topK) < 0) invalid(`${detail}.topK`)
+  }
+}
+
+function validateSetting(key: string, raw: unknown) {
+  const detail = `settings.${key}`
+  if (typeof raw !== 'string') invalid(detail)
+  let value: unknown
+  try { value = JSON.parse(raw) }
+  catch { invalid(`${detail} 不是有效的 JSON`) }
+
+  switch (key) {
+    case 'llm_profiles': {
+      // null and an empty list use the existing default/llm_config fallback.
+      if (value === null) return
+      if (!Array.isArray(value)) invalid(detail)
+      const ids = new Set<string>()
+      value.forEach((profile, index) => {
+        const profileDetail = `${detail}[${index}]`
+        validateLlmSettings(profile, profileDetail, false)
+        uniqueId((profile as Record<string, unknown>).id as string, ids, `${profileDetail}.id`)
+      })
+      return
+    }
+    case 'llm_config':
+      if (value !== null) validateLlmSettings(value, detail, true)
+      return
+    case 'llm_profile_chat':
+    case 'llm_profile_index':
+    case 'huggingface_token':
+      // Missing/deleted profile selections fall back to the first profile.
+      if (value !== null) text(value, detail)
+      return
+    case 'llm_max_tokens_unlimited_migrated':
+      if (typeof value !== 'boolean') invalid(detail)
+      return
+    case 'semantic_tree_enabled':
+      // Historical settings also encoded this boolean as a JSON string.
+      if (typeof value !== 'boolean' && value !== 'true' && value !== 'false') invalid(detail)
+      return
+    case 'ek5_context_chars':
+      if (!Number.isInteger(value) || Number(value) < 4000 || Number(value) > 1_000_000) invalid(detail)
+      return
+    case 'docling_config': {
+      if (value === null) return
+      const config = object(value, detail)
+      for (const field of ['baseUrl', 'apiKey']) {
+        if (config[field] !== undefined) text(config[field], `${detail}.${field}`)
+      }
+      for (const field of ['ocr', 'formula']) {
+        if (config[field] !== undefined && typeof config[field] !== 'boolean') invalid(`${detail}.${field}`)
+      }
+      // Reuse the runtime URL/timeout rules and their default-field migration,
+      // but never expose parse errors or connection credentials in the error.
+      try { normalizeDoclingSettings(config) }
+      catch { invalid(detail) }
+    }
+  }
 }
 
 export function normalizeWebQaBackup(value: unknown): WebQaBackup {
@@ -263,8 +337,7 @@ export function validateBackupInput(value: unknown): void {
     string(report.content, '摘要内容')
   }
   for (const setting of entries(data.settings, 'settings')) {
-    string(setting.key, '设置项名称')
-    if (typeof setting.value !== 'string') invalid('设置项内容')
+    validateSetting(string(setting.key, '设置项名称'), setting.value)
   }
 
   if (data.docling !== undefined && data.docling !== null) {
