@@ -1,5 +1,6 @@
 import { createEk5Store } from '../utils/ek5/store'
 import { defineStore } from 'pinia'
+import { useChatDraftStore } from './chatDrafts'
 import { ref, computed } from 'vue'
 import { extractPages, type IndexNode } from '../utils/pageIndex'
 import { runRagPipeline, retrieveRagContext, buildAnswerMessages, type IndexedPaper, type SemanticPaperIndex, type RagPipelineDeps } from '../utils/ragPipeline'
@@ -403,6 +404,7 @@ function treeFailureReason(error: unknown): string {
 }
 
 export const useChatStore = defineStore('chat', () => {
+  const draftStore = useChatDraftStore()
   const conversations = ref<Conversation[]>([])
   const profiles = ref<LLMProfile[]>([{ ...DEFAULT_PROFILE }])
   const chatProfileId = ref<string>('default')
@@ -1158,12 +1160,13 @@ export const useChatStore = defineStore('chat', () => {
   async function removeConversation(id: string) {
     await window.db.chat.removeConversation(id)
     conversations.value = conversations.value.filter(c => c.id !== id)
+    draftStore.remove(id)
   }
 
   /** 丢弃「已创建但从未发问」的空会话（#15）。 */
   async function discardEmptyConversation(id: string) {
     const conv = conversations.value.find(c => c.id === id)
-    if (!conv || conv.messages.length > 0) return
+    if (!conv || conv.messages.length > 0 || draftStore.hasDraft(id) || draftStore.sending.has(id)) return
     await removeConversation(id)
   }
 
@@ -1415,7 +1418,7 @@ export const useChatStore = defineStore('chat', () => {
     return settleChatRun(run, () => generateReply(conv, userMessage, run, context, historyEnd))
   }
 
-  async function sendMessage(convId: string, userMessage: string, context?: string): Promise<string> {
+  async function sendMessage(convId: string, userMessage: string, context?: string, onUserMessageSaved?: () => void): Promise<string> {
     const conv = conversations.value.find(c => c.id === convId)
     if (!conv) throw new Error('Conversation not found')
     if (activeChatRuns.has(convId) || startingChatRuns.has(convId)) throw new Error('这段对话正在生成回答，请先停止当前任务')
@@ -1424,13 +1427,15 @@ export const useChatStore = defineStore('chat', () => {
     if (!normalized.startsWith('/')) {
       startingChatRuns.add(convId)
       try {
-        await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
+        const saved = await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
+        if (saved) onUserMessageSaved?.()
         return await runChatReply(conv, userMessage, context)
       } finally { startingChatRuns.delete(convId) }
     }
 
     // 划选原文随用户消息持久化：失败轮重试时才能重放同一上下文（#2）
-    await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
+    const saved = await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
+    if (saved) onUserMessageSaved?.()
 
     try {
       // 命令只在本地识别一次：未知的 `/xxx` 直接回提示，不发模型（#8）

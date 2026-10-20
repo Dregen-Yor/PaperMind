@@ -315,6 +315,13 @@ async function onFilesSelected(e: Event) {
 
       const existing = store.papers.find(p => p.fileHash && p.fileHash === meta.fileHash)
       if (existing) {
+        if (!await store.paperContentUrl(existing.id)) {
+          item.status = 'saving'
+          await store.restorePaperFile(existing.id, meta.fileData)
+          item.status = 'done'
+          openPaperIdAfterImport = existing.id
+          continue
+        }
         try {
           await ElMessageBox.confirm(
             `《${existing.title || existing.fileName}》已在库中，是否打开现有条目？`,

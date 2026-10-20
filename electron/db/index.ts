@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
-import { join } from 'path'
+import { join, resolve } from 'path'
+import { createHash } from 'crypto'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, lstatSync } from 'fs'
 import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
@@ -144,6 +145,28 @@ export const paperApi = {
   filePath: (id: string): string | null => {
     const row = db.prepare('SELECT file_path FROM papers WHERE id = ?').get(id) as { file_path: string } | undefined
     return storedPaperFilePath(id, row?.file_path, papersDir)
+  },
+  restoreFile: (id: unknown, fileData: unknown): void => {
+    paperFiles.recover()
+    if (!isSafePaperId(id)) throw new Error('论文 ID 无效')
+    const row = db.prepare('SELECT file_path, file_hash FROM papers WHERE id = ?').get(id) as { file_path: string; file_hash: string } | undefined
+    if (!row) throw new Error('论文不存在')
+    if (!/^[a-f0-9]{64}$/i.test(row.file_hash ?? '')) throw new Error('这篇论文没有可信的原文件哈希，无法安全补回 PDF；请使用包含原文件的备份恢复。')
+    const destination = checkedPaperDestination(id, false)
+    if (typeof row.file_path !== 'string' || resolve(row.file_path) !== resolve(destination)) throw new Error('论文 PDF 保存路径无效')
+    if (typeof fileData !== 'string' || !fileData || fileData.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(fileData)) {
+      throw new Error('PDF 文件数据无效')
+    }
+    const bytes = Buffer.from(fileData, 'base64')
+    if (bytes.toString('base64') !== fileData) throw new Error('PDF 文件数据无效')
+    // Match the known original bytes; pdf.js also accepts leading data before
+    // the PDF header, so repair must not impose a stricter signature check.
+    if (createHash('sha256').update(bytes).digest('hex') !== row.file_hash.toLowerCase()) throw new Error('所选 PDF 与原论文不匹配，请选择原始 PDF 文件。')
+    paperFiles.run([{ id, data: bytes }], () => {
+      // Recheck after recovery/planning: repair never replaces an existing file.
+      checkedPaperDestination(id, false)
+      db.prepare('UPDATE papers SET file_path = ? WHERE id = ?').run(destination, id)
+    })
   },
   // create: fileData is base64; we write it to disk and store only the path
   create: (paper: unknown) => {

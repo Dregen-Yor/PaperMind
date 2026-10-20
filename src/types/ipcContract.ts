@@ -58,6 +58,7 @@ export interface DbApi {
     remove: (id: string) => Promise<void>
     readFile: (id: string) => Promise<string | null>
     contentUrl: (id: string) => Promise<string | null>
+    restoreFile: (id: string, fileData: string) => Promise<void>
   }
   chat: {
     listConversations: () => Promise<Conversation[]>

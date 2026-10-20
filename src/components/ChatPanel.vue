@@ -70,7 +70,7 @@
           <div v-for="(ctx, i) in pendingContext" :key="i" class="context-chip" :title="ctx">
             <el-icon aria-hidden="true"><Document /></el-icon>
             <span class="chip-text">{{ ctx.slice(0, 60) }}{{ ctx.length > 60 ? '…' : '' }}</span>
-            <button type="button" class="chip-close" aria-label="移除上下文" @click="pendingContext.splice(i, 1)"><el-icon><Close /></el-icon></button>
+            <button type="button" class="chip-close" aria-label="移除上下文" @click="removeContext(i)"><el-icon><Close /></el-icon></button>
           </div>
         </div>
         <el-input
@@ -104,6 +104,7 @@ import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, ArrowRight, Cpu } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
 import MarkdownContent from './MarkdownContent.vue'
+import { useChatDraftStore } from '../stores/chatDrafts'
 import { isJumpable, type SourceRef } from '../utils/sourceRef'
 
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
@@ -116,7 +117,11 @@ const router = useRouter()
 const retrying = ref('')
 const continuing = ref('')
 
-const input = ref('')
+const draftStore = useChatDraftStore()
+const input = computed({
+  get: () => props.conversation ? draftStore.read(props.conversation.id)?.input ?? '' : '',
+  set: value => { if (props.conversation) draftStore.setInput(props.conversation.id, value) },
+})
 const inputRef = ref<{ focus: () => void }>()
 const starterQuestions = [
   { label: '概括核心贡献', question: '这篇论文解决了什么问题？请概括它的核心贡献。' },
@@ -128,9 +133,10 @@ function choosePrompt(question: string) {
   input.value = question
   inputRef.value?.focus()
 }
-const loading = ref(false)
+const loading = computed(() => !!props.conversation && draftStore.sending.has(props.conversation.id))
 const messagesRef = ref<HTMLElement>()
-const pendingContext = ref<string[]>([])
+const pendingContext = computed(() => props.conversation
+  ? draftStore.read(props.conversation.id)?.contexts.map(context => context.text) ?? [] : [])
 /** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
 const preparationLabel = computed(() => {
   const abstract = props.conversation && chatStore.abstractProgress[props.conversation.id]
@@ -149,7 +155,11 @@ async function stopRun() {
 }
 
 function addContext(text: string) {
-  pendingContext.value.push(text)
+  if (props.conversation) draftStore.addContext(props.conversation.id, text)
+}
+
+function removeContext(index: number) {
+  if (props.conversation) draftStore.removeContext(props.conversation.id, index)
 }
 defineExpose({ addContext })
 
@@ -203,24 +213,26 @@ async function send() {
     if (!props.conversation) ElMessage.warning('请先选择或创建对话')
     return
   }
-  const context = pendingContext.value.join('\n---\n')
-  const message = input.value.trim()
-  input.value = ''
-  pendingContext.value = []
-  loading.value = true
+  const conversation = props.conversation
+  const submitted = draftStore.read(conversation.id)!
+  const context = submitted.contexts.map(item => item.text).join('\n---\n')
+  const message = submitted.input.trim()
+  const previousMessages = new Set(conversation.messages.map(item => item.id))
+  draftStore.setSending(conversation.id, true)
   await scrollToBottom()
 
   try {
-    await chatStore.sendMessage(props.conversation.id, message, context || undefined)
-    void chatStore.autoTitleConversation(props.conversation.id)
+    await chatStore.sendMessage(conversation.id, message, context || undefined, () => {
+      draftStore.consume(conversation.id, submitted)
+    })
+    void chatStore.autoTitleConversation(conversation.id)
   } catch (error) {
-    // 正常失败由 store 落成气泡级失败态（msg.error），卡即反馈；
-    // 未落卡（会话不存在 / 用户消息落库失败 / 失败卡自身写库失败）时用 toast 兜底
-    const recorded = props.conversation?.messages.some(m => m.role === 'assistant' && m.error)
+    // A failure card for this request is the feedback; persistence failures need a toast.
+    const recorded = conversation.messages.some(m => !previousMessages.has(m.id) && m.role === 'assistant' && m.error)
     if (!recorded) ElMessage.error(error instanceof Error ? error.message : '请求失败，请稍后重试')
   } finally {
-    loading.value = false
-    await scrollToBottom()
+    draftStore.setSending(conversation.id, false)
+    if (props.conversation?.id === conversation.id) await scrollToBottom()
   }
 }
 </script>
