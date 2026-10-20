@@ -33,6 +33,7 @@ vi.mock('electron', () => ({
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
   net: { fetch: vi.fn() },
   app: {
+    requestSingleInstanceLock: vi.fn(() => true),
     get isPackaged() { return state.packaged },
     setName: vi.fn(), setAppUserModelId: vi.fn(), setDesktopName: vi.fn(),
     getAppPath: () => '/tmp/Paper Mind 中文',

@@ -150,11 +150,11 @@ describe('输出长度上限（0 = 不限制）', () => {
     })
 
     await complete(store)
-    expect(lastBody().options).toEqual({ top_k: 40 })
+    expect(lastBody().options).toEqual({ temperature: 0.7, top_k: 40 })
 
     await store.updateProfile(store.chatProfile.id, { maxTokens: 2048 })
     await complete(store)
-    expect(lastBody().options).toEqual({ top_k: 40, num_predict: 2048 })
+    expect(lastBody().options).toEqual({ temperature: 0.7, top_k: 40, num_predict: 2048 })
   })
 
   it('升级迁移：落库的旧默认 4096 视为从未显式设置，迁到不限制并回写', async () => {

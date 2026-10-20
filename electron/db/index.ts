@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
-import { join } from 'path'
+import { join, resolve } from 'path'
+import { createHash } from 'crypto'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, lstatSync } from 'fs'
 import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
@@ -14,10 +15,17 @@ import { planFragmentMerge } from '../../src/utils/highlightMerge'
 import { isSafePaperId, storedPaperFilePath } from '../paperProtocol'
 import { migrateChatRuns } from './chatRun'
 import { validateBackupInput, validatePaperCreateInput, validateChatMessageWrite, validateChatMessagePatch } from './backupValidation'
+import { createPaperFileTransactions, type PaperFileChange } from './paperFileTransactions'
 import type { KnowledgeBase } from '../../src/types/paper'
 
 let db: Database.Database
 let papersDir: string
+let paperFiles: ReturnType<typeof createPaperFileTransactions>
+
+function paperFileRemovals(papers: Array<{ id: string; file_path: string }>): PaperFileChange[] {
+  return papers.filter(paper => storedPaperFilePath(paper.id, paper.file_path, papersDir))
+    .map(paper => ({ id: paper.id, data: null }))
+}
 
 function checkedPaperDestination(id: unknown, allowExisting: boolean): string {
   if (!isSafePaperId(id)) throw new Error('论文 ID 无效')
@@ -32,6 +40,7 @@ function checkedPaperDestination(id: unknown, allowExisting: boolean): string {
 }
 
 export function initDb() {
+  if (db?.open) db.close()
   const userData = app.getPath('userData')
   const dbPath = join(userData, 'papermind.db')
   papersDir = join(userData, 'papers')
@@ -41,6 +50,9 @@ export function initDb() {
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   db.exec(SCHEMA)
+  paperFiles = createPaperFileTransactions(db, papersDir)
+  // Recover interrupted file switches before migrations or callers see the data.
+  paperFiles.recover()
   migrateWebPageHistory(db)
 
   // Migration: highlight character offsets (added 2026-08-16)
@@ -112,13 +124,11 @@ export const kbApi = {
     return kb
   },
   remove: (id: string) => {
-    // delete paper files on disk first
+    paperFiles.recover()
     const papers = db.prepare('SELECT id, file_path FROM papers WHERE knowledge_base_id = ?').all(id) as { id: string; file_path: string }[]
-    for (const paper of papers) {
-      const file = storedPaperFilePath(paper.id, paper.file_path, papersDir)
-      if (file) unlinkSync(file)
-    }
-    db.prepare('DELETE FROM knowledge_bases WHERE id = ?').run(id)
+    paperFiles.run(paperFileRemovals(papers), () => {
+      db.prepare('DELETE FROM knowledge_bases WHERE id = ?').run(id)
+    })
   },
 }
 
@@ -135,6 +145,28 @@ export const paperApi = {
   filePath: (id: string): string | null => {
     const row = db.prepare('SELECT file_path FROM papers WHERE id = ?').get(id) as { file_path: string } | undefined
     return storedPaperFilePath(id, row?.file_path, papersDir)
+  },
+  restoreFile: (id: unknown, fileData: unknown): void => {
+    paperFiles.recover()
+    if (!isSafePaperId(id)) throw new Error('论文 ID 无效')
+    const row = db.prepare('SELECT file_path, file_hash FROM papers WHERE id = ?').get(id) as { file_path: string; file_hash: string } | undefined
+    if (!row) throw new Error('论文不存在')
+    if (!/^[a-f0-9]{64}$/i.test(row.file_hash ?? '')) throw new Error('这篇论文没有可信的原文件哈希，无法安全补回 PDF；请使用包含原文件的备份恢复。')
+    const destination = checkedPaperDestination(id, false)
+    if (typeof row.file_path !== 'string' || resolve(row.file_path) !== resolve(destination)) throw new Error('论文 PDF 保存路径无效')
+    if (typeof fileData !== 'string' || !fileData || fileData.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(fileData)) {
+      throw new Error('PDF 文件数据无效')
+    }
+    const bytes = Buffer.from(fileData, 'base64')
+    if (bytes.toString('base64') !== fileData) throw new Error('PDF 文件数据无效')
+    // Match the known original bytes; pdf.js also accepts leading data before
+    // the PDF header, so repair must not impose a stricter signature check.
+    if (createHash('sha256').update(bytes).digest('hex') !== row.file_hash.toLowerCase()) throw new Error('所选 PDF 与原论文不匹配，请选择原始 PDF 文件。')
+    paperFiles.run([{ id, data: bytes }], () => {
+      // Recheck after recovery/planning: repair never replaces an existing file.
+      checkedPaperDestination(id, false)
+      db.prepare('UPDATE papers SET file_path = ? WHERE id = ?').run(destination, id)
+    })
   },
   // create: fileData is base64; we write it to disk and store only the path
   create: (paper: unknown) => {
@@ -173,10 +205,12 @@ export const paperApi = {
       .run(merged.title, merged.authors, merged.abstract, merged.year, merged.tags, merged.status, merged.knowledge_base_id, id)
   },
   remove: (id: string) => {
+    paperFiles.recover()
     const row = db.prepare('SELECT file_path FROM papers WHERE id = ?').get(id) as any
-    const file = storedPaperFilePath(id, row?.file_path, papersDir)
-    if (file) unlinkSync(file)
-    db.prepare('DELETE FROM papers WHERE id = ?').run(id)
+    const removals = row ? paperFileRemovals([{ id, file_path: row.file_path }]) : []
+    paperFiles.run(removals, () => {
+      db.prepare('DELETE FROM papers WHERE id = ?').run(id)
+    })
   },
   // read PDF binary as base64 for the renderer
   readFile: (id: string) => {
@@ -372,6 +406,9 @@ export const getWebQaRepository = () => createWebQaRepository(db)
 
 /** 全量导出。默认剔除设置里的明文 API Key，勾选后才原样带出（#5）。 */
 export function exportAll(opts: { includeApiKey?: boolean } = {}) {
+  // An earlier rollback can still hold an original in quarantine. Never turn
+  // that recoverable PDF into a successful backup with fileData: null.
+  paperFiles.recover()
   const paperRows = db.prepare('SELECT * FROM papers ORDER BY added_at DESC').all() as any[]
   const papers = paperRows.map(row => ({
     ...deserializePaper(row),
@@ -395,18 +432,20 @@ export function exportAll(opts: { includeApiKey?: boolean } = {}) {
 }
 
 export function clearAll() {
+  paperFiles.recover()
   const papers = db.prepare('SELECT id, file_path FROM papers').all() as { id: string; file_path: string }[]
-  for (const paper of papers) {
-    const file = storedPaperFilePath(paper.id, paper.file_path, papersDir)
-    if (file) unlinkSync(file)
-  }
-  db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM web_pages; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
-  db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
+  paperFiles.run(paperFileRemovals(papers), () => {
+    db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM web_pages; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
+    db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
+  })
 }
 
 export function importAll(input: unknown) {
   validateBackupInput(input)
+  // A previous failed rollback can still hold PDFs in quarantine. Restore them
+  // before discovering old files, otherwise this operation would omit them.
+  paperFiles.recover()
   const data = input as Record<string, any>
 
   const kbs = Array.isArray(data.knowledgeBases) ? data.knowledgeBases : []
@@ -421,9 +460,25 @@ export function importAll(input: unknown) {
 
   for (const paper of papers) checkedPaperDestination(paper.id, true)
 
-  // First validate and insert in one transaction. A nested malformed record
-  // must not overwrite or create any PDF before SQLite rejects the backup.
-  const insert = db.transaction(() => {
+  // Only regular PDFs directly in the managed directory participate. Stage
+  // replacements first, and quarantine obsolete files until SQL commits.
+  const fileChanges = new Map<string, PaperFileChange>()
+  for (const name of readdirSync(papersDir)) {
+    if (!name.endsWith('.pdf')) continue
+    const id = name.slice(0, -4)
+    if (isSafePaperId(id) && lstatSync(join(papersDir, name)).isFile()) {
+      fileChanges.set(id, { id, data: null })
+    }
+  }
+  for (const paper of papers) {
+    fileChanges.set(paper.id, {
+      id: paper.id,
+      // Missing bytes must not retain a same-ID PDF from before the restore.
+      data: typeof paper.fileData === 'string' ? Buffer.from(paper.fileData, 'base64') : null,
+    })
+  }
+
+  paperFiles.run([...fileChanges.values()], () => {
     db.exec('DELETE FROM web_qa_messages; DELETE FROM web_qa_sessions; DELETE FROM web_snapshots; DELETE FROM web_pages; DELETE FROM messages; DELETE FROM conversations; DELETE FROM highlights; DELETE FROM paper_indexes; DELETE FROM paper_trees; DELETE FROM document_parses; DELETE FROM document_assets; DELETE FROM abstract_checkpoints; DELETE FROM paper_abstracts; DELETE FROM papers; DELETE FROM knowledge_bases; DELETE FROM settings;')
 
     for (const kb of kbs) {
@@ -494,27 +549,11 @@ export function importAll(input: unknown) {
     for (const s of settings) {
       db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(s.key, s.value)
     }
-  })
 
-  insert()
-
-  // The database is now known to accept every record in this backup.
-  for (const p of papers) {
-    if (typeof p.fileData === 'string') {
-      writeFileSync(join(papersDir, `${p.id}.pdf`), Buffer.from(p.fileData, 'base64'))
+    // Creating the fallback library belongs to the same atomic restore.
+    if (!kbs.length) {
+      db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
     }
-  }
-
-  // 清理未被备份引用的孤儿 PDF
-  const wanted = new Set(papers.filter((p: any) => typeof p.id === 'string').map((p: any) => `${p.id}.pdf`))
-  for (const name of readdirSync(papersDir)) {
-    if (name.endsWith('.pdf') && !wanted.has(name)) unlinkSync(join(papersDir, name))
-  }
-
-  // 保证至少一个知识库
-  const kbCount = (db.prepare('SELECT COUNT(*) AS n FROM knowledge_bases').get() as { n: number }).n
-  if (kbCount === 0) {
-    db.prepare('INSERT INTO knowledge_bases (id, name, description, color, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run('default', '默认知识库', '未分类论文', '#3db8a0', Date.now())
-  }
+  })
 }

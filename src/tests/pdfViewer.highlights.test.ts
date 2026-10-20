@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import PdfViewer from '../components/PdfViewer.vue'
-import type { Highlight } from '../stores/paper'
+import NotesPanel from '../components/NotesPanel.vue'
+import { usePaperStore, type Highlight } from '../stores/paper'
+
+vi.mock('element-plus', () => ({ ElMessageBox: { confirm: vi.fn().mockResolvedValue('confirm') } }))
 
 const { getDocument } = vi.hoisted(() => ({ getDocument: vi.fn() }))
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
@@ -29,10 +32,12 @@ const first: Highlight = {
 const adjacent: Highlight = { ...first, id: 'h2', text: 'of text', startOffset: 10, endOffset: 18, createdAt: 2 }
 let wrapper: VueWrapper | undefined
 let stored: Highlight[]
+let pinia: ReturnType<typeof createPinia>
 const db = (globalThis as any).mockDb.highlight
 
 beforeEach(() => {
   vi.useFakeTimers()
+  pinia = createPinia()
   stored = [{ ...first }, { ...adjacent }]
   db.listByPaper.mockImplementation(async (paperId: string) => stored.filter(h => h.paperId === paperId).map(h => ({ ...h })))
   db.remove.mockReset().mockImplementation(async (id: string) => { stored = stored.filter(h => h.id !== id) })
@@ -81,7 +86,7 @@ async function openViewer() {
     props: { src: '/fixture.pdf', paperId: 'p1' },
     attachTo: document.body,
     global: {
-      plugins: [createPinia()],
+      plugins: [pinia],
       stubs: {
         'el-button': { template: '<button><slot /></button>' },
         'el-icon': { template: '<span><slot /></span>' },
@@ -106,6 +111,80 @@ function button(label: string) {
 }
 
 describe('PDF highlight cancellation', () => {
+  it('removes PDF geometry and the active target when NotesPanel deletes the mark', async () => {
+    stored = [{ ...first }]
+    await openViewer()
+    const canvas = wrapper!.get('canvas').element
+    const notes = mount(NotesPanel, {
+      props: { paperId: 'p1' },
+      global: {
+        plugins: [pinia],
+        stubs: {
+          'el-scrollbar': { template: '<div><slot /></div>' },
+          'el-button': { template: '<button><slot /></button>' },
+          'el-icon': { template: '<span><slot /></span>' },
+          'el-input': true,
+        },
+      },
+    })
+    try {
+      await flushPromises()
+      await clickMark()
+      expect(wrapper!.find('.pdf-highlight-focus').exists()).toBe(true)
+      await notes.get('.note-del').trigger('click')
+      await flushPromises()
+      expect(notes.findAll('.note-item')).toHaveLength(0)
+      expect(wrapper!.findAll('.pdf-highlight-overlay')).toHaveLength(0)
+      expect(wrapper!.find('.pdf-highlight-focus').exists()).toBe(false)
+      expect(wrapper!.find('.selection-popup').exists()).toBe(false)
+      expect(wrapper!.get('canvas').element).toBe(canvas)
+      await clickMark()
+      expect(wrapper!.find('.selection-popup').exists()).toBe(false)
+    } finally { notes.unmount() }
+  })
+
+  it('paints highlights created through the store without reopening the PDF', async () => {
+    stored = []
+    await openViewer()
+    await usePaperStore(pinia).addHighlight({
+      paperId: 'p1', text: 'First line', pageNum: 1, color: '#ffe66a',
+      note: '', startOffset: 0, endOffset: 10,
+    })
+    await flushPromises()
+    expect(wrapper!.findAll('.pdf-highlight-overlay')).toHaveLength(1)
+    await clickMark()
+    await button('发送到对话').trigger('click')
+    expect(wrapper!.emitted('select-text')).toEqual([['First line']])
+  })
+
+  it('restores external marks and preserves evidence when highlight geometry changes', async () => {
+    stored = []
+    await openViewer()
+    const canvas = wrapper!.get('canvas').element
+    await (wrapper!.vm as any).scrollToEvidence({ label: 'p1', paperId: 'p1', startPage: 0,
+      region: { x: 0.2, y: 0.5, width: 0.6, height: 0.2 } })
+    const evidence = wrapper!.get('.pdf-evidence-outline').element
+    const store = usePaperStore(pinia)
+    await store.restoreHighlight(first)
+    await flushPromises()
+    expect(wrapper!.findAll('.pdf-highlight-overlay')).toHaveLength(1)
+    await store.removeHighlight(first.id)
+    await flushPromises()
+    expect(wrapper!.findAll('.pdf-highlight-overlay')).toHaveLength(0)
+    expect(wrapper!.get('.pdf-evidence-outline').element).toBe(evidence)
+    expect(wrapper!.get('canvas').element).toBe(canvas)
+    const node = wrapper!.get('.text-layer span').element.firstChild!
+    const range = document.createRange()
+    range.setStart(node, 0)
+    range.setEnd(node, 10)
+    document.getSelection()!.addRange(range)
+    await wrapper!.get('.text-layer').trigger('mouseup', { button: 0, clientX: 55, clientY: 110 })
+    await button('高亮').trigger('click')
+    await flushPromises()
+    expect(wrapper!.findAll('.pdf-highlight-overlay')).toHaveLength(1)
+    expect(stored).toHaveLength(1)
+  })
+
   it('renders only nearby pages for a long PDF', async () => {
     getDocument.mockImplementation(() => ({ promise: Promise.resolve({
       numPages: 30,
@@ -350,6 +429,32 @@ describe('PDF highlight cancellation', () => {
     expect(wrapper!.find('.selection-popup').exists()).toBe(false)
   })
 
+  it('keeps a pending new highlight out of the next document', async () => {
+    stored = []
+    await openViewer()
+    let finish!: () => void
+    db.create.mockImplementationOnce((record: Highlight) => new Promise<Highlight>(resolve => {
+      finish = () => { stored.push(record); resolve(record) }
+    }))
+    const node = wrapper!.get('.text-layer span').element.firstChild!
+    const range = document.createRange()
+    range.setStart(node, 0)
+    range.setEnd(node, 10)
+    document.getSelection()!.addRange(range)
+    await wrapper!.get('.text-layer').trigger('mouseup', { button: 0, clientX: 55, clientY: 110 })
+    await button('高亮').trigger('click')
+    stored.push({ ...first, id: 'other', paperId: 'p2', text: 'Other paper selection' })
+    await wrapper!.setProps({ paperId: 'p2', src: '/other.pdf' })
+    await flushPromises()
+    finish()
+    await flushPromises()
+    expect(wrapper!.findAll('.pdf-highlight-overlay')).toHaveLength(1)
+    await clickMark()
+    await button('发送到对话').trigger('click')
+    expect(wrapper!.emitted('select-text')).toEqual([['Other paper selection']])
+    expect(usePaperStore(pinia).highlights.map(h => h.id)).toEqual(['other'])
+  })
+
   it('does not apply a pending undo to a different document', async () => {
     await openViewer()
     await clickMark()
@@ -442,5 +547,63 @@ describe('PDF highlight cancellation', () => {
     expect(stored).toEqual([])
     expect(wrapper!.find('.pdf-highlight-overlay').exists()).toBe(false)
     expect(wrapper!.text()).toContain('保存高亮失败')
+  })
+})
+
+describe('PDF reading position and direct page entry', () => {
+  beforeEach(() => {
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value) })
+    getDocument.mockImplementation(() => ({ promise: Promise.resolve({
+      numPages: 4,
+      getPage: async () => ({
+        getViewport: () => ({ width: 600, height: 800, scale: 1 }),
+        render: () => ({ promise: Promise.resolve() }),
+        getTextContent: async () => ({}),
+      }),
+    }) }))
+  })
+  it('restores the same paper page and relative page offset after reopening, while isolating another paper', async () => {
+    await openViewer()
+    const scroll = wrapper!.get('.pdf-scroll').element as HTMLElement
+    scroll.scrollTop = 1046 // page 2 starts at 846, 200px into its 800px height
+    await wrapper!.get('.pdf-scroll').trigger('scroll')
+    wrapper!.unmount()
+    wrapper = undefined
+    await openViewer()
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(1046)
+    expect((wrapper!.get('input[aria-label="跳转到页码"]').element as HTMLInputElement).value).toBe('2')
+    await wrapper!.setProps({ paperId: 'p2', src: '/other.pdf' })
+    await flushPromises()
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(0)
+  })
+  it('jumps on Enter and rejects blank, fractional and out-of-range page input', async () => {
+    await openViewer()
+    const input = wrapper!.get('input[aria-label="跳转到页码"]')
+    await input.setValue('3')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('3')
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(1668)
+    for (const invalid of ['', '1.5', '99', '0']) {
+      await input.setValue(invalid)
+      await input.trigger('keydown', { key: 'Enter' })
+      expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(1668)
+      expect(wrapper!.find('[role="alert"]').exists()).toBe(true)
+    }
+  })
+  it('gives explicit navigation priority over a saved position and clamps it to actual page count', async () => {
+    await openViewer()
+    const scroll = wrapper!.get('.pdf-scroll').element as HTMLElement
+    scroll.scrollTop = 2000
+    await wrapper!.get('.pdf-scroll').trigger('scroll')
+    wrapper!.unmount()
+    wrapper = undefined
+    await openViewer()
+    await (wrapper!.vm as any).scrollToPage(2)
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(846)
+    await (wrapper!.vm as any).scrollToPage(900)
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(2490)
   })
 })

@@ -25,6 +25,8 @@ const getRuntimeIconPath = () => getIconPath({
   resourcesPath: process.resourcesPath,
 })
 
+let mainWindow: BrowserWindow | null = null
+
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 1200,
@@ -36,8 +38,12 @@ const createWindow = () => {
       nodeIntegration: false,
     },
   })
+  mainWindow = win
+  win.on('closed', () => {
+    unregisterPreviewWindow(win)
+    mainWindow = null
+  })
   registerPreviewWindow(win)
-  win.on('close', () => unregisterPreviewWindow(win))
 
   const openExternalUrl = (url: string) => {
     try {
@@ -64,33 +70,44 @@ const createWindow = () => {
   }
 }
 
-app.whenReady().then(() => {
-  if (process.platform === 'darwin' && !app.isPackaged) {
-    const iconPath = getRuntimeIconPath()
-    const icon = nativeImage.createFromPath(iconPath)
-    if (icon.isEmpty()) {
-      console.warn('[branding] Unable to load icon:', iconPath)
-    } else {
-      app.dock?.setIcon(icon)
+// File transaction recovery must only run in the process that owns the database.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  })
+
+  app.whenReady().then(() => {
+    if (process.platform === 'darwin' && !app.isPackaged) {
+      const iconPath = getRuntimeIconPath()
+      const icon = nativeImage.createFromPath(iconPath)
+      if (icon.isEmpty()) {
+        console.warn('[branding] Unable to load icon:', iconPath)
+      } else {
+        app.dock?.setIcon(icon)
+      }
     }
-  }
 
-  initDb()
-  protocol.handle('papermind-paper', request => servePaperRequest(
-    request,
-    id => paperApi.filePath(id),
-    (url, headers) => net.fetch(url, { headers }),
-  ))
-  registerIpc()
-  createWindow()
-})
+    initDb()
+    protocol.handle('papermind-paper', request => servePaperRequest(
+      request,
+      id => paperApi.filePath(id),
+      (url, headers) => net.fetch(url, { headers }),
+    ))
+    registerIpc()
+    createWindow()
+  })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit()
+  })
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
-})
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
 
-app.on('before-quit', stopManagedDoclingTunnel)
+  app.on('before-quit', stopManagedDoclingTunnel)
+}

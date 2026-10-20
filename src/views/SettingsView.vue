@@ -54,11 +54,11 @@
       <!-- ── 默认选择 ── -->
       <section class="settings-card">
         <h3>默认使用配置</h3>
-        <p class="card-desc">选择用于回答问题的模型。论文检索在本地完成，无需配置索引 LLM。</p>
+        <p class="card-desc">选择用于回答问题的模型，选择后自动保存。论文检索在本地完成，无需配置索引 LLM。</p>
 
         <div class="setting-row">
           <label>对话</label>
-          <el-select v-model="chatProfileIdLocal" @change="chatStore.setChatProfileId(chatProfileIdLocal)" style="width:240px">
+          <el-select v-model="chatProfileIdLocal" aria-label="默认对话模型" :loading="savingChatProfile" :disabled="savingChatProfile" @change="saveChatProfileSelection" style="width:240px">
             <el-option v-for="p in profiles" :key="p.id" :label="p.name" :value="p.id" />
           </el-select>
         </div>
@@ -76,6 +76,7 @@
           <label>参考内容上限</label>
           <el-input-number :model-value="chatStore.retrievalContextChars" :min="4000" :max="1000000" :step="10000"
             @change="onContextLimitChange" />
+          <span class="card-desc">修改后自动保存</span>
           <span class="card-desc">字符；多篇论文共用。超限时提示缩小范围，不截断章节。请根据回答模型的上下文容量调整，并为历史和回答留出空间。</span>
         </div>
         <div class="setting-row">
@@ -90,7 +91,7 @@
         <p v-if="chatStore.doclingConfigError" class="card-desc" role="alert">{{ chatStore.doclingConfigError }}</p>
         <el-form label-position="top">
           <el-form-item label="Docling 服务根地址">
-            <el-input v-model="doclingLocal.baseUrl" type="url" autocomplete="off" placeholder="http://127.0.0.1:5001" />
+            <el-input data-test="docling-base-url" v-model="doclingLocal.baseUrl" type="url" autocomplete="off" placeholder="http://127.0.0.1:5001" />
           </el-form-item>
           <el-form-item label="API Key（可选）">
             <el-input v-model="doclingLocal.apiKey" type="password" show-password autocomplete="off" placeholder="服务启用认证时填写" />
@@ -104,9 +105,10 @@
           </div>
           <p class="card-desc">公式识别需要服务端相应模型。更改解析选项后，下次摘要会重新解析论文。</p>
           <div class="action-row">
-            <el-button type="primary" :loading="savingDocling" @click="saveDocling">保存设置</el-button>
+            <el-button data-test="docling-save" type="primary" :loading="savingDocling" @click="saveDocling">保存设置</el-button>
             <el-button :loading="testingDocling" @click="testDocling">测试连接</el-button>
           </div>
+          <p data-test="docling-save-state" class="card-desc" role="status">{{ doclingDirty ? '有未保存的修改，请点击「保存设置」' : '设置已保存；修改后请点击「保存设置」' }}</p>
         </el-form>
       </section>
 
@@ -116,7 +118,7 @@
         <p class="card-desc">论文、网页缓存与对话数据存储在本地，可随时导出备份。</p>
         <div class="action-row">
           <el-button @click="exportDialogVisible = true">导出数据</el-button>
-          <el-button @click="triggerImport">导入数据</el-button>
+          <el-button :disabled="restoreBusy" @click="triggerImport">从备份恢复</el-button>
           <el-button type="danger" plain @click="clearData">清空所有数据</el-button>
         </div>
         <input
@@ -135,6 +137,22 @@
         <template #footer>
           <el-button @click="exportDialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="exporting" @click="doExport">导出</el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog :model-value="!!restorePreview" title="从备份恢复：替换现有数据" width="540px" :close-on-click-modal="false" :close-on-press-escape="!restoreBusy" :show-close="!restoreBusy" @close="cancelRestore">
+        <div v-if="restorePreview" data-test="restore-preview" class="restore-preview">
+          <p><strong>这会替换全部现有资料和配置，不会合并。</strong>未包含在备份中的现有论文、笔记、对话与网页也会被移除。</p>
+          <p>当前：{{ paperStore.papers.length }} 篇论文、{{ chatStore.conversations.length }} 段对话、{{ paperStore.knowledgeBases.length }} 个知识库。</p>
+          <p>备份：{{ restorePreview.papers }} 篇论文、{{ restorePreview.conversations }} 段对话、{{ restorePreview.knowledgeBases }} 个知识库、{{ restorePreview.highlights }} 条高亮、{{ restorePreview.webPages }} 个网页。</p>
+          <p v-if="restorePreview.missingPdfs">其中 {{ restorePreview.missingPdfs }} 篇缺少 PDF；恢复后需要补回原文件才能阅读。</p>
+          <p>模型和解析服务配置也会被替换；备份可能未包含 API Key。建议先导出当前资料再继续。</p>
+          <p v-if="restoreError" data-test="restore-error" class="restore-error" role="alert">{{ restoreError }}</p>
+        </div>
+        <template #footer>
+          <el-button data-test="restore-cancel" :disabled="restoreBusy" @click="cancelRestore">取消</el-button>
+          <el-button data-test="restore-backup-first" :disabled="restoreBusy" @click="backupBeforeRestore">先备份当前资料</el-button>
+          <el-button data-test="restore-confirm" type="danger" :loading="restoreBusy" @click="confirmRestore">确认替换并恢复</el-button>
         </template>
       </el-dialog>
 
@@ -239,7 +257,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, shallowRef, reactive, computed, watch, inject, onBeforeUnmount } from 'vue'
+import { routerKey } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import {
@@ -248,19 +267,27 @@ import {
   type LLMProfile,
 } from '../stores/chat'
 import { storeToRefs } from 'pinia'
+import { usePaperStore } from '../stores/paper'
+import { previewBackup, type BackupPreview } from '../utils/backupPreview'
 
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
 
 const chatStore = useChatStore()
+const paperStore = usePaperStore()
 const { profiles, chatProfileId, doclingConfig } =
   storeToRefs(chatStore)
 
 // 本地绑定，避免直接修改 store ref（select @change 时再写入）
 const chatProfileIdLocal = ref(chatProfileId.value)
+const savingChatProfile = ref(false)
+watch(chatProfileId, id => { if (!savingChatProfile.value) chatProfileIdLocal.value = id })
 const doclingLocal = reactive({ ...doclingConfig.value })
 const savingDocling = ref(false)
 const testingDocling = ref(false)
-watch(doclingConfig, config => Object.assign(doclingLocal, config))
+const doclingDirty = computed(() => JSON.stringify(doclingLocal) !== JSON.stringify(doclingConfig.value))
+watch(doclingConfig, (config, previous) => {
+  if (JSON.stringify(doclingLocal) === JSON.stringify(previous)) Object.assign(doclingLocal, config)
+})
 const rebuildingTrees = ref(false)
 
 // 本地镜像必须跟着 store 走：视图挂载时 store 往往还没 init（init 在 App 的 onMounted 里），
@@ -289,6 +316,32 @@ const EMPTY_FORM = (): Omit<LLMProfile, 'id'> => ({
 })
 
 const form = reactive<Omit<LLMProfile, 'id'>>(EMPTY_FORM())
+const formBaseline = ref('')
+let restoredForReload = false
+let restoreReloadTimer: number | undefined
+const hasUnsavedChanges = computed(() => doclingDirty.value || dialogVisible.value && JSON.stringify(form) !== formBaseline.value)
+const router = inject(routerKey, null)
+const removeLeaveGuard = router?.beforeEach(async (to, from) => {
+  if (restoreBusy.value) return false
+  if (to.fullPath === from.fullPath || !hasUnsavedChanges.value) return true
+  try {
+    await ElMessageBox.confirm('有尚未保存的设置，离开会丢弃这些修改。确认离开？', '未保存的修改', { type: 'warning', confirmButtonText: '放弃修改并离开', cancelButtonText: '继续编辑' })
+    return true
+  } catch { return false }
+})
+function warnBeforeUnload(event: BeforeUnloadEvent) {
+  if (restoredForReload) return
+  if (!hasUnsavedChanges.value && !restoreBusy.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+window.addEventListener('beforeunload', warnBeforeUnload)
+onBeforeUnmount(() => {
+  selectionVersion++
+  if (restoreReloadTimer) clearTimeout(restoreReloadTimer)
+  removeLeaveGuard?.()
+  window.removeEventListener('beforeunload', warnBeforeUnload)
+})
 
 /** 关掉「不限制」时用来还原的上限：本次编辑里用户设过的最后一个有限值。 */
 const lastCappedTokens = ref<number | null>(null)
@@ -315,6 +368,7 @@ function openNew() {
   editingId.value = null
   lastCappedTokens.value = null
   Object.assign(form, EMPTY_FORM())
+  formBaseline.value = JSON.stringify(form)
   dialogVisible.value = true
 }
 
@@ -322,6 +376,7 @@ function openEdit(p: LLMProfile) {
   editingId.value = p.id
   lastCappedTokens.value = null
   Object.assign(form, { ...p })
+  formBaseline.value = JSON.stringify(form)
   dialogVisible.value = true
 }
 
@@ -346,10 +401,35 @@ async function doRemove(id: string) {
 }
 
 async function saveDocling() {
+  if (savingDocling.value) return
   savingDocling.value = true
-  try { await chatStore.setDoclingConfig({ ...doclingLocal }); ElMessage.success('Docling 设置已保存') }
+  const snapshot = { ...doclingLocal }
+  try {
+    await chatStore.setDoclingConfig(snapshot)
+    if (JSON.stringify(doclingLocal) === JSON.stringify(snapshot)) Object.assign(doclingLocal, doclingConfig.value)
+    ElMessage.success('Docling 设置已保存')
+  }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '保存失败') }
   finally { savingDocling.value = false }
+}
+async function saveChatProfileSelection(id: string) {
+  if (savingChatProfile.value) {
+    chatProfileIdLocal.value = chatProfileId.value
+    return
+  }
+  const previous = chatProfileId.value
+  savingChatProfile.value = true
+  try {
+    await chatStore.setChatProfileId(id)
+    chatStore.chatProfileId = id
+    chatProfileIdLocal.value = id
+  }
+  catch (error) {
+    chatStore.chatProfileId = previous
+    chatProfileIdLocal.value = previous
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+  }
+  finally { savingChatProfile.value = false }
 }
 async function testDocling() {
   testingDocling.value = true
@@ -404,23 +484,62 @@ async function doExport() {
 }
 
 const importInput = ref<HTMLInputElement>()
+const restorePreview = shallowRef<BackupPreview | null>(null)
+const restoreBusy = ref(false)
+const restoreError = ref('')
+let selectionVersion = 0
 
 function triggerImport() { importInput.value?.click() }
 
 async function onImportFile(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
+  input.value = ''
   if (!file) return
+  if (restoreBusy.value) return
+  const version = ++selectionVersion
   try {
     const text = await file.text()
-    const data = JSON.parse(text)
-    await window.db.data.import(data)
-    ElMessage.success('已导入，正在刷新…')
-    setTimeout(() => location.reload(), 800)
+    const preview = previewBackup(JSON.parse(text))
+    if (version !== selectionVersion) return
+    restorePreview.value = preview
+    restoreError.value = ''
   } catch (err) {
     ElMessage.error(`导入失败：${err instanceof Error ? err.message : '未知错误'}`)
-  } finally {
-    input.value = ''
+  }
+}
+
+function cancelRestore() {
+  if (restoreBusy.value) return
+  selectionVersion++
+  restorePreview.value = null
+  restoreError.value = ''
+}
+async function backupBeforeRestore() {
+  if (restoreBusy.value) return
+  restoreBusy.value = true
+  restoreError.value = ''
+  try {
+    const result = await window.db.data.exportFile({ includeApiKey: false })
+    if (!result.canceled) ElMessage.success(`当前资料已备份到 ${result.filePath}，确认后可继续恢复`)
+  } catch (error) { restoreError.value = error instanceof Error ? error.message : '备份失败' }
+  finally { restoreBusy.value = false }
+}
+async function confirmRestore() {
+  if (restoreBusy.value || !restorePreview.value) return
+  restoreBusy.value = true
+  restoreError.value = ''
+  try {
+    await window.db.data.import(restorePreview.value.data)
+    // The restored settings replace local drafts as well; do not block the required reload.
+    Object.assign(doclingLocal, doclingConfig.value)
+    dialogVisible.value = false
+    restoredForReload = true
+    ElMessage.success('已恢复，正在刷新…')
+    restoreReloadTimer = window.setTimeout(() => location.reload(), 800)
+  } catch (error) {
+    restoreError.value = error instanceof Error ? error.message : '恢复失败，请重试'
+    restoreBusy.value = false
   }
 }
 
@@ -433,6 +552,9 @@ async function clearData() {
 </script>
 
 <style scoped>
+.restore-preview { line-height: 1.7; }
+.restore-preview p + p { margin-top: 12px; }
+.restore-error { color: var(--danger); }
 .settings-view {
   display: flex;
   flex-direction: column;

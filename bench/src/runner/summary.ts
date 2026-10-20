@@ -1,7 +1,7 @@
 /**
- * 摘要任务 Runner：论文全文 → 生产摘要函数（HuggingFace T5 递归归约）→ ROUGE 对比参考摘要。
+ * Legacy 摘要任务 Runner（历史 T5 对照，非当前产品 Docling 摘要）：论文全文 → 生产摘要函数（HuggingFace T5 递归归约）→ ROUGE 对比参考摘要。
  * 与 QA 任务（qa.ts）并列为 benchmark 的两大评测对象；
- * 复用 src/utils/abstractSummarizer 的生产实现，评测与应用跑同一份代码。
+ * 保留 src/utils/abstractSummarizer 的历史实现与结果；当前产品入口见 product.ts / productCli.ts。
  */
 import { summarizeAcademicText } from '../../../src/utils/abstractSummarizer'
 import type { PaperMindConfig, BenchResult, EvalSample, PerSampleRecord, SampleError } from '../types'

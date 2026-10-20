@@ -34,7 +34,8 @@ const anthropicSse = (text: string, stopReason = 'end_turn') => ({
   status: 200,
   body: new Response(
     `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text } })}\n\n`
-    + `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: stopReason } })}\n\n`,
+    + `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: stopReason } })}\n\n`
+    + 'event: message_stop\ndata: {"type":"message_stop"}\n\n',
   ).body,
 })
 const ollamaSse = (text: string, doneReason = 'stop') => ({

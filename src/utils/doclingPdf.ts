@@ -8,36 +8,41 @@ export function cropPixels(region: SourceRegion, width: number, height: number) 
   return { x, y, width: Math.max(1, Math.min(width - x, Math.round(region.width * width))), height: Math.max(1, Math.min(height - y, Math.round(region.height * height))) }
 }
 interface CropDependencies {
-  load: (base64: string) => Promise<any>
+  load: (base64: string) => { promise: Promise<any>; destroy: () => Promise<void> | void }
   crop: (pdf: any, region: SourceRegion) => Promise<string>
 }
 const nativeCrop: CropDependencies = {
-  load: base64 => pdfjs.getDocument({ data: Uint8Array.from(atob(base64), char => char.charCodeAt(0)) }).promise,
+  load: base64 => pdfjs.getDocument({ data: Uint8Array.from(atob(base64), char => char.charCodeAt(0)) }),
   async crop(pdf, region) {
     const page = await pdf.getPage(region.page + 1)
-    const unit = page.getViewport({ scale: 1 })
-    const scale = Math.min(2, 3200 / Math.max(unit.width, unit.height))
-    const viewport = page.getViewport({ scale })
-    const canvas = document.createElement('canvas')
-    canvas.width = Math.ceil(viewport.width)
-    canvas.height = Math.ceil(viewport.height)
-    const context = canvas.getContext('2d')
-    if (!context) throw new Error('无法创建 PDF 图片画布')
-    await page.render({ canvasContext: context, canvas, viewport }).promise
-    const pixels = cropPixels(region, canvas.width, canvas.height)
-    const image = document.createElement('canvas')
-    image.width = pixels.width; image.height = pixels.height
-    const imageContext = image.getContext('2d')
-    if (!imageContext) throw new Error('无法裁剪原文图片')
-    imageContext.drawImage(canvas, pixels.x, pixels.y, pixels.width, pixels.height, 0, 0, pixels.width, pixels.height)
-    const data = image.toDataURL('image/png')
-    canvas.width = 0; canvas.height = 0
-    image.width = 0; image.height = 0
-    page.cleanup()
-    return data
+    let canvas: HTMLCanvasElement | undefined
+    let image: HTMLCanvasElement | undefined
+    try {
+      const unit = page.getViewport({ scale: 1 })
+      const scale = Math.min(2, 3200 / Math.max(unit.width, unit.height))
+      const viewport = page.getViewport({ scale })
+      canvas = document.createElement('canvas')
+      canvas.width = Math.ceil(viewport.width)
+      canvas.height = Math.ceil(viewport.height)
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('无法创建 PDF 图片画布')
+      await page.render({ canvasContext: context, canvas, viewport }).promise
+      const pixels = cropPixels(region, canvas.width, canvas.height)
+      image = document.createElement('canvas')
+      image.width = pixels.width
+      image.height = pixels.height
+      const imageContext = image.getContext('2d')
+      if (!imageContext) throw new Error('无法裁剪原文图片')
+      imageContext.drawImage(canvas, pixels.x, pixels.y, pixels.width, pixels.height, 0, 0, pixels.width, pixels.height)
+      return image.toDataURL('image/png')
+    } finally {
+      if (canvas) { canvas.width = 0; canvas.height = 0 }
+      if (image) { image.width = 0; image.height = 0 }
+      page.cleanup()
+    }
   },
 }
-export async function fillDoclingImages(input: ParsedDocument, base64: string, deps: CropDependencies = nativeCrop): Promise<ParsedDocument> {
+export async function fillDoclingImages(input: ParsedDocument, base64: string, deps: CropDependencies = nativeCrop, signal?: AbortSignal): Promise<ParsedDocument> {
   const document: ParsedDocument = JSON.parse(JSON.stringify(input))
   const missing = document.items.filter(item => ['picture', 'table', 'formula'].includes(item.kind))
     .flatMap(item => item.regions.filter(r => !item.images.some(im => im.page === r.page)).map(region => ({ item, region })))
@@ -45,15 +50,40 @@ export async function fillDoclingImages(input: ParsedDocument, base64: string, d
     document.warnings.push(`${item.caption || item.id} 缺少原文图片和裁剪位置。`)
   }
   if (!missing.length) return document
-  let pdf: any
-  try {
-    pdf = await deps.load(base64)
-    for (const { item, region } of missing) {
-      try { item.images.push({ page: region.page, data: await deps.crop(pdf, region) }) }
-      catch { document.warnings.push(`${item.caption || item.id} 在第 ${region.page + 1} 页的原文截图提取失败。`) }
+  signal?.throwIfAborted()
+  let task: ReturnType<CropDependencies['load']> | undefined
+  let release: Promise<void> | undefined
+  const destroy = () => {
+    if (task && !release) release = Promise.resolve().then(() => task!.destroy()).then(() => {}, () => {})
+    return release
+  }
+  let abort: (() => void) | undefined
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => {
+      void destroy()
+      reject(new DOMException('PDF 图片提取已取消', 'AbortError'))
     }
-  } catch { document.warnings.push('本地 PDF 图片提取失败，部分原图无法展示。') }
-  finally { if (pdf) { try { await pdf.destroy() } catch { /* Already released. */ } } }
+  })
+  try {
+    task = deps.load(base64)
+    signal?.addEventListener('abort', abort!, { once: true })
+    if (signal?.aborted) abort!()
+    const pdf = await Promise.race([task.promise, cancelled])
+    for (const { item, region } of missing) {
+      signal?.throwIfAborted()
+      try { item.images.push({ page: region.page, data: await Promise.race([deps.crop(pdf, region), cancelled]) }) }
+      catch (error) {
+        if (signal?.aborted) throw error
+        document.warnings.push(`${item.caption || item.id} 在第 ${region.page + 1} 页的原文截图提取失败。`)
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) throw error
+    document.warnings.push('本地 PDF 图片提取失败，部分原图无法展示。')
+  } finally {
+    signal?.removeEventListener('abort', abort!)
+    await destroy()
+  }
   document.warnings = [...new Set(document.warnings)]
   return document
 }

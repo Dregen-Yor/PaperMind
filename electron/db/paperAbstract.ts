@@ -6,12 +6,32 @@ import type { PaperAbstractReport } from '../../src/utils/paperAbstract'
 export const PAPER_ABSTRACT_PIPELINE_VERSION = 2
 
 export function createPaperAbstractRepository(db: Database.Database) {
+  const historicalAnswers = db.prepare(`
+    SELECT m.content, m.sources, m.truncated, m.timestamp
+    FROM messages m
+    WHERE m.role = 'assistant' AND trim(m.content) <> '' AND coalesce(m.error, '') = ''
+      AND (SELECT lower(trim(previous.content)) FROM messages previous
+           WHERE previous.conversation_id = m.conversation_id AND previous.rowid < m.rowid
+           ORDER BY previous.rowid DESC LIMIT 1) = '/abstract'
+    ORDER BY m.timestamp DESC, m.rowid DESC
+  `)
+
   return {
     get(paperId: string): PaperAbstractReport | null {
       const row = db.prepare('SELECT * FROM paper_abstracts WHERE paper_id = ?').get(paperId) as {
         paper_id: string; content: string; sources_json: string; truncated: number; updated_at: number; pipeline_version: number
       } | undefined
-      if (!row || row.pipeline_version !== PAPER_ABSTRACT_PIPELINE_VERSION) return null
+      if (!row) {
+        if (!db.prepare('SELECT 1 FROM papers WHERE id = ?').get(paperId)) return null
+        for (const answer of historicalAnswers.all() as Array<{ content: string; sources: string; truncated: number; timestamp: number }>) {
+          let sources: ReturnType<typeof normalizeSourceList>
+          try { sources = normalizeSourceList(JSON.parse(answer.sources)) } catch { continue }
+          if (!sources.length || !sources.every(source => source.paperId === paperId)) continue
+          return { paperId, content: answer.content, sources, truncated: !!answer.truncated, updatedAt: answer.timestamp }
+        }
+        return null
+      }
+      if (row.pipeline_version !== PAPER_ABSTRACT_PIPELINE_VERSION) return null
       let sources: unknown
       try { sources = JSON.parse(row.sources_json) } catch { sources = [] }
       return { paperId: row.paper_id, content: row.content, sources: normalizeSourceList(sources),

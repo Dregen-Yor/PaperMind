@@ -14,7 +14,11 @@ export interface AbstractCheckpointStore {
 const INPUT_CHARS = 18_000
 const escape = (text: string) => text.replace(/[\\`*_{}\[\]()<>!$]/g, '\\$&')
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' })
-const sentences = (text: string) => [...sentenceSegmenter.segment(text)].map(part => part.segment.trim()).filter(Boolean)
+const sentenceRanges = (text: string) => [...sentenceSegmenter.segment(text)].map(part => ({
+  text: part.segment.trim(), start: part.index + part.segment.length - part.segment.trimStart().length,
+  end: part.index + part.segment.trimEnd().length,
+})).filter(part => part.text)
+const sentences = (text: string) => sentenceRanges(text).map(part => part.text)
 const compact = (value: string) => value.replace(/\s+/g, ' ').trim().toLocaleLowerCase()
 const isReferencesHeading = (text: string) => /^(?:\d+(?:\.\d+)*[.\s]+)?(?:references|bibliography|参考文献)\s*$/i.test(text.trim())
 const isAppendixHeading = (text: string) => /^(?:appendix|supplementary)(?:\b|$)/i.test(text.trim())
@@ -121,12 +125,12 @@ export function buildEvidenceChunks(document: ParsedDocument, maxChars = INPUT_C
 export function materializeAbstract(raw: string, document: ParsedDocument, paperId: string) {
   const eligibleItems = abstractEvidenceItems(document)
   const byId = new Map(eligibleItems.map(item => [item.id, item]))
-  const sentenceById = new Map<string, { item: DocumentItem; text: string; label: string }>()
+  const sentenceById = new Map<string, { item: DocumentItem; text: string; label: string; start: number; end: number }>()
   let textNumber = 0
   for (const item of eligibleItems) {
     if (item.kind !== 'text') continue
-    for (const [index, sentence] of sentences(item.text).entries()) {
-      sentenceById.set(`${item.id}-s${index + 1}`, { item, text: sentence, label: `文${++textNumber}` })
+    for (const [index, sentence] of sentenceRanges(item.text).entries()) {
+      sentenceById.set(`${item.id}-s${index + 1}`, { item, ...sentence, label: `文${++textNumber}` })
     }
   }
   const sources = new Map<string, SourceRef>()
@@ -134,27 +138,45 @@ export function materializeAbstract(raw: string, document: ParsedDocument, paper
   const displayedAssets = new Set<string>()
   const warnings = [...document.warnings]
   let seenInParagraph = new Set<string>()
-  const citation = (item: DocumentItem, pages = item.pages, sentence?: { text: string; label: string }): string => pages.slice(0, 1).map(page => {
-    const quote = sentence?.text ?? ''
+  const citation = (item: DocumentItem, pages = item.pages, sentence?: { text: string; label: string; start: number; end: number }): string => {
+    let regions = item.regions
+    if (sentence) {
+      const spans = (item.provenance ?? []).filter(p => p.start < sentence.end && p.end > sentence.start)
+      // A partial character map cannot establish that the rest of this sentence stays on one page.
+      let covered = sentence.start
+      for (const span of [...spans].sort((a, b) => a.start - b.start)) {
+        if (span.start > covered && item.text.slice(covered, span.start).trim()) break
+        covered = Math.max(covered, span.end)
+      }
+      if (spans.length && covered >= sentence.end) {
+        pages = [...new Set(spans.map(span => span.page))]
+        regions = spans.flatMap(span => span.region ? [span.region] : [])
+      }
+    }
+    if (!pages.length) return ''
+    const page = Math.min(...pages)
+    const endPage = Math.max(...pages)
+    const range = endPage > page
+    const quote = range ? '' : sentence?.text ?? ''
     const label = sentence?.label ?? (item.kind === 'picture' ? `图${item.id.split('-')[1]}`
       : item.kind === 'table' ? `表${item.id.split('-')[1]}`
       : item.kind === 'formula' ? `式${item.id.split('-')[1]}`
       : item.kind === 'heading' ? `节${item.id.split('-')[1]}` : '')
     if (!label) return ''
-    const unitKey = `${paperId}:${item.id}:${sentence?.label ?? ''}:${page}`
+    const unitKey = `${paperId}:${item.id}:${sentence?.label ?? ''}:${page}:${endPage}`
     if (seenInParagraph.has(unitKey)) return ''
     seenInParagraph.add(unitKey)
-    sources.set(`${paperId}:${page}`, { label, paperId, startPage: page, endPage: page })
-    const regions = item.regions.filter(region => region.page === page)
+    sources.set(`${paperId}:${page}:${endPage}`, { label, paperId, startPage: page, endPage })
+    regions = range ? [] : regions.filter(region => region.page === page)
     const region: EvidenceRegion | undefined = regions.length ? {
       x: Math.min(...regions.map(r => r.x)), y: Math.min(...regions.map(r => r.y)),
       width: Math.max(...regions.map(r => r.x + r.width)) - Math.min(...regions.map(r => r.x)),
       height: Math.max(...regions.map(r => r.y + r.height)) - Math.min(...regions.map(r => r.y)),
     } : undefined
-    const href = evidenceHref(paperId, page, region, quote)
+    const href = evidenceHref(paperId, page, region, quote, endPage)
     approved.add(href)
-    return `[${label}](${href})`
-  }).filter(Boolean).join(' ')
+    return `[${label}${range ? `（p${page + 1}–${endPage + 1}）` : ''}](${href})`
+  }
   const asset = (item: DocumentItem): string => {
     if (item.kind === 'text' || item.kind === 'heading') return citation(item)
     if (item.kind === 'formula' && item.text.trim()) {

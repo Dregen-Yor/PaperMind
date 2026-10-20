@@ -34,7 +34,7 @@
           >
             <span class="kb-dot" :style="{ background: kb.id === 'default' ? 'var(--accent)' : kb.color }" aria-hidden="true" />
             <span class="kb-name">{{ kb.name }}</span>
-            <span class="kb-count tabular-nums">{{ store.getPapersByKb(kb.id).value.length }}</span>
+            <span class="kb-count tabular-nums">{{ allPapers.filter(paper => paper.knowledgeBaseId === kb.id).length }}</span>
           </button>
           <button v-if="kb.id !== 'default'" type="button" class="kb-remove" :aria-label="'删除知识库 ' + kb.name" @click="removeKb(kb.id)">
             <el-icon aria-hidden="true"><Close /></el-icon>
@@ -104,6 +104,7 @@
                 </button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <el-dropdown-item @click="editingPaper = paper">编辑论文信息</el-dropdown-item>
                     <el-dropdown-item @click="movePaper(paper)">移动到知识库</el-dropdown-item>
                     <el-dropdown-item @click="store.updatePaper(paper.id, { status: 'done' })">标记完成</el-dropdown-item>
                     <el-dropdown-item divided @click="deletePaper(paper)"><span class="danger-text">删除</span></el-dropdown-item>
@@ -150,7 +151,7 @@
         <ul class="import-list">
           <li
             v-for="item in importItems"
-            :key="item.name"
+            :key="item.id"
             class="import-item"
             :data-status="item.status"
           >
@@ -161,6 +162,7 @@
               <span v-else class="spin">⟳</span>
             </span>
             <span class="import-item-name">{{ item.name }}</span>
+            <span class="import-item-target" :title="'导入至 ' + item.targetName">导入至 {{ item.targetName }}</span>
             <span class="import-item-stage">{{ stageLabel[item.status] }}</span>
             <span v-if="item.error" class="import-item-error" :title="item.error">{{ item.error }}</span>
           </li>
@@ -168,12 +170,33 @@
       </div>
     </transition>
 
-    <transition name="slide-up">
-      <div v-if="pendingDelete" class="undo-bar" role="status">
-        <span>已删除《{{ pendingDelete.paper.title || pendingDelete.paper.fileName }}》</span>
-        <button type="button" class="undo-btn" @click="undoDelete">撤销</button>
+    <div class="undo-stack" aria-live="polite">
+      <div v-for="task in deletions" :key="task.paper.id" class="undo-bar" :role="task.state === 'error' ? 'alert' : 'status'">
+        <span v-if="task.state === 'waiting'">已移除《{{ task.paper.title || task.paper.fileName }}》，5 秒内可撤销</span>
+        <span v-else-if="task.state === 'deleting'">正在删除《{{ task.paper.title || task.paper.fileName }}》…</span>
+        <span v-else>删除《{{ task.paper.title || task.paper.fileName }}》失败，论文已恢复：{{ task.error }}</span>
+        <button v-if="task.state === 'waiting'" type="button" class="undo-btn" :aria-label="'撤销删除 ' + task.paper.title" @click="workspace.undoDelete(task.paper.id)">撤销</button>
+        <template v-if="task.state === 'error'">
+          <button type="button" class="undo-btn" @click="workspace.commitDelete(task.paper.id)">重试删除</button>
+          <button type="button" class="undo-btn" @click="workspace.dismissDeleteError(task.paper.id)">关闭</button>
+        </template>
       </div>
-    </transition>
+    </div>
+
+    <el-dialog :model-value="!!movingPaper" title="移动到知识库" width="420px" :close-on-click-modal="!moveSaving" :close-on-press-escape="!moveSaving" :show-close="!moveSaving" @update:model-value="!moveSaving && (movingPaper = null)">
+      <p>选择《{{ movingPaper?.title || movingPaper?.fileName }}》的目标知识库。</p>
+      <el-select v-if="moveTargets.length" v-model="moveTargetId" aria-label="目标知识库" placeholder="请选择目标知识库" style="width: 100%; margin-top: 16px" :disabled="moveSaving">
+        <el-option v-for="kb in moveTargets" :key="kb.id" :label="kb.name" :value="kb.id" />
+      </el-select>
+      <p v-else role="status">没有其他可选知识库，请先新建知识库。</p>
+      <p v-if="moveError" role="alert" class="danger-text">{{ moveError }}</p>
+      <template #footer>
+        <el-button :disabled="moveSaving" @click="movingPaper = null">取消</el-button>
+        <el-button type="primary" :disabled="!moveTargetId || !moveTargets.some(kb => kb.id === moveTargetId)" :loading="moveSaving" @click="confirmMove">确认移动</el-button>
+      </template>
+    </el-dialog>
+
+    <PaperMetadataEditor v-if="editingPaper" :paper="editingPaper" @close="editingPaper = null" />
 
     <el-dialog v-model="showNewKbDialog" title="新建知识库" width="400px">
       <el-form :model="newKbForm" label-position="top" size="default">
@@ -209,33 +232,36 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from '@element-plus/icons-vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
-import { parsePdfMeta } from '../utils/pdfUtils'
-import { filterLibraryPapers, formatAuthors, type LibraryFilters } from '../utils/libraryFilters'
+import { useLibraryImportStore, type ImportStatus } from '../stores/libraryImport'
+import PaperMetadataEditor from '../components/PaperMetadataEditor.vue'
+import { useLibraryWorkspaceStore } from '../stores/libraryWorkspace'
+import { filterLibraryPapers, formatAuthors } from '../utils/libraryFilters'
 
 const store = usePaperStore()
 const chatStore = useChatStore()
+const importStore = useLibraryImportStore()
 const router = useRouter()
 const fileInput = ref<HTMLInputElement>()
-const activeKbId = ref(store.knowledgeBases[0]?.id ?? 'default')
+const workspace = useLibraryWorkspaceStore()
+const { activeKbId, searchQuery, statusFilter, sortOrder, deletions } = storeToRefs(workspace)
+watch(() => store.knowledgeBases.map(kb => kb.id), () => workspace.ensureKnowledgeBase(), { immediate: true })
 const showNewKbDialog = ref(false)
 
 const DEFAULT_KB_COLOR = '#73543c'
 const newKbForm = ref({ name: '', description: '', color: DEFAULT_KB_COLOR })
 const colorOptions = ['#73543c', '#65765a', '#7d8c96', '#b28b4f', '#a56858', '#92809b', '#817b70']
 
-const allPapers = computed(() => store.papers)
-const activePapers = computed(() => store.getPapersByKb(activeKbId.value).value)
+const allPapers = computed(() => store.papers.filter(paper => !deletions.value.some(task => task.paper.id === paper.id && task.state !== 'error')))
+const activePapers = computed(() => allPapers.value.filter(paper => paper.knowledgeBaseId === activeKbId.value))
 
 const statusLabel: Record<string, string> = { unread: '未读', reading: '阅读中', done: '已完成' }
-const searchQuery = ref('')
-const statusFilter = ref<LibraryFilters['status']>('all')
-const sortOrder = ref<LibraryFilters['sort']>('recent')
 const statusFilters = [
   { value: 'all', label: '全部' },
   { value: 'unread', label: '未读' },
@@ -254,14 +280,6 @@ function clearFilters() {
 }
 
 // ── 导入进度状态 ──────────────────────────────────────────
-type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error' | 'skipped'
-
-interface ImportItem {
-  name: string
-  status: ImportStatus
-  error?: string
-}
-
 const stageLabel: Record<ImportStatus, string> = {
   pending: '等待中',
   parsing: '解析 PDF…',
@@ -271,85 +289,44 @@ const stageLabel: Record<ImportStatus, string> = {
   skipped: '已跳过',
 }
 
-const importItems = ref<ImportItem[]>([])
-const showImportPanel = ref(false)
-
-// 跳过重复导入也是终态：计入完成数，进度条才能走完并自动收起
-const doneCount = computed(() =>
-  importItems.value.filter(i => i.status === 'done' || i.status === 'error' || i.status === 'skipped').length,
-)
-const allDone = computed(() => doneCount.value === importItems.value.length && importItems.value.length > 0)
-const importHasError = computed(() => importItems.value.some(i => i.status === 'error'))
-const importPercent = computed(() =>
-  importItems.value.length === 0 ? 0 : Math.round((doneCount.value / importItems.value.length) * 100),
-)
+const {
+  items: importItems, showPanel: showImportPanel, doneCount, allDone,
+  hasError: importHasError, percent: importPercent,
+} = storeToRefs(importStore)
 
 let importPanelTimer: number | undefined
-watch(allDone, done => {
+watch([allDone, importHasError], ([done, hasError]) => {
   if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
-  if (done && !importHasError.value) {
-    importPanelTimer = window.setTimeout(() => { showImportPanel.value = false }, 2500)
+  if (done && !hasError) {
+    importPanelTimer = window.setTimeout(() => {
+      if (allDone.value && !importStore.running) showImportPanel.value = false
+    }, 2500)
   }
+}, { immediate: true })
+
+let viewActive = true
+onBeforeUnmount(() => {
+  viewActive = false
+  if (importPanelTimer) clearTimeout(importPanelTimer)
 })
 
 function triggerUpload() { fileInput.value?.click() }
 
 async function onFilesSelected(e: Event) {
-  const files = (e.target as HTMLInputElement).files
-  if (!files || files.length === 0) return
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length) return
 
   if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
 
-  // 初始化进度列表
-  importItems.value = Array.from(files).map(f => ({ name: f.name, status: 'pending' as ImportStatus }))
-  showImportPanel.value = true
-
-  let openPaperIdAfterImport = ''
-
-  for (let i = 0; i < importItems.value.length; i++) {
-    const file = files[i]
-    const item = importItems.value[i]
-    try {
-      item.status = 'parsing'
-      const meta = await parsePdfMeta(file)
-
-      const existing = store.papers.find(p => p.fileHash && p.fileHash === meta.fileHash)
-      if (existing) {
-        try {
-          await ElMessageBox.confirm(
-            `《${existing.title || existing.fileName}》已在库中，是否打开现有条目？`,
-            '重复导入',
-            { type: 'info', confirmButtonText: '打开现有条目', cancelButtonText: '跳过' },
-          )
-          openPaperIdAfterImport = existing.id
-          item.status = 'done'
-        } catch {
-          item.status = 'skipped'
-        }
-        continue
-      }
-
-      item.status = 'saving'
-      const id = await store.addPaper({
-        ...meta,
-        fileName: file.name,
-        knowledgeBaseId: activeKbId.value,
-        status: 'unread',
-        tags: [],
-      })
-      item.status = 'done'
-
-      // 后台触发 pageIndex 预处理，不阻塞导入流程
-      chatStore.indexPaper(id).catch(() => {})
-    } catch (err) {
-      item.status = 'error'
-      item.error = err instanceof Error ? err.message : '未知错误'
-    }
+  const target = store.knowledgeBases.find(kb => kb.id === activeKbId.value)
+  const openPaperId = await importStore.enqueue(files, {
+    id: activeKbId.value, name: target?.name ?? '默认知识库',
+  })
+  if (openPaperId && viewActive && router.currentRoute.value.path === '/library') {
+    void router.push('/library/' + openPaperId)
   }
-
-  if (openPaperIdAfterImport) void router.push('/library/' + openPaperIdAfterImport)
-
-  ;(e.target as HTMLInputElement).value = ''
 }
 
 function createKb() {
@@ -365,42 +342,46 @@ async function removeKb(id: string) {
   if (activeKbId.value === id) activeKbId.value = 'default'
 }
 
-interface PendingDelete { paper: Paper; index: number; timer: number }
-const pendingDelete = ref<PendingDelete | null>(null)
-
 async function deletePaper(paper: Paper) {
-  await ElMessageBox.confirm(`确认删除《${paper.title || paper.fileName}》？`, '删除', { type: 'warning' })
-  const index = store.papers.findIndex(p => p.id === paper.id)
-  if (index === -1) return
-  store.papers.splice(index, 1)            // 先从列表移除，5 秒内可撤销
-  if (pendingDelete.value) finalizeDelete() // 上一个未到期的删除立即落库
-  const timer = window.setTimeout(() => finalizeDelete(), 5000)
-  pendingDelete.value = { paper, index, timer }
+  try {
+    await ElMessageBox.confirm(`确认删除《${paper.title || paper.fileName}》？`, '删除', { type: 'warning' })
+    if (store.getPaper(paper.id)) workspace.scheduleDelete(paper)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('无法删除论文，请重试')
+  }
 }
 
-function undoDelete() {
-  if (!pendingDelete.value) return
-  clearTimeout(pendingDelete.value.timer)
-  const { paper, index } = pendingDelete.value
-  store.papers.splice(Math.min(index, store.papers.length), 0, paper)
-  pendingDelete.value = null
+const editingPaper = ref<Paper | null>(null)
+const movingPaper = ref<Paper | null>(null)
+const moveTargetId = ref('')
+const moveSaving = ref(false)
+const moveError = ref('')
+const moveTargets = computed(() => store.knowledgeBases.filter(kb => kb.id !== movingPaper.value?.knowledgeBaseId))
+
+function movePaper(paper: Paper) {
+  movingPaper.value = paper
+  moveTargetId.value = ''
+  moveError.value = ''
 }
 
-function finalizeDelete() {
-  if (!pendingDelete.value) return
-  clearTimeout(pendingDelete.value.timer)
-  const { paper } = pendingDelete.value
-  pendingDelete.value = null
-  void store.removePaper(paper.id)
+async function confirmMove() {
+  const paper = movingPaper.value
+  const target = moveTargets.value.find(kb => kb.id === moveTargetId.value)
+  if (!paper || !target || moveSaving.value) return
+  moveSaving.value = true
+  moveError.value = ''
+  try {
+    if (!store.getPaper(paper.id)) throw new Error('论文已不存在，请关闭后刷新列表')
+    await store.updatePaper(paper.id, { knowledgeBaseId: target.id })
+    movingPaper.value = null
+    ElMessage.success(`已移至「${target.name}」`)
+  } catch (error) {
+    moveError.value = `移动失败：${error instanceof Error ? error.message : String(error)}。请重试。`
+  } finally {
+    moveSaving.value = false
+  }
 }
 
-function movePaper(paper: any) {
-  const kbs = store.knowledgeBases
-  const idx = kbs.findIndex(k => k.id === paper.knowledgeBaseId)
-  const next = kbs[(idx + 1) % kbs.length]
-  store.updatePaper(paper.id, { knowledgeBaseId: next.id })
-  ElMessage.success(`已移至「${next.name}」`)
-}
 </script>
 
 <style scoped>
@@ -579,9 +560,10 @@ function movePaper(paper: any) {
   padding: 0 0 6px;
 }
 .import-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 6px;
+  gap: 2px 6px;
   padding: 5px 14px;
   font-size: 12px;
   line-height: 1.5;
@@ -590,7 +572,8 @@ function movePaper(paper: any) {
 .import-item:hover { background: var(--bg-hover); }
 
 .import-item-icon {
-  flex-shrink: 0;
+  grid-column: 1;
+  grid-row: 1;
   width: 14px;
   text-align: center;
   font-size: 11px;
@@ -602,15 +585,26 @@ function movePaper(paper: any) {
 .import-item[data-status='pending'] .import-item-icon { color: var(--text-muted); }
 
 .import-item-name {
-  flex: 1;
+  grid-column: 2;
+  grid-row: 1;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
+.import-item-target {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .import-item-stage {
-  flex-shrink: 0;
+  grid-column: 3;
+  grid-row: 1;
   color: var(--text-muted);
   font-size: 11px;
 }
@@ -621,6 +615,8 @@ function movePaper(paper: any) {
 .import-item[data-status='saving']  .import-item-stage { color: var(--accent); }
 
 .import-item-error {
+  grid-column: 2 / 4;
+  grid-row: 3;
   display: block;
   font-size: 11px;
   color: var(--danger);
@@ -628,7 +624,6 @@ function movePaper(paper: any) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 200px;
 }
 
 /* 旋转动画 */
@@ -650,6 +645,7 @@ function movePaper(paper: any) {
 }
 
 /* ── 删除撤销条 ───────────────────────────────────────── */
-.undo-bar { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 10px 16px; background: var(--text-primary); color: var(--bg-surface); border-radius: 8px; font-size: 13px; z-index: 1000; box-shadow: var(--shadow-card); }
+.undo-stack { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; width: min(620px, calc(100vw - 32px)); z-index: 1001; }
+.undo-bar { display: flex; align-items: center; gap: 14px; padding: 10px 16px; background: var(--text-primary); color: var(--bg-surface); border-radius: 8px; font-size: 13px; z-index: 1000; box-shadow: var(--shadow-card); }
 .undo-btn { border: 0; background: transparent; color: var(--gold); font-size: 13px; font-weight: 600; cursor: pointer; }
 </style>

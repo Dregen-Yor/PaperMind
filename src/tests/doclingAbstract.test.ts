@@ -378,3 +378,58 @@ describe('illustrated abstract evidence and references', () => {
     expect(llm.mock.calls.length).toBeLessThan(10)
   })
 })
+
+
+describe('Docling cross-page provenance', () => {
+  const crossPage = (withSpans = true) => normalizeDoclingDocument({
+    texts: [{ text: 'First result. Second result.', prov: [
+      { page_no: 2, ...(withSpans ? { charspan: [0, 14] } : {}), bbox: { l: 10, r: 90, t: 10, b: 30, coord_origin: 'TOPLEFT' } },
+      { page_no: 3, ...(withSpans ? { charspan: [14, 28] } : {}), bbox: { l: 10, r: 90, t: 40, b: 60, coord_origin: 'TOPLEFT' } },
+    ] }],
+    pages: { '2': { size: { width: 100, height: 100 } }, '3': { size: { width: 100, height: 100 } } },
+  })
+  it('anchors a second-page sentence to its actual provenance instead of the first item page', () => {
+    const result = materializeAbstract('{{cite:text-1-s2}}', crossPage(), 'p')
+    expect(result.sources).toEqual([{ label: '文2', paperId: 'p', startPage: 2, endPage: 2 }])
+    const link = documentElement(renderMarkdown(result.content)).querySelector('a')!
+    expect(link.getAttribute('data-page')).toBe('2')
+    expect(link.getAttribute('data-region')).toBe('0.1,0.4,0.8,0.2')
+  })
+  it('keeps honest page ranges for old cached items without character provenance', () => {
+    const result = materializeAbstract('{{cite:text-1-s2}}', crossPage(false), 'p')
+    expect(result.sources[0]).toMatchObject({ startPage: 1, endPage: 2 })
+    expect(result.content).toContain('p2–3')
+    expect(documentElement(renderMarkdown(result.content)).querySelector('a')!.hasAttribute('data-region')).toBe(false)
+  })
+  it('distinguishes repeated sentences by their offsets and retains pages without bounding boxes', () => {
+    const doc = normalizeDoclingDocument({ texts: [{ text: 'Same result. Same result.', prov: [
+      { page_no: 1, charspan: [0, 13] }, { page_no: 2, charspan: [13, 25] },
+    ] }] })
+    expect(materializeAbstract('{{cite:text-1-s2}}', doc, 'p').sources[0]).toMatchObject({ startPage: 1, endPage: 1 })
+  })
+  it('retains all pages when one sentence actually spans two pages', () => {
+    const doc = crossPage()
+    doc.items[0].text = 'A single result continues across pages.'
+    doc.items[0].provenance = [{ page: 1, start: 0, end: 16 }, { page: 2, start: 16, end: 38 }]
+    const result = materializeAbstract('{{cite:text-1-s1}}', doc, 'p')
+    expect(result.sources[0]).toMatchObject({ startPage: 1, endPage: 2 })
+    expect(result.content).toContain('p2–3')
+  })
+})
+
+it('does not claim a single page for a cross-page table whose cell text was reconstructed', () => {
+  const doc = normalizeDoclingDocument({ tables: [{ data: { table_cells: [{ text: 'A', start_row_offset_idx: 0, start_col_offset_idx: 0 }] },
+    prov: [{ page_no: 2, charspan: [0, 1] }, { page_no: 3, charspan: [1, 2] }] }] })
+  const result = materializeAbstract('{{cite:table-1}}', doc, 'p')
+  expect(result.sources[0]).toMatchObject({ startPage: 1, endPage: 2 })
+  expect(result.content).toContain('p2–3')
+})
+
+it('maps non-BMP character offsets and declines partial or invalid provenance', () => {
+  const doc = normalizeDoclingDocument({ texts: [{ text: '😀 result. Next result.', prov: [
+    { page_no: 1, charspan: [0, 10] }, { page_no: 2, charspan: [10, 22] },
+  ] }] })
+  expect(materializeAbstract('{{cite:text-1-s2}}', doc, 'p').sources[0]).toMatchObject({ startPage: 1, endPage: 1 })
+  doc.items[0].provenance = [{ page: 1, start: 12, end: 13 }]
+  expect(materializeAbstract('{{cite:text-1-s2}}', doc, 'p').sources[0]).toMatchObject({ startPage: 0, endPage: 1 })
+})

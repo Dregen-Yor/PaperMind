@@ -26,6 +26,14 @@
         <div v-else class="pdf-placeholder" role="status">
           <el-icon :size="32" aria-hidden="true"><Document /></el-icon>
           <p>{{ loadingPdf ? '正在打开论文…' : fileError }}</p>
+          <template v-if="!loadingPdf && missingPdf">
+            <p v-if="!canRepairPdf">这篇论文没有可信的原文件哈希，无法安全补回 PDF；请使用包含原文件的备份恢复。</p>
+            <template v-else>
+              <p>选择原始 PDF 补回文件，保留当前论文的批注、笔记和对话。</p>
+              <button type="button" class="repair-pdf-button" :disabled="repairingPdf" @click="chooseRepairPdf">{{ repairingPdf ? '正在补回…' : '选择原始 PDF 补回' }}</button>
+            </template>
+          </template>
+          <input ref="repairFileInput" type="file" accept=".pdf,application/pdf" hidden aria-label="选择要补回的原始 PDF" @change="onRepairPdfSelected" />
           <el-button v-if="!loadingPdf" text @click="$router.push('/library')">返回文献库</el-button>
         </div>
       </section>
@@ -95,6 +103,11 @@ const paper = computed(() => paperStore.getPaper(route.params.id as string))
 const pdfUrl = ref('')
 const loadingPdf = ref(true)
 const fileError = ref('')
+const missingPdf = ref(false)
+const repairingPdf = ref(false)
+const repairFileInput = ref<HTMLInputElement>()
+const canRepairPdf = computed(() => /^[a-f0-9]{64}$/i.test(paper.value?.fileHash ?? ''))
+let repairSelection: { id: string; generation: number } | undefined
 const splitRatio = ref(58)
 const readerSplitRef = ref<HTMLElement>()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel>>()
@@ -103,6 +116,45 @@ const rightTab = ref<'chat' | 'abstract' | 'notes'>('chat')
 const mobilePane = ref<'paper' | 'discussion'>('paper')
 const activeConvId = ref('')
 let paperGeneration = 0
+
+function chooseRepairPdf() {
+  if (!paper.value || repairingPdf.value || !canRepairPdf.value) return
+  repairSelection = { id: paper.value.id, generation: paperGeneration }
+  repairFileInput.value?.click()
+}
+
+async function onRepairPdfSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  const selection = repairSelection
+  repairSelection = undefined
+  input.value = ''
+  if (!file || !selection || repairingPdf.value) return
+  const isCurrent = () => selection.generation === paperGeneration && paper.value?.id === selection.id
+  if (!isCurrent()) return
+  repairingPdf.value = true
+  try {
+    const fileData = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onerror = () => reject(new Error('PDF 文件读取失败，请重试。'))
+      reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+      reader.readAsDataURL(file)
+    })
+    if (!isCurrent()) return
+    await paperStore.restorePaperFile(selection.id, fileData)
+    if (!isCurrent()) return
+    const url = await paperStore.paperContentUrl(selection.id)
+    if (!isCurrent()) return
+    if (!url) throw new Error('补回后仍无法打开 PDF，请重试。')
+    pdfUrl.value = url
+    fileError.value = ''
+    missingPdf.value = false
+  } catch (error) {
+    if (isCurrent()) fileError.value = error instanceof Error ? error.message : 'PDF 补回失败，请重试。'
+  } finally {
+    if (isCurrent()) repairingPdf.value = false
+  }
+}
 
 async function jumpToPage(page: number) {
   mobilePane.value = 'paper'
@@ -182,6 +234,9 @@ watch([() => paper.value?.id, () => chatStore.loaded], async ([id, chatReady], _
   let cancelled = false
   onCleanup(() => { cancelled = true })
   loadingPdf.value = true
+  missingPdf.value = false
+  repairingPdf.value = false
+  repairSelection = undefined
   fileError.value = ''
   pdfUrl.value = ''
   if (activeConvId.value) void chatStore.discardEmptyConversation(activeConvId.value)
@@ -190,7 +245,10 @@ watch([() => paper.value?.id, () => chatStore.loaded], async ([id, chatReady], _
     const url = await paperStore.paperContentUrl(id)
     if (cancelled) return
     if (url) pdfUrl.value = url
-    else fileError.value = '找不到论文文件，请返回文献库重新导入。'
+    else {
+      missingPdf.value = true
+      fileError.value = '找不到论文文件。'
+    }
     // 跨论文跳转：`?page=` 定位到目标页（页元素可能尚未渲染完，scrollToPage 内部等待）
     const target = sourceFromRouteQuery(id, route.query)
     if (target) {
@@ -249,6 +307,8 @@ onBeforeUnmount(() => {
 .right-tab:hover { color: var(--accent); }
 .pdf-placeholder, .reader-missing { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; height: 100%; padding: 30px; background: var(--bg-reader); color: var(--text-muted); font-size: 13px; line-height: 1.8; text-align: center; }
 .reader-missing { background: var(--bg-base); }
+.repair-pdf-button { padding: 9px 16px; border: 1px solid var(--accent); border-radius: 6px; color: var(--accent); background: var(--accent-dim); cursor: pointer; }
+.repair-pdf-button:disabled { cursor: wait; opacity: 0.6; }
 .reader-mode-switch { display: none; }
 @media (max-width: 800px) {
   .reader-topbar { gap: 12px; padding: 15px 18px; min-height: 74px; }

@@ -63,6 +63,7 @@ export function registerIpc() {
     'paper:remove': (_e, id) => paperApi.remove(id),
     'paper:readFile': (_e, id) => paperApi.readFile(id),
     'paper:contentUrl': (_e, id: string) => paperApi.filePath(id) ? paperContentUrl(id) : null,
+    'paper:restoreFile': (_e, id, fileData) => paperApi.restoreFile(id, fileData),
     // isolated HTML preview; only the registered application renderer may control it
     'preview:open': (e, url, bounds) => previewControllerForSender(e.sender).open(url, bounds),
     'preview:openAndCapture': (e, url, bounds) => previewControllerForSender(e.sender).openAndCapture(url, bounds),

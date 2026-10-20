@@ -50,3 +50,10 @@ describe('offline illustrated Markdown', () => {
     expect(missing.text()).toContain('原图不可用')
   })
 })
+
+it('preserves an honest page range through rendered citation activation', async () => {
+  const wrapper = mount(MarkdownContent, { props: { content: '[文2（p2–3）](paper-source:p:1-2)' }, global: { stubs: { ElDialog: true } } })
+  await wrapper.get('a').trigger('keydown', { key: 'Enter' })
+  expect(wrapper.emitted('open-source')?.[0]?.[0]).toEqual({ label: '文2（p2–3）', paperId: 'p', startPage: 1, endPage: 2 })
+  wrapper.unmount()
+})

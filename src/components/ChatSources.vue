@@ -11,6 +11,15 @@
         </el-select>
       </div>
       <div class="left-subheader"><span>选择本次问答的论文</span><span class="selected-count tabular-nums">{{ selectedPaperIds.length }} 已选</span></div>
+      <section v-if="selectedPaperIds.length" class="selected-papers" aria-label="已选论文">
+        <h3>已选论文（所有知识库）</h3>
+        <ul>
+          <li v-for="paper in selectedPapers" :key="paper.id">
+            <span>{{ paper.title }}</span>
+            <button type="button" :aria-label="'移除论文 ' + paper.id" @click="emit('toggle-paper', paper.id)">移除</button>
+          </li>
+        </ul>
+      </section>
       <el-scrollbar class="paper-list">
         <div v-for="p in kbPapers" :key="p.id" class="paper-list-item" :class="{ selected: selectedPaperIds.includes(p.id) }">
           <el-checkbox :model-value="selectedPaperIds.includes(p.id)" :aria-label="'选择论文 ' + (p.title || p.fileName)" @change="emit('toggle-paper', p.id)">
@@ -65,11 +74,21 @@ const emit = defineEmits<{
 }>()
 const paperStore = usePaperStore()
 const chatStore = useChatStore()
+const selectedPapers = computed(() => props.selectedPaperIds.map(id => {
+  const paper = paperStore.papers.find(record => record.id === id)
+  return { id, title: paper ? paper.title || paper.fileName || id : `论文记录已缺失（${id}）` }
+}))
 const kbPapers = computed(() => paperStore.getPapersByKb(props.activeKbId).value)
 const allConversations = computed(() => chatStore.conversations)
 </script>
 
 <style scoped>
+.selected-papers { margin: 0 20px 12px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; max-height: 200px; overflow-y: auto; font-size: 11px; }
+.selected-papers h3 { font-size: 11px; font-weight: 500; color: var(--text-muted); margin-bottom: 8px; }
+.selected-papers ul { list-style: none; padding: 0; margin: 0; }
+.selected-papers li { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; }
+.selected-papers li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.selected-papers button { flex-shrink: 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; }
 .chat-sources { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-base); }
 .left-header { padding: 26px 20px 14px; }
 .source-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }

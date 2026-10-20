@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '22'
 
 jobs:
   build:
@@ -84,7 +84,7 @@ jobs:
               ;;
             win32-*)
               SRC=$(ls "$OUTDIR"/*.exe | head -1)
-              DEST="${app}-${TAG}-${{ matrix.name }}.exe"
+              DEST="${APP}-${TAG}-${{ matrix.name }}.exe"
               ;;
           esac
 

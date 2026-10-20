@@ -7,6 +7,7 @@ export interface DoclingSettings {
   formula: boolean
 }
 export interface SourceRegion { page: number; x: number; y: number; width: number; height: number }
+export interface TextProvenance { page: number; start: number; end: number; region?: SourceRegion }
 export interface DocumentCell { text: string; region: SourceRegion }
 export interface DocumentImage { page?: number; data?: string; assetId?: string }
 export interface DocumentItem {
@@ -16,6 +17,7 @@ export interface DocumentItem {
   caption: string
   pages: number[]
   regions: SourceRegion[]
+  provenance?: TextProvenance[]
   captionRegions?: SourceRegion[]
   inBody?: boolean
   cells?: DocumentCell[]
@@ -79,6 +81,11 @@ export function isParsedDocument(value: unknown): value is ParsedDocument {
           && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001)
         && (i.captionRegions === undefined || Array.isArray(i.captionRegions) && i.captionRegions.every((r: SourceRegion) => r && Number.isInteger(r.page) && r.page >= 0
           && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001))
+        && (i.provenance === undefined || Array.isArray(i.provenance) && i.provenance.every((p: TextProvenance) =>
+          p && Number.isInteger(p.page) && i.pages.includes(p.page) && Number.isInteger(p.start) && Number.isInteger(p.end)
+          && p.start >= 0 && p.end > p.start && p.end <= i.text.length
+          && (p.region === undefined || p.region.page === p.page && i.regions.some((r: SourceRegion) =>
+            (['page', 'x', 'y', 'width', 'height'] as const).every(key => r[key] === p.region![key])))))
         && (i.inBody === undefined || typeof i.inBody === 'boolean')
         && (i.cells === undefined || Array.isArray(i.cells) && i.kind === 'table' && i.cells.every((cell: DocumentCell) =>
           cell && typeof cell.text === 'string' && cell.region && Number.isInteger(cell.region.page) && cell.region.page >= 0
@@ -167,7 +174,18 @@ export function normalizeDoclingDocument(input: unknown): ParsedDocument {
       }
     }
     if (!text && !caption && kind === 'text') return
+    // Docling offsets count Unicode code points; renderer offsets use UTF-16.
+    const characters = Array.from(text)
+    const provenance: TextProvenance[] = kind === 'table' ? [] : list(raw.prov).flatMap(p => {
+      const [start, end] = list(p?.charspan)
+      if (!Number.isInteger(p?.page_no) || p.page_no < 1 || !Number.isInteger(start) || !Number.isInteger(end)
+        || start < 0 || end <= start || end > characters.length) return []
+      const region = regions({ prov: [p] })[0]
+      return [{ page: p.page_no - 1, start: characters.slice(0, start).join('').length,
+        end: characters.slice(0, end).join('').length, ...(region ? { region } : {}) }]
+    })
     const item: DocumentItem = { id: `${kind}-${counts[kind] + 1}`, kind, text, caption, pages, regions: kind === 'picture' ? pictureRegions : regions(raw), images,
+      ...(provenance.length ? { provenance } : {}),
       ...(kind === 'picture' ? { captionRegions, inBody } : {}),
       ...(cells.length ? { cells } : {}) }
     if (kind === 'picture' && !isEligibleFigure(item)) return

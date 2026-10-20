@@ -53,6 +53,7 @@ const db: DbApi = {
     remove: (id: string) => invoke('paper:remove', id),
     readFile: (id: string) => invoke('paper:readFile', id),
     contentUrl: (id: string) => invoke('paper:contentUrl', id),
+    restoreFile: (id: string, fileData: string) => invoke('paper:restoreFile', id, fileData),
   },
   chat: {
     listConversations: () => invoke('chat:listConversations'),

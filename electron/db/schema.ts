@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- Private commit markers coordinate SQLite with the reversible PDF journal.
+-- Recovery removes these after the matching file operation has been finalized.
+CREATE TABLE IF NOT EXISTS paper_file_transactions (
+  id TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS paper_indexes (
   paper_id   TEXT PRIMARY KEY,
   index_json TEXT NOT NULL,
