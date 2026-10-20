@@ -8,7 +8,8 @@ import { pathToFileURL } from 'url'
 import { isAllowedExternalUrl, isAllowedPreviewUrl } from '../src/utils/webPreviewUrl'
 import type { PreviewBounds, PreviewSnapshot, PreviewState } from '../src/types/webPreview'
 
-const PREVIEW_PARTITION = 'papermind-preview'
+// Keep Chromium's resource cache across app restarts, isolated from app pages.
+const PREVIEW_PARTITION = 'persist:papermind-preview'
 const CACHED_PARTITION = 'papermind-cached-preview'
 const controllers = new WeakMap<BrowserWindow, PreviewController>()
 const configuredSessions = new WeakSet<Session>()
@@ -405,6 +406,17 @@ export function registerPreviewWindow(win: BrowserWindow): PreviewController {
 export function unregisterPreviewWindow(win: BrowserWindow) {
   controllers.get(win)?.close()
   controllers.delete(win)
+}
+
+export async function clearPreviewData(): Promise<void> {
+  // Stop active pages before clearing so in-flight requests cannot refill the cache.
+  for (const win of BrowserWindow.getAllWindows()) controllers.get(win)?.close()
+  const previewSession = session.fromPartition(PREVIEW_PARTITION)
+  await Promise.all([
+    previewSession.clearCache(),
+    previewSession.clearStorageData(),
+    previewSession.clearCodeCaches({}),
+  ])
 }
 
 export function previewControllerForSender(sender: WebContents): PreviewController {

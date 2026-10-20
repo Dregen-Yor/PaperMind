@@ -9,10 +9,19 @@ import { createHash } from 'crypto'
 const appPath = vi.hoisted(() => ({
   userData: '',
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
+  browserData: new Map<string, { cache: string[]; storage: string[]; codeCache: string[] }>(),
 }))
 vi.mock('electron', () => ({
   app: { getPath: () => appPath.userData },
   ipcMain: { handle: (channel: string, handler: (...args: unknown[]) => unknown) => appPath.handlers.set(channel, handler) },
+  BrowserWindow: { getAllWindows: () => [] },
+  session: {
+    fromPartition: (partition: string) => ({
+      clearCache: async () => { appPath.browserData.get(partition)!.cache = [] },
+      clearStorageData: async () => { appPath.browserData.get(partition)!.storage = [] },
+      clearCodeCaches: async () => { appPath.browserData.get(partition)!.codeCache = [] },
+    }),
+  },
 }))
 
 import { clearAll, exportAll, getWebQaRepository, importAll, initDb, paperApi } from '../../electron/db'
@@ -168,5 +177,14 @@ describe('same backup import task before and after IPC boundary changes', () => 
     try {
       expect((direct.prepare('SELECT id FROM papers ORDER BY id').all() as Array<{ id: string }>).map(row => row.id)).toEqual(before)
     } finally { direct.close() }
+  })
+
+  it('clears persistent webpage resources and site storage with application data without touching other sessions', async () => {
+    appPath.browserData.set('persist:papermind-preview', { cache: ['article.css'], storage: ['site-cookie'], codeCache: ['article.js'] })
+    appPath.browserData.set('unrelated', { cache: ['keep.css'], storage: ['keep-cookie'], codeCache: ['keep.js'] })
+    await appPath.handlers.get('data:clear')!({})
+    expect(appPath.browserData.get('persist:papermind-preview')).toEqual({ cache: [], storage: [], codeCache: [] })
+    expect(appPath.browserData.get('unrelated')).toEqual({ cache: ['keep.css'], storage: ['keep-cookie'], codeCache: ['keep.js'] })
+    expect(getWebQaRepository().listPages()).toEqual([])
   })
 })

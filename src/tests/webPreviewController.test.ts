@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'crypto'
 import { readFileSync, writeFileSync } from 'fs'
 import type { BrowserWindow } from 'electron'
-import { previewControllerForSender, registerPreviewWindow, unregisterPreviewWindow } from '../../electron/webPreview'
+import { clearPreviewData, previewControllerForSender, registerPreviewWindow, unregisterPreviewWindow } from '../../electron/webPreview'
 
 const fake = vi.hoisted(() => ({
   views: [] as any[],
@@ -12,16 +12,25 @@ const fake = vi.hoisted(() => ({
   requestHandlers: [] as Array<(details: { url: string; resourceType: string }, callback: (result: { cancel: boolean }) => void) => void>,
   externalOpen: vi.fn(async (_url: string) => {}),
   windowBySender: new Map<object, object>(),
+  clearingStartedWithLivePage: false,
 }))
 
 vi.mock('electron', () => ({
-  BrowserWindow: { fromWebContents: (sender: object) => fake.windowBySender.get(sender) ?? null },
+  BrowserWindow: {
+    fromWebContents: (sender: object) => fake.windowBySender.get(sender) ?? null,
+    getAllWindows: () => [...fake.windowBySender.values()],
+  },
   session: {
     fromPartition: () => ({
       setPermissionRequestHandler: (handler: typeof fake.permissionHandler) => { fake.permissionHandler = handler },
       setPermissionCheckHandler: (handler: typeof fake.permissionCheckHandler) => { fake.permissionCheckHandler = handler },
       on: (name: string, handler: (...args: any[]) => void) => { fake.sessionHandlers.set(name, handler) },
       webRequest: { onBeforeRequest: (handler: typeof fake.requestHandlers[number]) => { fake.requestHandlers.push(handler) } },
+      clearCache: async () => {
+        fake.clearingStartedWithLivePage = fake.views.some(view => !view.webContents.isDestroyed())
+      },
+      clearStorageData: async () => {},
+      clearCodeCaches: async () => {},
     }),
   },
   shell: { openExternal: fake.externalOpen },
@@ -83,9 +92,18 @@ beforeEach(() => {
   fake.permissionCheckHandler = undefined
   fake.externalOpen.mockClear()
   fake.windowBySender.clear()
+  fake.clearingStartedWithLivePage = false
 })
 
 describe('isolated HTML preview controller', () => {
+  it('closes active web pages before clearing browser data so requests cannot refill the cache', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/start', { x: 0, y: 0, width: 600, height: 400 })
+    await clearPreviewData()
+    expect(fake.clearingStartedWithLivePage).toBe(false)
+    expect(fake.views[0].webContents.isDestroyed()).toBe(true)
+    expect(controller.getState()).toMatchObject({ visible: false, loading: false, url: '' })
+  })
   it('releases child views after the owning window is destroyed without using its native view or IPC', async () => {
     const win = appWindow()
     const controller = registerPreviewWindow(win)

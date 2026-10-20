@@ -6,7 +6,7 @@ import { createDoclingFacade } from './docling'
 import { testDoclingConnection } from './doclingClient'
 import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
 import { backupFileName } from '../src/utils/exportSanitize'
-import { previewControllerForSender } from './webPreview'
+import { clearPreviewData, previewControllerForSender } from './webPreview'
 import { paperContentUrl } from './paperProtocol'
 import type { IpcHandlers } from '../src/types/ipcContract'
 
@@ -111,7 +111,10 @@ export function registerIpc() {
       writeFileSync(filePath, JSON.stringify(exportAll({ includeApiKey: !!opts?.includeApiKey }), null, 2))
       return { canceled: false, filePath }
     },
-    'data:clear': () => clearAll(),
+    'data:clear': async () => {
+      clearAll()
+      await clearPreviewData()
+    },
     'data:import': (_e, data) => importAll(data),
     // paper indexes (PageIndex RAG)
     'index:list': () => indexApi.list(),
