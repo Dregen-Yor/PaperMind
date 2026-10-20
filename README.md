@@ -23,7 +23,7 @@ PaperMind 是一个跑在你电脑上的论文阅读工作台：左侧读 PDF，
 
 ## 快速开始
 
-**前置依赖**：Node.js `20.19+ / 22.13+ / 24+`，npm 10
+**前置依赖**：Node.js `22.14+ / 24+`，npm 10。SQLite 原生依赖需要 Node-API 10，不能使用 Node.js 20。
 
 ```bash
 # 安装依赖（自动为 Electron 重建 better-sqlite3）
