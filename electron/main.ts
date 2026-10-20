@@ -39,9 +39,11 @@ const createWindow = () => {
     },
   })
   mainWindow = win
-  win.on('closed', () => { mainWindow = null })
+  win.on('closed', () => {
+    unregisterPreviewWindow(win)
+    mainWindow = null
+  })
   registerPreviewWindow(win)
-  win.on('close', () => unregisterPreviewWindow(win))
 
   const openExternalUrl = (url: string) => {
     try {

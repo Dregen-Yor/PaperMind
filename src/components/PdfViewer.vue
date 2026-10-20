@@ -5,7 +5,7 @@
         <el-button size="small" text @click="prevPage" :disabled="currentPage <= 1" aria-label="上一页" title="上一页">
           <el-icon><ArrowUp /></el-icon>
         </el-button>
-        <span class="page-indicator"><span class="page-current">{{ currentPage }}</span><span class="page-total"> / {{ totalPages }} 页</span></span>
+        <span class="page-indicator"><input class="page-current page-input" v-model="pageInput" type="text" inputmode="numeric" aria-label="跳转到页码" :aria-invalid="!!pageInputError" :disabled="!totalPages" @keydown.enter.prevent="submitPage" @blur="resetPageInput" /><span class="page-total"> / {{ totalPages }} 页</span></span>
         <el-button size="small" text @click="nextPage" :disabled="currentPage >= totalPages" aria-label="下一页" title="下一页">
           <el-icon><ArrowDown /></el-icon>
         </el-button>
@@ -16,6 +16,8 @@
         <el-button size="small" text @click="zoomIn" aria-label="放大论文" title="放大"><el-icon><ZoomIn /></el-icon></el-button>
       </div>
     </div>
+
+    <div v-if="pageInputError" class="page-input-error" role="alert">{{ pageInputError }}</div>
 
     <div class="pdf-scroll" ref="scrollRef" tabindex="0" aria-label="可滚动的 PDF 原文">
       <div class="pdf-pages" ref="pagesRef" />
@@ -50,6 +52,7 @@ import { ArrowUp, ArrowDown, ZoomIn, ZoomOut, ChatLineSquare, EditPen, Delete } 
 import { usePaperStore, type Highlight } from '../stores/paper'
 import { mergeSegments, type HighlightSegment } from '../utils/highlightMerge'
 import { getHighlightRects, getTextNodes, type HighlightRect } from '../utils/pdfHighlight'
+import { readReadingPosition, saveReadingPosition, type ReadingPosition } from '../utils/readingPosition'
 import { findEvidenceRanges } from '../utils/pdfEvidence'
 import { validEvidenceRegion, type SourceRef } from '../utils/sourceRef'
 
@@ -64,6 +67,9 @@ const scrollRef = ref<HTMLElement>()
 const pagesRef = ref<HTMLElement>()
 const popupRef = ref<HTMLElement>()
 const currentPage = ref(1)
+const pageInput = ref('1')
+const pageInputError = ref('')
+watch(currentPage, page => { pageInput.value = String(page); pageInputError.value = '' })
 const totalPages = ref(0)
 const scale = ref(1)
 let fitOnNextRender = true
@@ -94,6 +100,10 @@ let pdfDoc: any = null
 let loadingTask: any = null
 interface PageLayout { num: number; top: number; height: number; div: HTMLElement }
 let pageLayouts: PageLayout[] = []
+let layoutReady = false
+let loadedPaperId = ''
+let positionTimer: ReturnType<typeof setTimeout> | undefined
+let navigationVersion = 0
 let pageQueue: number[] = []
 const queuedPages = new Set<number>()
 const renderingPages = new Set<number>()
@@ -213,8 +223,9 @@ async function renderPdf() {
   queuedPages.clear()
   renderingPages.clear()
   if (!pagesRef.value) return
-  const anchorPage = currentPage.value
+  const anchor = capturePosition()
   const preservePosition = pageLayouts.length > 0
+  layoutReady = false
   pageLayouts = []
   pagesRef.value.innerHTML = ''
   if (!pdfDoc) return
@@ -247,8 +258,14 @@ async function renderPdf() {
     // Start the first visible page while dimensions for later pages load.
     if (n === 1 && !preservePosition) queuePage(1, true)
   }
-  if (preservePosition && scrollRef.value) {
-    scrollRef.value.scrollTop = pageLayouts[Math.min(anchorPage - 1, pageLayouts.length - 1)]?.top ?? 0
+  layoutReady = true
+  const position = preservePosition ? anchor : readReadingPosition(loadedPaperId, totalPages.value)
+  if (position && scrollRef.value) {
+    const layout = pageLayouts[position.page - 1]
+    if (layout) {
+      scrollRef.value.scrollTop = layout.top + layout.height * position.offset
+      currentPage.value = layout.num
+    }
   }
   scheduleNearbyPages()
 }
@@ -373,36 +390,74 @@ async function renderPage(num: number, generation: number) {
   if (activeEvidence?.startPage === num - 1) paintEvidence(pageDiv, activeEvidence)
 }
 
+function capturePosition(): ReadingPosition | null {
+  if (!scrollRef.value || !pageLayouts.length) return null
+  const top = scrollRef.value.scrollTop
+  const layout = [...pageLayouts].reverse().find(page => page.top <= top) ?? pageLayouts[0]!
+  return { page: layout.num, offset: Math.max(0, Math.min(1, (top - layout.top) / layout.height)) }
+}
+
+function persistPosition() {
+  if (positionTimer !== undefined) clearTimeout(positionTimer)
+  positionTimer = undefined
+  const position = layoutReady ? capturePosition() : null
+  if (loadedPaperId && position) saveReadingPosition(loadedPaperId, position)
+}
+
 function onScroll() {
   closePopup()
-  if (!scrollRef.value) return
+  if (!scrollRef.value || !layoutReady) return
   const scrollTop = scrollRef.value.scrollTop
   const center = scrollTop + (scrollRef.value.clientHeight || 800) / 2
   for (const page of pageLayouts) {
     if (page.top <= center) currentPage.value = page.num
   }
+  if (positionTimer !== undefined) clearTimeout(positionTimer)
+  positionTimer = setTimeout(persistPosition, 200)
   scheduleNearbyPages()
   trimDistantPages()
 }
 
-async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
-  const flash = opts.flash ?? true
-  const pages = pagesRef.value
-  if (!pages) return
-  // 目标页可能尚未渲染完成（首次打开、缩放重排、跨论文跳转），轮询等待而不是静默失败
-  const deadline = Date.now() + 5000
-  let el = pages.querySelector<HTMLElement>(`[data-page="${num}"]`)
-  while (!el && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 60))
-    el = pages.querySelector<HTMLElement>(`[data-page="${num}"]`)
+function resetPageInput() {
+  pageInput.value = String(currentPage.value)
+  pageInputError.value = ''
+}
+
+function submitPage() {
+  const value = pageInput.value.trim()
+  const page = Number(value)
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(page) || page < 1 || page > totalPages.value) {
+    pageInputError.value = `请输入 1–${totalPages.value} 之间的整数页码`
+    return
   }
-  if (!el) return
+  pageInputError.value = ''
+  void scrollToPage(page)
+}
+
+async function scrollToPage(num: number, opts: { flash?: boolean } = {}) {
+  if (!Number.isSafeInteger(num) || num < 1) return
+  const generation = documentGeneration
+  const navigation = ++navigationVersion
+  const flash = opts.flash ?? true
+  const deadline = Date.now() + 5000
+  while (!layoutReady && Date.now() < deadline) {
+    if (generation !== documentGeneration || navigation !== navigationVersion) return
+    await new Promise(resolve => setTimeout(resolve, 60))
+  }
+  if (!layoutReady || generation !== documentGeneration || navigation !== navigationVersion) return
+  num = Math.min(num, totalPages.value)
+  const layout = pageLayouts[num - 1]
+  if (!layout || !scrollRef.value) return
   currentPage.value = num
+  pageInput.value = String(num)
   queuePage(num, true)
-  el.scrollIntoView({ behavior: 'smooth' })
+  scrollRef.value.scrollTop = layout.top
+  persistPosition()
+  scheduleNearbyPages()
+  trimDistantPages()
   if (flash) {
-    el.classList.add('page-flash')
-    setTimeout(() => el.classList.remove('page-flash'), 1400)
+    layout.div.classList.add('page-flash')
+    setTimeout(() => layout.div.classList.remove('page-flash'), 1400)
   }
 }
 
@@ -652,6 +707,9 @@ async function highlightSelection() {
 }
 
 async function loadDocument() {
+  persistPosition()
+  loadedPaperId = props.paperId
+  layoutReady = false
   const generation = ++documentGeneration
   renderGeneration++
   for (const task of activeRenderTasks) task.cancel?.()
@@ -666,6 +724,10 @@ async function loadDocument() {
   queuedPages.clear()
   pagesRef.value?.replaceChildren()
   currentPage.value = 1
+  pageInput.value = '1'
+  pageInputError.value = ''
+  totalPages.value = 0
+  if (scrollRef.value) scrollRef.value.scrollTop = 0
   closePopup()
   dismissFeedback()
   highlightBusy.value = true
@@ -721,6 +783,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  persistPosition()
   documentGeneration++
   renderGeneration++
   for (const task of activeRenderTasks) task.cancel?.()
@@ -776,6 +839,9 @@ defineExpose({ scrollToPage, scrollToEvidence })
 }
 
 .pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 22px; width: max-content; min-width: 100%; margin: 0 auto; }
+.page-input { width: 38px; min-width: 0; padding: 3px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-base); font: inherit; text-align: center; }
+.page-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.page-input-error { padding: 5px 18px; color: var(--danger); font-size: 12px; }
 .page-current { color: var(--text-primary); }
 .page-total { color: var(--text-muted); }
 .fit-button { padding: 5px; background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }

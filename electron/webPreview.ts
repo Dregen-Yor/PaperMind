@@ -61,7 +61,7 @@ export class PreviewController {
     const history = this.view?.webContents.navigationHistory
     this.state.canGoBack = history?.canGoBack() ?? false
     this.state.canGoForward = history?.canGoForward() ?? false
-    this.win.webContents.send('preview:state', this.getState())
+    if (!this.win.isDestroyed()) this.win.webContents.send('preview:state', this.getState())
   }
 
   private attach() {
@@ -72,7 +72,7 @@ export class PreviewController {
 
   private detach() {
     if (!this.view || !this.attached) return
-    this.win.contentView.removeChildView(this.view)
+    if (!this.win.isDestroyed()) this.win.contentView.removeChildView(this.view)
     this.attached = false
   }
 
@@ -90,7 +90,7 @@ export class PreviewController {
   private clearCached() {
     const view = this.cachedView
     if (view) {
-      this.win.contentView.removeChildView(view)
+      if (!this.win.isDestroyed()) this.win.contentView.removeChildView(view)
       if (!view.webContents.isDestroyed()) view.webContents.close()
     }
     this.cachedView = null

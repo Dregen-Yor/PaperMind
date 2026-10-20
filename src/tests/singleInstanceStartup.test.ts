@@ -74,6 +74,17 @@ async function ready() {
 }
 
 describe('single instance main process startup', () => {
+  it('keeps preview registration if beforeunload cancels close and releases it only on closed', async () => {
+    await import('../../electron/main')
+    await ready()
+    const { unregisterPreviewWindow } = await import('../../electron/webPreview')
+    const win = startup.windows[0]
+    // close is cancellable; the still-open window must retain its IPC owner.
+    win.listeners.get('close')?.()
+    expect(unregisterPreviewWindow).not.toHaveBeenCalled()
+    win.listeners.get('closed')?.()
+    expect(unregisterPreviewWindow).toHaveBeenCalledWith(win)
+  })
   it('quits a losing instance without initializing the database, IPC, protocol handler or window', async () => {
     startup.requestLock.mockReturnValue(false)
     await import('../../electron/main')

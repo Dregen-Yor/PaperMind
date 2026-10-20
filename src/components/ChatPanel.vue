@@ -1,6 +1,6 @@
 <template>
   <div class="chat-panel">
-    <div class="chat-messages" ref="messagesRef" aria-live="polite">
+    <div class="chat-messages" ref="messagesRef" aria-live="polite" @scroll="onScroll">
       <div v-if="!conversation || conversation.messages.length === 0" class="chat-empty">
         <img class="empty-visual" :src="paperMindMark" alt="" />
         <h2 class="font-display">{{ conversation ? '读到这里，想问些什么？' : '与论文展开对话' }}</h2>
@@ -64,6 +64,7 @@
       </div>
     </div>
 
+    <button v-if="!following" type="button" class="back-to-bottom" aria-label="回到底部" @click="scrollToBottom(true)">回到底部 ↓</button>
     <div class="composer-wrap">
       <div class="chat-input-area">
         <div v-if="pendingContext.length" class="context-chips">
@@ -84,13 +85,13 @@
           :disabled="!conversation"
           :placeholder="conversation ? '围绕论文提问…' : '新建对话后，即可在这里提问…'"
           aria-label="输入问题"
-          @keydown.enter.exact="handleEnter"
+          @keydown.enter="handleEnter"
         />
         <div class="composer-footer">
           <span class="composer-model" :title="chatStore.chatProfile?.model"><el-icon aria-hidden="true"><Cpu /></el-icon>{{ chatStore.chatProfile?.name || '对话模型' }}</span>
           <span class="input-hint">Enter 发送<span class="newline-hint">，Shift + Enter 换行</span></span>
           <el-button v-if="isRunActive" size="small" text aria-label="停止生成" @click="stopRun">停止</el-button>
-          <el-button type="primary" :loading="loading" :disabled="!input.trim() || !conversation" aria-label="发送消息" @click="send" class="send-btn"><el-icon><Top /></el-icon></el-button>
+          <el-button type="primary" :loading="loading" :disabled="!input.trim() || !conversation || isRunActive" aria-label="发送消息" @click="send" class="send-btn"><el-icon><Top /></el-icon></el-button>
         </div>
       </div>
     </div>
@@ -98,7 +99,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { useChatScroll } from '../utils/chatScroll'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Link, Document, Close, Top, ArrowRight, Cpu } from '@element-plus/icons-vue'
@@ -135,6 +137,7 @@ function choosePrompt(question: string) {
 }
 const loading = computed(() => !!props.conversation && draftStore.sending.has(props.conversation.id))
 const messagesRef = ref<HTMLElement>()
+const { following, onScroll, scrollToBottom } = useChatScroll(messagesRef)
 const pendingContext = computed(() => props.conversation
   ? draftStore.read(props.conversation.id)?.contexts.map(context => context.text) ?? [] : [])
 /** 已有流式气泡时打字点让位：同一条回答不能同时出现两个「正在生成」 */
@@ -163,21 +166,13 @@ function removeContext(index: number) {
 }
 defineExpose({ addContext })
 
-async function scrollToBottom() {
-  await nextTick()
-  if (messagesRef.value) messagesRef.value.scrollTop = messagesRef.value.scrollHeight
-}
-
-watch(() => props.conversation?.messages.length, scrollToBottom)
-// 流式增量不改变消息条数，按末条消息的内容长度跟随滚动
-watch(() => props.conversation?.messages.at(-1)?.content.length ?? 0, () => {
-  if (loading.value) scrollToBottom()
-})
+watch(() => props.conversation?.id, () => { void scrollToBottom(true) }, { immediate: true })
+watch(() => [props.conversation?.messages.length, props.conversation?.messages.at(-1)?.content.length], () => { void scrollToBottom() })
 
 function handleEnter(event: KeyboardEvent) {
   // Enter confirms the current candidate while an IME is composing. It must
   // not submit the message until composition has finished.
-  if (event.isComposing || event.keyCode === 229) return
+  if (event.shiftKey || event.isComposing || event.keyCode === 229) return
   event.preventDefault()
   send()
 }
@@ -208,7 +203,7 @@ async function continueMsg(msg: { id: string }) {
 }
 
 async function send() {
-  if (loading.value) return
+  if (loading.value || isRunActive.value) return
   if (!input.value.trim() || !props.conversation) {
     if (!props.conversation) ElMessage.warning('请先选择或创建对话')
     return
@@ -219,7 +214,7 @@ async function send() {
   const message = submitted.input.trim()
   const previousMessages = new Set(conversation.messages.map(item => item.id))
   draftStore.setSending(conversation.id, true)
-  await scrollToBottom()
+  await scrollToBottom(true)
 
   try {
     await chatStore.sendMessage(conversation.id, message, context || undefined, () => {
@@ -238,6 +233,7 @@ async function send() {
 </script>
 
 <style scoped>
+.back-to-bottom { align-self: center; margin: 6px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-base); color: var(--accent); cursor: pointer; font-size: 12px; }
 .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg-surface); }
 .chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 24px; display: flex; flex-direction: column; gap: 28px; }
 .chat-empty { width: 100%; max-width: 380px; margin: auto; padding: 20px 0; display: flex; flex-direction: column; align-items: center; text-align: center; }

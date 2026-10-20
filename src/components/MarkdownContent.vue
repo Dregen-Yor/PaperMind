@@ -63,10 +63,11 @@ function activate(event: Event) {
   if (source && root.value?.contains(source)) {
     event.preventDefault()
     const page = Number(source.dataset.page)
+    const end = Number(source.dataset.endPage ?? page)
     if (source.dataset.paperId && Number.isSafeInteger(page) && page >= 0) {
       const values = source.dataset.region?.split(',').map(Number)
       const region = values?.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : undefined
-      emit('open-source', { label: source.textContent || `p${page + 1}`, paperId: source.dataset.paperId, startPage: page, endPage: page,
+      emit('open-source', { label: source.textContent || `p${page + 1}`, paperId: source.dataset.paperId, startPage: page, endPage: Number.isSafeInteger(end) && end >= page ? end : page,
         ...(validEvidenceRegion(region) ? { region } : {}), ...(source.dataset.quote ? { quote: source.dataset.quote } : {}) })
     }
     return

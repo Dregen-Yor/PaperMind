@@ -27,3 +27,15 @@ describe('来源归一（#1）', () => {
       .toEqual([{ label: 'ok' }])
   })
 })
+
+it('round trips page ranges through href and route queries without changing single-page URLs', async () => {
+  const { evidenceHref, parseEvidenceHref } = await import('../utils/sourceRef')
+  expect(evidenceHref('p', 1)).toBe('paper-source:p:1')
+  const region = { x: .1, y: .2, width: .3, height: .4 }
+  expect(parseEvidenceHref(evidenceHref('p', 1, region, 'quote'))).toMatchObject({ startPage: 1, endPage: 1, region, quote: 'quote' })
+  expect(parseEvidenceHref(evidenceHref('p', 1, undefined, '', 3))).toMatchObject({ startPage: 1, endPage: 3 })
+  expect(parseEvidenceHref('paper-source:p:3-1')).toBeNull()
+  const query = sourceRouteQuery({ label: 'range', paperId: 'p', startPage: 1, endPage: 3 })
+  expect(query).toEqual({ page: '2', endPage: '4' })
+  expect(sourceFromRouteQuery('p', query)).toMatchObject({ startPage: 1, endPage: 3 })
+})

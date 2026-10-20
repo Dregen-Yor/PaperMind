@@ -18,8 +18,8 @@ export function validEvidenceRegion(value: unknown): value is EvidenceRegion {
     && x + width <= 1.00001 && y + height <= 1.00001
 }
 
-export function evidenceHref(paperId: string, page: number, region?: EvidenceRegion, quote = ''): string {
-  const base = `paper-source:${encodeURIComponent(paperId)}:${page}`
+export function evidenceHref(paperId: string, page: number, region?: EvidenceRegion, quote = '', endPage = page): string {
+  const base = `paper-source:${encodeURIComponent(paperId)}:${page}${Number.isSafeInteger(endPage) && endPage > page ? `-${endPage}` : ''}`
   if (!validEvidenceRegion(region) && !quote) return base
   const box = validEvidenceRegion(region) ? [region.x, region.y, region.width, region.height].map(n => Number(n.toFixed(4))).join(',') : '-'
   // Markdown destinations treat parentheses as syntax, but encodeURIComponent leaves them bare.
@@ -29,23 +29,24 @@ export function evidenceHref(paperId: string, page: number, region?: EvidenceReg
 }
 
 export function parseEvidenceHref(href: string): Pick<SourceRef, 'paperId' | 'startPage' | 'endPage' | 'region' | 'quote'> | null {
-  const match = /^paper-source:([^:]+):(\d+)(?::([\d.,-]+):([^:]*))?$/.exec(href)
+  const match = /^paper-source:([^:]+):(\d+(?:-\d+)?)(?::([\d.,-]+):([^:]*))?$/.exec(href)
   if (!match) return null
   try {
     const paperId = decodeURIComponent(match[1])
-    const page = Number(match[2])
-    if (!paperId || !Number.isSafeInteger(page) || page < 0) return null
+    const [page, endPage = page] = match[2].split('-').map(Number)
+    if (!paperId || !Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(endPage) || endPage < page) return null
     const values = match[3]?.split(',').map(Number)
     const region = values?.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : undefined
     if (match[3] && match[3] !== '-' && !validEvidenceRegion(region)) return null
     const quote = match[4] ? decodeURIComponent(match[4]) : ''
     if (quote.length > MAX_EVIDENCE_QUOTE || /[\u0000-\u001f]/.test(quote)) return null
-    return { paperId, startPage: page, endPage: page, ...(region ? { region } : {}), ...(quote ? { quote } : {}) }
+    return { paperId, startPage: page, endPage, ...(region ? { region } : {}), ...(quote ? { quote } : {}) }
   } catch { return null }
 }
 
 export function sourceRouteQuery(ref: SourceRef): Record<string, string> {
   const query: Record<string, string> = { page: String((ref.startPage ?? 0) + 1) }
+  if (Number.isSafeInteger(ref.endPage) && ref.endPage! > (ref.startPage ?? 0)) query.endPage = String(ref.endPage! + 1)
   if (validEvidenceRegion(ref.region)) query.region = [ref.region.x, ref.region.y, ref.region.width, ref.region.height].join(',')
   if (ref.quote) query.quote = ref.quote
   return query
@@ -55,6 +56,8 @@ export function sourceFromRouteQuery(paperId: string, query: Record<string, unkn
   const page = typeof query.page === 'string' ? Number(query.page) : NaN
   if (!Number.isSafeInteger(page) || page < 1) return null
   const ref: SourceRef = { label: `p${page}`, paperId, startPage: page - 1, endPage: page - 1 }
+  const endPage = typeof query.endPage === 'string' ? Number(query.endPage) : page
+  if (Number.isSafeInteger(endPage) && endPage >= page) ref.endPage = endPage - 1
   if (typeof query.region === 'string') {
     const values = query.region.split(',').map(Number)
     const region = values.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : undefined

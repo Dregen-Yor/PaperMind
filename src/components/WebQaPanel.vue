@@ -41,7 +41,7 @@
       <button type="button" @click="emit('new')">为当前网页新建问答</button>
     </div>
 
-    <div class="qa-scroll" aria-live="polite">
+    <div class="qa-scroll" ref="messagesRef" aria-live="polite" @scroll="onScroll">
       <div v-if="!session" class="empty-qa">
         <span class="empty-mark" aria-hidden="true">↗</span>
         <h3>从这篇网页开始提问</h3>
@@ -63,12 +63,13 @@
       </div>
     </div>
 
+    <button v-if="!following" type="button" class="back-to-bottom" aria-label="回到底部" @click="scrollToBottom(true)">回到底部 ↓</button>
     <div class="composer">
       <p v-if="error" class="composer-error" role="alert">{{ error }}</p>
       <p v-if="!session" class="privacy-note">提问会将已保存网页的完整 DOM 发送到所选模型服务，并在本机保存问答。</p>
-      <textarea v-model="draft" aria-label="问题输入框" rows="3" placeholder="问问这篇网页…" :disabled="busy || !canAsk" @keydown.meta.enter.prevent="submit" @keydown.ctrl.enter.prevent="submit" />
+      <textarea v-model="draft" aria-label="问题输入框" rows="3" placeholder="问问这篇网页…" :disabled="busy || !canAsk" @keydown.enter="handleEnter" />
       <div class="composer-footer">
-        <span>{{ busy ? '正在生成回答' : '⌘ / Ctrl + Enter 发送' }}</span>
+        <span>{{ busy ? '正在生成回答' : 'Enter 发送，Shift + Enter 换行' }}</span>
         <button v-if="busy" type="button" class="stop-button" data-action="stop-question" @click="emit('stop')">停止</button>
         <button v-else type="button" class="send-button" data-action="send-question" :disabled="!canAsk || !draft.trim()" @click="submit">发送问题 →</button>
       </div>
@@ -78,6 +79,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useChatScroll } from '../utils/chatScroll'
 import MarkdownContent from './MarkdownContent.vue'
 import type { WebPageSummary, WebQaMessage, WebQaSessionSummary } from '../types/webQa'
 
@@ -104,6 +106,10 @@ const emit = defineEmits<{
   'open-source': []
 }>()
 const draft = ref('')
+const messagesRef = ref<HTMLElement>()
+const { following, onScroll, scrollToBottom } = useChatScroll(messagesRef)
+watch(() => props.session?.id, () => { void scrollToBottom(true) }, { immediate: true })
+watch(() => [props.streamedText, props.session?.messages.length, props.session?.messages.at(-1)?.content], () => { void scrollToBottom() })
 const selectedPage = computed(() => props.pages?.find(page => page.id === props.selectedPageId))
 watch(() => [props.session?.id, props.session?.messages.at(-1)?.status] as const,
   ([id, status], [oldId, oldStatus]) => {
@@ -133,12 +139,23 @@ function onPageChange(event: Event) {
   const id = (event.target as HTMLSelectElement).value
   if (id) emit('select-page', id)
 }
-function submit() { if (!props.busy && props.canAsk && draft.value.trim()) emit('send', draft.value.trim()) }
+function handleEnter(event: KeyboardEvent) {
+  if (event.shiftKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  submit()
+}
+function submit() {
+  if (!props.busy && props.canAsk && draft.value.trim()) {
+    void scrollToBottom(true)
+    emit('send', draft.value.trim())
+  }
+}
 function clearDraft() { draft.value = '' }
 defineExpose({ clearDraft })
 </script>
 
 <style scoped>
+.back-to-bottom { align-self: center; margin: 6px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-base); color: var(--accent); cursor: pointer; font-size: 12px; }
 .web-qa-panel { display: flex; flex-direction: column; width: 100%; min-width: 0; height: 100%; min-height: 0; overflow: hidden; background: var(--bg-surface); color: var(--text-primary); }
 .qa-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 82px; padding: 14px 22px 12px; border-bottom: 1px solid var(--border); }
 .qa-eyebrow, .source-kicker { display: block; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .15em; }

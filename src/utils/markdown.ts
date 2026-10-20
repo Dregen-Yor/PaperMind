@@ -39,7 +39,7 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
     const source = parseEvidenceHref(href)
     if (source?.paperId && source.startPage !== undefined) {
       const box = source.region ? [source.region.x, source.region.y, source.region.width, source.region.height].join(',') : ''
-      return `<a class="paper-source" data-paper-id="${markdown.utils.escapeHtml(source.paperId)}" data-page="${source.startPage}"${box ? ` data-region="${box}"` : ''}${source.quote ? ` data-quote="${markdown.utils.escapeHtml(source.quote)}"` : ''} role="button" tabindex="0">`
+      return `<a class="paper-source" data-paper-id="${markdown.utils.escapeHtml(source.paperId)}" data-page="${source.startPage}"${source.endPage !== source.startPage ? ` data-end-page="${source.endPage}"` : ''}${box ? ` data-region="${box}"` : ''}${source.quote ? ` data-quote="${markdown.utils.escapeHtml(source.quote)}"` : ''} role="button" tabindex="0">`
     }
     token.attrSet('href', '')
   }

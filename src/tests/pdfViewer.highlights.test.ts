@@ -549,3 +549,61 @@ describe('PDF highlight cancellation', () => {
     expect(wrapper!.text()).toContain('保存高亮失败')
   })
 })
+
+describe('PDF reading position and direct page entry', () => {
+  beforeEach(() => {
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value) })
+    getDocument.mockImplementation(() => ({ promise: Promise.resolve({
+      numPages: 4,
+      getPage: async () => ({
+        getViewport: () => ({ width: 600, height: 800, scale: 1 }),
+        render: () => ({ promise: Promise.resolve() }),
+        getTextContent: async () => ({}),
+      }),
+    }) }))
+  })
+  it('restores the same paper page and relative page offset after reopening, while isolating another paper', async () => {
+    await openViewer()
+    const scroll = wrapper!.get('.pdf-scroll').element as HTMLElement
+    scroll.scrollTop = 1046 // page 2 starts at 846, 200px into its 800px height
+    await wrapper!.get('.pdf-scroll').trigger('scroll')
+    wrapper!.unmount()
+    wrapper = undefined
+    await openViewer()
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(1046)
+    expect((wrapper!.get('input[aria-label="跳转到页码"]').element as HTMLInputElement).value).toBe('2')
+    await wrapper!.setProps({ paperId: 'p2', src: '/other.pdf' })
+    await flushPromises()
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(0)
+  })
+  it('jumps on Enter and rejects blank, fractional and out-of-range page input', async () => {
+    await openViewer()
+    const input = wrapper!.get('input[aria-label="跳转到页码"]')
+    await input.setValue('3')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('3')
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(1668)
+    for (const invalid of ['', '1.5', '99', '0']) {
+      await input.setValue(invalid)
+      await input.trigger('keydown', { key: 'Enter' })
+      expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(1668)
+      expect(wrapper!.find('[role="alert"]').exists()).toBe(true)
+    }
+  })
+  it('gives explicit navigation priority over a saved position and clamps it to actual page count', async () => {
+    await openViewer()
+    const scroll = wrapper!.get('.pdf-scroll').element as HTMLElement
+    scroll.scrollTop = 2000
+    await wrapper!.get('.pdf-scroll').trigger('scroll')
+    wrapper!.unmount()
+    wrapper = undefined
+    await openViewer()
+    await (wrapper!.vm as any).scrollToPage(2)
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(846)
+    await (wrapper!.vm as any).scrollToPage(900)
+    expect((wrapper!.get('.pdf-scroll').element as HTMLElement).scrollTop).toBe(2490)
+  })
+})

@@ -66,6 +66,7 @@ vi.mock('electron', () => ({
 
 function appWindow() {
   const win = {
+    isDestroyed: vi.fn(() => false),
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     webContents: { send: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1000, height: 800 }),
@@ -85,6 +86,18 @@ beforeEach(() => {
 })
 
 describe('isolated HTML preview controller', () => {
+  it('releases child views after the owning window is destroyed without using its native view or IPC', async () => {
+    const win = appWindow()
+    const controller = registerPreviewWindow(win)
+    await controller.open('https://example.org/start', { x: 0, y: 0, width: 600, height: 400 })
+    vi.mocked(win.isDestroyed).mockReturnValue(true)
+    vi.mocked(win.webContents.send).mockClear()
+    vi.mocked(win.contentView.removeChildView).mockClear()
+    expect(() => unregisterPreviewWindow(win)).not.toThrow()
+    expect(win.webContents.send).not.toHaveBeenCalled()
+    expect(win.contentView.removeChildView).not.toHaveBeenCalled()
+    expect(fake.views[0].webContents.close).toHaveBeenCalledOnce()
+  })
   it('creates one isolated view and clamps its bounds to the application window', async () => {
     const win = appWindow()
     const controller = registerPreviewWindow(win)

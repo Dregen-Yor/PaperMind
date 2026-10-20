@@ -84,7 +84,7 @@ jobs:
               ;;
             win32-*)
               SRC=$(ls "$OUTDIR"/*.exe | head -1)
-              DEST="${app}-${TAG}-${{ matrix.name }}.exe"
+              DEST="${APP}-${TAG}-${{ matrix.name }}.exe"
               ;;
           esac
 

@@ -1,3 +1,4 @@
+import { readProviderStream } from '../utils/providerStreams'
 import { createEk5Store } from '../utils/ek5/store'
 import { defineStore } from 'pinia'
 import { useChatDraftStore } from './chatDrafts'
@@ -255,13 +256,6 @@ async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: num
   }
 }
 
-function cancelStreamOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): () => void {
-  const cancel = () => { void reader.cancel().catch(() => {}) }
-  signal?.addEventListener('abort', cancel, { once: true })
-  if (signal?.aborted) cancel()
-  return () => signal?.removeEventListener('abort', cancel)
-}
-
 const PROMPT_TEMPLATES = [
   { name: '逐段精读', prompt: '请逐段解析以下内容，解释关键概念、方法和结论。' },
   { name: '通俗解释', prompt: '请用通俗易懂的语言解释这段内容，假设我是该领域的初学者。' },
@@ -274,111 +268,6 @@ export { PROMPT_TEMPLATES }
 
 /** 流式请求整体上限（#6）：流式回答比非流式长，给更宽的预算。 */
 const LLM_STREAM_TIMEOUT_MS = 300_000
-
-/** 解析 OpenAI 兼容 SSE 流：增量回调 + 末尾 finish_reason（#6）。 */
-async function readOpenAiStream(res: Response, onToken: (token: string) => void, signal?: AbortSignal): Promise<{ content: string; truncated: boolean }> {
-  if (!res.body) throw new Error('流式响应不可用')
-  const reader = res.body.getReader()
-  const stopObserving = cancelStreamOnAbort(reader, signal)
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let content = ''
-  let truncated = false
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      signal?.throwIfAborted()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith('data:')) continue
-        const payload = trimmed.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
-        let parsed: any
-        try { parsed = JSON.parse(payload) } catch { continue }
-        const delta = parsed.choices?.[0]?.delta?.content
-        if (typeof delta === 'string' && delta) { content += delta; onToken(delta) }
-        if (parsed.choices?.[0]?.finish_reason === 'length') truncated = true
-      }
-    }
-  } finally { stopObserving() }
-  signal?.throwIfAborted()
-  if (!content.trim()) throw new Error('模型返回了空响应')
-  return { content, truncated }
-}
-
-/** 解析 Anthropic SSE 流（content_block_delta / message_delta）（#6）。 */
-async function readAnthropicStream(res: Response, onToken: (token: string) => void, signal?: AbortSignal): Promise<{ content: string; truncated: boolean }> {
-  if (!res.body) throw new Error('流式响应不可用')
-  const reader = res.body.getReader()
-  const stopObserving = cancelStreamOnAbort(reader, signal)
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let content = ''
-  let truncated = false
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      signal?.throwIfAborted()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith('data:')) continue
-        let parsed: any
-        try { parsed = JSON.parse(trimmed.slice(5).trim()) } catch { continue }
-        if (parsed.type === 'content_block_delta' && typeof parsed.delta?.text === 'string') {
-          content += parsed.delta.text
-          onToken(parsed.delta.text)
-        }
-        if (parsed.type === 'message_delta' && parsed.delta?.stop_reason === 'max_tokens') truncated = true
-      }
-    }
-  } finally { stopObserving() }
-  signal?.throwIfAborted()
-  if (!content.trim()) throw new Error('模型返回了空响应')
-  return { content, truncated }
-}
-
-/** 解析 Ollama NDJSON 流（#6）。 */
-async function readOllamaStream(res: Response, onToken: (token: string) => void, signal?: AbortSignal): Promise<{ content: string; truncated: boolean }> {
-  if (!res.body) throw new Error('流式响应不可用')
-  const reader = res.body.getReader()
-  const stopObserving = cancelStreamOnAbort(reader, signal)
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let content = ''
-  let truncated = false
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      signal?.throwIfAborted()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        let parsed: any
-        try { parsed = JSON.parse(trimmed) } catch { continue }
-        if (typeof parsed.message?.content === 'string' && parsed.message.content) {
-          content += parsed.message.content
-          onToken(parsed.message.content)
-        }
-        if (parsed.done && parsed.done_reason === 'length') truncated = true
-      }
-    }
-  } finally { stopObserving() }
-  signal?.throwIfAborted()
-  if (!content.trim()) throw new Error('模型返回了空响应')
-  return { content, truncated }
-}
 
 /** 本地推理端点通常不需要 API Key（LM Studio / vLLM / llama.cpp 等）。 */
 function isLocalEndpoint(baseUrl: string): boolean {
@@ -626,18 +515,18 @@ export const useChatStore = defineStore('chat', () => {
 
     if (profile.provider === 'ollama') {
       const body: Record<string, unknown> = { model: profile.model, messages, stream: !!opts.onToken }
-      // Ollama 用 `num_predict` 表达输出上限；不限制时整个 options 都不出现
-      const options: Record<string, number> = {}
+      // Ollama 用 num_predict 表达输出上限；0 时省略该字段，温度仍按配置发送
+      const options: Record<string, number> = { temperature: Number.isFinite(profile.temperature) ? Math.max(0, Math.min(2, profile.temperature)) : 0.7 }
       if (profile.topK > 0) options.top_k = profile.topK
       if (maxTokens > 0) options.num_predict = maxTokens
-      if (Object.keys(options).length > 0) body.options = options
+      body.options = options
       const res = await requestWithTimeout(`${profile.baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
-      if (opts.onToken) return readOllamaStream(res, opts.onToken, opts.signal)
+      if (opts.onToken) return readProviderStream(res, 'ollama', opts.onToken, opts.signal)
       const data = await res.json()
       if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
       return { content: data.message.content, truncated: data.done_reason === 'length' }
@@ -690,7 +579,7 @@ export const useChatStore = defineStore('chat', () => {
         requested = ANTHROPIC_LEGACY_MAX_TOKENS
         anthropicTokenCeilings.set(ceilingKey, ANTHROPIC_LEGACY_MAX_TOKENS)
       }
-      if (opts.onToken) return readAnthropicStream(res, opts.onToken, opts.signal)
+      if (opts.onToken) return readProviderStream(res, 'anthropic', opts.onToken, opts.signal)
       const data = await res.json()
       const content = data.content?.[0]?.text
       if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
@@ -715,7 +604,7 @@ export const useChatStore = defineStore('chat', () => {
       body: JSON.stringify(body),
     }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
-    if (opts.onToken) return readOpenAiStream(res, opts.onToken, opts.signal)
+    if (opts.onToken) return readProviderStream(res, 'openai', opts.onToken, opts.signal)
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content
     if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
@@ -1089,9 +978,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function queueRunPatch(run: ActiveChatRun, patch: Parameters<typeof updateMessage>[2]): Promise<void> {
+    if (activeChatRuns.get(run.conversationId)?.id !== run.id) return Promise.resolve()
     Object.assign(run.assistant, patch)
     // A failed partial write must not prevent the terminal status from being saved.
-    run.writes = run.writes.catch(() => {}).then(() => window.db.chat.updateMessage(run.assistant.id, patch))
+    run.writes = run.writes.catch(() => {}).then(() => {
+      if (activeChatRuns.get(run.conversationId)?.id === run.id) return window.db.chat.updateMessage(run.assistant.id, patch)
+    })
     return run.writes
   }
 
@@ -1208,7 +1100,7 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---------- /abstract ----------
 
-  async function generateAbstract(conv: Conversation, resume?: AbstractResume): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
+  async function generateAbstract(conv: Conversation, resume?: AbstractResume, run?: ActiveChatRun, prefix = '', priorSources: SourceRef[] = []): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
     const paperIds = [...(resume?.paperIds ?? conv.paperIds)]
     if (!paperIds.length) throw new Error('请先在当前对话中选择至少一篇论文')
     if (doclingConfigError.value) throw new Error(doclingConfigError.value)
@@ -1219,33 +1111,65 @@ export const useChatStore = defineStore('chat', () => {
     const sources: SourceRef[] = []
     let truncated = false
     let context = ''
-    const progress = (label: string) => { abstractProgress.value[conv.id] = label }
+    const signal = run?.controller.signal
+    const check = () => { if (signal) throwIfCancelled(signal) }
+    const wait = <T>(work: Promise<T>) => signal ? awaitOrCancel(work, signal) : work
+    const progress = (label: string) => {
+      if (!signal?.aborted) abstractProgress.value[conv.id] = label
+    }
     try {
       for (let index = resume?.index ?? 0; index < paperIds.length; index++) {
         const paperId = paperIds[index]
         const previous = resume?.index === index ? resume.previous : ''
-        const paper = await window.db.paper.get(paperId)
+        check()
+        const paper = await wait(window.db.paper.get(paperId))
+        check()
         const title = paper?.title || paperId
-        const document = await prepareDoclingPaper(paperId, progress)
+        // Parsing may be shared and has no AbortSignal API. Cancel this consumer only;
+        // the checks below prevent late model, checkpoint and report writes.
+        const document = await wait(prepareDoclingPaper(paperId, progress))
+        check()
         const profileIdentity = JSON.stringify({ provider: profile.provider, model: profile.model, baseUrl: profile.baseUrl,
           temperature: profile.temperature, maxTokens: profile.maxTokens, topK: profile.topK, systemPrompt: profile.systemPrompt })
         const runKey = await abstractRunKey(document, title, profileIdentity, previous)
+        check()
         const checkpoint = {
-          load: (stage: string, position: number) => window.db.abstractCheckpoint.get(paperId, runKey, stage, position),
-          save: (stage: string, position: number, content: string) => window.db.abstractCheckpoint.save(paperId, runKey, stage, position, content),
+          load: async (stage: string, position: number) => {
+            check()
+            const saved = await wait(window.db.abstractCheckpoint.get(paperId, runKey, stage, position))
+            check()
+            return saved
+          },
+          save: async (stage: string, position: number, content: string) => {
+            check()
+            await wait(window.db.abstractCheckpoint.save(paperId, runKey, stage, position, content))
+            check()
+          },
         }
-        const result = await generateDoclingAbstract(document, paperId, title, messages => {
+        const result = await wait(generateDoclingAbstract(document, paperId, title, messages => {
+          check()
           const configured = messages.map(message => ({ ...message }))
           configured[0].content = profile.systemPrompt + '\n\n' + configured[0].content
-          return requestCompletion(configured, profile, { timeoutMs: 300_000 })
-        }, progress, previous, checkpoint)
+          return requestCompletion(configured, profile, { timeoutMs: 300_000, signal })
+        }, progress, previous, checkpoint))
+        check()
         sections.push(paperIds.length > 1 && !previous ? `## ${title}\n\n${result.content}` : result.content)
         sources.push(...(result.sources.length ? result.sources.map(ref => ({ ...ref, label: `${title} · ${ref.label}` })) : [{ label: title, paperId }]))
         truncated ||= result.truncated
         if (result.truncated) {
           context = JSON.stringify({ kind: 'docling-abstract', paperIds, index, previous: (previous + '\n\n' + result.content).slice(-9000) } satisfies AbstractResume)
-          break
         }
+        if (run) {
+          const partial = sections.join('\n\n---\n\n')
+          await queueRunPatch(run, {
+            content: prefix ? prefix + '\n\n' + partial : partial,
+            sources: [...priorSources, ...sources],
+            context: context || (index + 1 < paperIds.length
+              ? JSON.stringify({ kind: 'docling-abstract', paperIds, index: index + 1, previous: '' } satisfies AbstractResume) : ''),
+          })
+          check()
+        }
+        if (result.truncated) break
       }
       return { content: sections.join('\n\n---\n\n'), sources, truncated, context }
     } finally { delete abstractProgress.value[conv.id] }
@@ -1273,10 +1197,37 @@ export const useChatStore = defineStore('chat', () => {
     try { return await task } finally { paperAbstractJobs.delete(paperId) }
   }
 
-  async function singlePaperAbstract(paperId: string, force = false): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
-    const saved = force ? null : await window.db.paperAbstract.get(paperId)
-    const report = saved ?? await generatePaperAbstract(paperId, force)
-    return { content: report.content, sources: report.sources, truncated: report.truncated, context: '' }
+  async function runAbstractReply(conv: Conversation, existing?: Message, resume?: AbstractResume, force = false): Promise<string> {
+    const user = existing ? [...conv.messages.slice(0, conv.messages.findIndex(message => message.id === existing.id))].reverse().find(message => message.role === 'user') : undefined
+    const paperIds = [...(resume?.paperIds ?? readAbstractResume(existing?.context)?.paperIds ?? readAbstractResume(user?.context)?.paperIds ?? conv.paperIds)]
+    const snapshot = { ...conv, paperIds }
+    const run = await beginChatRun(conv, existing)
+    const signal = run.controller.signal
+    const previous = resume ? existing?.content ?? '' : ''
+    return settleChatRun(run, async () => {
+      // Capture the source selection before the first asynchronous operation so failed retries
+      // cannot silently switch to the conversation's newer selection.
+      await queueRunPatch(run, { context: JSON.stringify(resume ?? { kind: 'docling-abstract', paperIds, index: 0, previous: '' }) })
+      throwIfCancelled(signal)
+      const cached = paperIds.length === 1 && !force && !resume
+        ? await awaitOrCancel(window.db.paperAbstract.get(paperIds[0]), signal) : null
+      throwIfCancelled(signal)
+      const result = cached
+        ? { content: cached.content, sources: cached.sources, truncated: cached.truncated, context: cached.truncated
+          ? JSON.stringify({ kind: 'docling-abstract', paperIds, index: 0, previous: cached.content.slice(-9000) } satisfies AbstractResume) : '' }
+        : await generateAbstract(snapshot, resume, run, previous, resume ? existing?.sources : [])
+      throwIfCancelled(signal)
+      const sources = resume ? [...new Map([...(existing?.sources ?? []), ...result.sources]
+        .map(ref => [`${ref.paperId}:${ref.startPage}:${ref.label}`, ref])).values()] : result.sources
+      const answer = previous ? previous + '\n\n' + result.content : result.content
+      if (paperIds.length === 1 && !cached) {
+        // Chat-owned jobs deliberately do not enter paperAbstractJobs: cancelling a chat
+        // cannot abort or claim ownership of a summary-tab consumer's independent job.
+        await awaitOrCancel(window.db.paperAbstract.save({ paperId: paperIds[0], content: answer, sources, truncated: result.truncated }), signal)
+        throwIfCancelled(signal)
+      }
+      return { answer, sources, truncated: result.truncated, context: result.context }
+    })
   }
 
   // ---------- Send Message (RAG 3-call pipeline) ----------
@@ -1307,10 +1258,6 @@ export const useChatStore = defineStore('chat', () => {
 
   function errorMessageOf(error: unknown): string {
     return error instanceof Error ? error.message : '未知错误'
-  }
-
-  async function recordFailure(convId: string, error: unknown) {
-    await addMessage(convId, 'assistant', '', undefined, { error: errorMessageOf(error) })
   }
 
   async function generateReply(
@@ -1381,7 +1328,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function settleChatRun(
     run: ActiveChatRun,
-    work: () => Promise<{ answer: string; sources?: SourceRef[]; truncated: boolean }>,
+    work: () => Promise<{ answer: string; sources?: SourceRef[]; truncated: boolean; context?: string }>,
   ): Promise<string> {
     try {
       const result = await work()
@@ -1392,6 +1339,7 @@ export const useChatStore = defineStore('chat', () => {
         sources: result.sources?.length ? result.sources : undefined,
         error: '',
         truncated: result.truncated,
+        ...(result.context !== undefined ? { context: result.context } : {}),
         runStatus: 'completed',
       })
       return result.answer
@@ -1424,37 +1372,20 @@ export const useChatStore = defineStore('chat', () => {
     if (activeChatRuns.has(convId) || startingChatRuns.has(convId)) throw new Error('这段对话正在生成回答，请先停止当前任务')
 
     const normalized = userMessage.trim().toLowerCase()
-    if (!normalized.startsWith('/')) {
-      startingChatRuns.add(convId)
-      try {
-        const saved = await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
-        if (saved) onUserMessageSaved?.()
-        return await runChatReply(conv, userMessage, context)
-      } finally { startingChatRuns.delete(convId) }
-    }
-
-    // 划选原文随用户消息持久化：失败轮重试时才能重放同一上下文（#2）
-    const saved = await addMessage(convId, 'user', userMessage, undefined, context ? { context } : undefined)
-    if (saved) onUserMessageSaved?.()
-
+    const abstractPaperIds = [...conv.paperIds]
+    const savedContext = normalized === '/abstract' && abstractPaperIds.length
+      ? JSON.stringify({ kind: 'docling-abstract', paperIds: abstractPaperIds, index: 0, previous: '' } satisfies AbstractResume) : context
+    startingChatRuns.add(convId)
     try {
-      // 命令只在本地识别一次：未知的 `/xxx` 直接回提示，不发模型（#8）
-      if (normalized.startsWith('/') && normalized !== '/abstract') {
+      const saved = await addMessage(convId, 'user', userMessage, undefined, savedContext ? { context: savedContext } : undefined)
+      if (saved) onUserMessageSaved?.()
+      if (normalized === '/abstract') return await runAbstractReply({ ...conv, paperIds: abstractPaperIds })
+      if (normalized.startsWith('/')) {
         await addMessage(convId, 'assistant', `未识别的命令：${userMessage.trim()}。当前可用命令：/abstract（总结当前所选论文）。`)
         return userMessage
       }
-      if (normalized === '/abstract') {
-        const result = conv.paperIds.length === 1
-          ? await singlePaperAbstract(conv.paperIds[0])
-          : await generateAbstract(conv)
-        await addMessage(convId, 'assistant', result.content, result.sources, { truncated: result.truncated, context: result.context })
-        return result.content
-      }
-      return userMessage
-    } catch (error) {
-      await recordFailure(convId, error)
-      throw error
-    }
+      return await runChatReply(conv, userMessage, context)
+    } finally { startingChatRuns.delete(convId) }
   }
 
   async function retryMessage(convId: string, messageId: string): Promise<void> {
@@ -1469,15 +1400,7 @@ export const useChatStore = defineStore('chat', () => {
       await runChatReply(conv, userMessage.content, userMessage.context || undefined, index - 1, target)
       return
     }
-    try {
-      const result = conv.paperIds.length === 1
-        ? await singlePaperAbstract(conv.paperIds[0], true)
-        : await generateAbstract(conv)
-      await updateMessage(convId, messageId, { content: result.content, sources: result.sources, error: '', truncated: result.truncated, context: result.context })
-    } catch (error) {
-      await updateMessage(convId, messageId, { content: '', error: errorMessageOf(error) })
-      throw error
-    }
+    await runAbstractReply(conv, target, undefined, true)
   }
 
   /** 「继续」：对截断的回答就地续写（#3）。检索按原问题重跑，生成时把已输出部分作为上文。 */
@@ -1491,12 +1414,7 @@ export const useChatStore = defineStore('chat', () => {
     if (userMessage.content.trim().toLowerCase() === '/abstract') {
       const paperIds = [...new Set((target.sources ?? []).map(source => source.paperId).filter((id): id is string => !!id))]
       const resume = readAbstractResume(target.context) ?? { kind: 'docling-abstract', paperIds: paperIds.length ? paperIds : conv.paperIds, index: 0, previous: target.content }
-      const result = await generateAbstract(conv, resume)
-      const sources = [...new Map([...(target.sources ?? []), ...result.sources].map(ref => [`${ref.paperId}:${ref.startPage}`, ref])).values()]
-      await updateMessage(convId, messageId, { content: target.content + '\n\n' + result.content, sources, truncated: result.truncated, context: result.context })
-      if (resume.paperIds.length === 1) {
-        await window.db.paperAbstract.save({ paperId: resume.paperIds[0], content: target.content, sources, truncated: result.truncated })
-      }
+      await runAbstractReply(conv, target, resume)
       return
     }
 

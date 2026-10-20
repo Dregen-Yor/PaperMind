@@ -78,3 +78,10 @@ describe('Docling document boundary', () => {
     expect(() => normalizeDoclingSettings({ baseUrl: 'https://user:secret@host' })).toThrow('凭据')
   })
 })
+
+it('validates cached character provenance against its declared pages and source region', () => {
+  const doc = normalizeDoclingDocument({ texts: [{ text: 'Evidence.', prov: [{ page_no: 1, charspan: [0, 9], bbox: { l: 0, r: 50, t: 0, b: 50, coord_origin: 'TOPLEFT' } }] }], pages: { '1': { size: { width: 100, height: 100 } } } })
+  expect(isParsedDocument(doc)).toBe(true)
+  doc.items[0].provenance![0].page = 10
+  expect(isParsedDocument(doc)).toBe(false)
+})

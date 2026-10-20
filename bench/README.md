@@ -1,6 +1,53 @@
 # PaperMind Benchmark
 
-量化衡量论文问答（RAG）与摘要生成性能，支持配置消融对比。
+当前产品算法入口为 `bench:product`，走 E-k5 与 Docling 图文摘要。原 `bench` 的平面索引/语义树/段落检索及 T5 摘要是 **legacy 历史对照协议**；旧结果保持原样，不能当作当前产品默认路径的性能或质量结果。
+
+## 当前产品 E-k5 / Docling 算法评测
+
+无需凭据、远程服务或下载的离线检查：
+
+```bash
+npm run bench:product -- --smoke --out /tmp/papermind-product-smoke.json
+# 等价命令：npx tsx bench/src/productCli.ts --smoke
+```
+
+这会生成有效的合成两页 PDF，通过生产 `extractPdfDocument` 与 Node PDF.js 适配器提取文本/布局/目录；调用真实 `buildEk5Index`、`retrieveRagContext`（`retrievalMode: 'ek5'`）、`generateRagAnswer` 和 `generateDoclingAbstract`。向量与模型回复是固定测试数据，JSON 必须标 `synthetic: true`，只能证明共享链路能执行，不能用于质量、真实模型速度或真实论文结论背书。`--smoke` 不可与真实输入参数混用。
+
+真实运行仅使用提前配置的本地向量模型文件；入口设置 `allowRemoteModels=false`，不会自动下载模型，也不会自动创建 SSH 隧道。以下命令会调用你显式配置的 LLM，使用远程 Docling 时也会发起转换请求：
+
+```bash
+export BENCH_LLM_PROVIDER=openai       # openai compatible | ollama
+export BENCH_LLM_MODEL=your-chat-model
+export BENCH_LLM_REVISION=your-deployed-model-revision
+export BENCH_LLM_BASE_URL=https://your-provider.example/v1
+export BENCH_LLM_API_KEY=your-local-secret
+export BENCH_EMBEDDER_REVISION=0123456789abcdef0123456789abcdef01234567  # 替换为已预置权重的真实commit
+export BENCH_EMBEDDER_CACHE_DIR=/absolute/path/to/preprovisioned-model-cache
+# 可选 BENCH_PRODUCT_TEMPERATURE=0.7、BENCH_PRODUCT_MAX_TOKENS=0（0=省略上限）
+# 可选 BENCH_PRODUCT_SYSTEM_PROMPT；默认与应用初始profile一致
+
+npm run bench:product -- --task qa --pdf /path/paper.pdf --question '研究采用什么方法？' --out /tmp/product-qa.json
+npm run bench:product -- --task all --pdf /path/paper.pdf --title '论文实际标题' --question '主要结论是什么？' --docling-json /path/paper.docling.json --out /tmp/product-all.json
+npm run bench:product -- --task summary --pdf /path/paper.pdf --docling-url http://your-docling-host:5001 --out /tmp/product-summary.json
+```
+
+`BENCH_EMBEDDER_REVISION` 必须是不可变的 40 位 commit SHA；模型固定为产品的 `Xenova/bge-small-en-v1.5` / q8，Node 使用本地文件、ONNX backend。应用默认 revision 为 `main`、运行于浏览器 WASM；必须自行核对两侧实际权重，不能仅因模型名称相同就声称运行环境完全等价。`BENCH_LLM_REVISION` 是操作者声明的部署版本，入口不远程证明其真实性。summary-only 不加载向量模型。
+
+输入 Docling JSON 使用 `{ "sourceSha256": "原始PDF字节SHA-256", "document": ... }` 封装；document 可以是原始 DoclingDocument 或应用的 version=1 归一化文档。入口校验声明的 hash 与当前 PDF 字节完全一致，记录输入 JSON 内容 hash；声明绑定本身不证明解析质量。`--docling-url` 与 `--docling-json` 互斥；远程转换复用 `electron/doclingClient.convertPdf`（OCR/formula 开启、600 秒超时），注入空 connect 回调确保不建立 SSH。服务 key 从 `BENCH_DOCLING_API_KEY` 读取，结果不含 key。
+
+可用 `--extracted-json FILE` 显式从已提取阶段进入，封装为 `{ "sourceSha256": "...", "document": { "pages": [...], "layoutLines": [...], "outline": [...] } }`；结果将标 `provided-extracted-document`，不将该次输入说成 PDF 解析测量。正常 `--pdf` 入口使用真实共享 PDF.js 提取，安装目录内 worker/fonts 由 Node 适配器解析。
+
+`--question` 可重复；`--history-json FILE` 接收 `[{role:"user"|"assistant",content:"..."}]`，交给产品的历史裁剪/查询改写。`--questions-json FILE` 接收问题数组，每项 `{question, history?, referenceAnswers?, referencePages?}`，页码为 **0 基**；可计算可选答案 token F1、证据页 recall。`--reference-summary FILE` 是 UTF-8 参考摘要，额外计算 ROUGE-L。这些词面指标不替代人工质量判断，中文分词边界也限制其解释。只提供参考答案/页码时才出现相应指标。
+
+结果记录原始 PDF SHA-256、提取文本 hash、Git SHA/dirty、包版本、Node/模型/revision、向量身份、摘要 v6 和输入/提示词/profile绑定的 runKey、命中来源页与具体叶组、可检索叶组覆盖比例（selected/total）、未定位/模糊/fallback节点、排除字符数、实际上下文字符数与预算。默认上下文上限 **120000 characters**，采用产品“整组超预算报错”语义，不偷偷截断或改走 legacy。冷索引时间包含分组与向量化，向量模型初始化时间另列；warmQueryMs 表示已建索引上的查询（包含产品条件改写与首次BM25 scorer构建），不是模型加载或UI端到端时延。生成失败时保留已完成的检索记录；遇到任何阶段错误写 errors 且 CLI 返回非零。
+
+LLM 请求复用既有 bench client，但产品入口显式传递应用 profile 默认温度0.7、0=不限制输出、system/user/history角色及真实生产提示词；摘要额外前置同一个系统提示词并观察finish_reason/ done_reason截断。OpenAI 普通兼容模型和 Ollama 可用；native Anthropic、o系列、gpt-5及更新推理协议在本入口明确拒绝，避免将旧兼容路径说成产品协议。暂固定topK=0、单串行、无响应缓存、无transport重试；摘要内部重试仍由生产函数控制。
+
+这测量的是共享**算法链路**，不覆盖 Electron IPC、SQLite/索引持久化、PDF渲染/截图补图、浏览器WASM环境、实时流传输或UI TTFT；不能把非流式bench client的时间称作产品界面完整响应时间。没有修改旧bench行为或重标旧结果。
+
+## Legacy 历史协议
+
+以下准备、运行与比较命令针对原 `npm run bench`，用于保留历史实验和消融对照。
 
 设计文档：[docs/superpowers/specs/2026-09-02-benchmark-design.md](../docs/superpowers/specs/2026-09-02-benchmark-design.md)
 
@@ -33,7 +80,7 @@ QA 最终回答统一请求 `maxTokens=4096`、`temperature=0`，并共用上述
 
 DeepSeek 的受控 profile 可设 `BENCH_LLM_PROVIDER=openai`、`BENCH_LLM_MODEL=deepseek-flash`、`BENCH_LLM_BASE_URL=https://api.deepseek.com`；API key 仅通过本机 `BENCH_LLM_API_KEY` 提供。官方[模型与价格说明](https://api-docs.deepseek.com/quick_start/pricing/)列出 `deepseek-flash` 与 thinking / non-thinking 两种模式；[thinking mode 文档](https://api-docs.deepseek.com/guides/thinking_mode/)使用 `thinking.type: enabled | disabled`。先选定一种模式并在所有正式对照中保持一致；thinking 模式下 provider 对 temperature / top-p 的支持有限，应核对实际请求与响应。这里不替用户选择正式运行模式。
 
-> **`BENCH_LLM_PROVIDER=anthropic` 注意**：端点形状与生产一致（`POST {baseUrl}/chat/completions` + `x-api-key` 头），仅支持 OpenAI 兼容代理；直接指向 `https://api.anthropic.com` 会 404。原生 Anthropic API 的路径是 `/v1/messages`，与该形状不匹配。
+> **`BENCH_LLM_PROVIDER=anthropic` 注意**：legacy 客户端使用 `POST {baseUrl}/chat/completions` + `x-api-key` 头，**与当前应用原生 `/v1/messages` 路径不同**，仅支持 OpenAI 兼容代理；直接指向 `https://api.anthropic.com` 会 404。原生 Anthropic API 的路径是 `/v1/messages`，与该形状不匹配。
 
 ### 2. 数据集
 
@@ -163,7 +210,7 @@ Q 要求两侧都是 schema 2 / `query-timeline-v2`，并逐项核对同一数�
 | Classic | jaccard / bm25 / cosine | 既有检索对照组，口径见上文 |
 | Ceiling | `--mode full-context` | 报表沿用**生成上限**标签，指全文直投参考而非理论质量上限；它不是检索选手：无检索、全文直投，预算不受 4096 约束，故 `comparisonEligible: false`，只进「生成上限」表、不进检索排名。注意它是 `--mode` 取值而**不是**配置名——没有 `configs/full-context.json`，结果文件里的 `config.name` 仍是 `default`，不要去找一个不存在的配置 |
 | Strong | `hybrid-rerank`、`long-section-rag` | 强基线组（计划 §0）：成熟检索栈、结构化阅读 |
-| Primary | PaperMind 当前管线 | 被评测的生产方法 |
+| Primary | PaperMind legacy 管线 | 历史主对照方法，不代表当前 E-k5 产品默认路径 |
 | Hybrid | `papermind-hybrid`、`papermind-hybrid-m3` | 段落级混合检索（方案 `docs/superpowers/specs/2026-09-23-hybrid-passage-retrieval-design.md`）：BM25 + 段落向量 + 结构卡片先验三路加权 RRF，回答前零 LLM 调用；冷启动成本单独成表、不进 Q。任一题降级为 `bm25*` 检索（向量模型加载失败或单篇向量失败）整轮标 `comparisonEligible: false`。`-m3` 变体向量模型为 `Xenova/bge-m3`（`BAAI/bge-m3` 官方仓库无 q8 ONNX 权重，pin 到 revision `4de13258`），查询不加 bge v1.5 的检索指令前缀 |
 | Tree | `semantic-tree` | Primary 的变体：同一条分阶段管线（`retrieveRagContext` → `generateRagAnswer`；`runRagPipeline` 仅是向后兼容的组合封装），仅把平面 `scoreAndSelect` 换成单轮树路由——树的收益是唯一变量 |
 
@@ -187,7 +234,7 @@ Q 要求两侧都是 schema 2 / `query-timeline-v2`，并逐项核对同一数�
 - **`llmEndpointIdentity` 只在断点签名里，不在 `BenchResult.meta` 里**：它参与「是否复用旧断点」的判定，却**不参与横向比较门禁**。两次跑在不同端点、但共享同一 `model` 名的运行，仍能通过 `retrievalComparisonIssues` 的比较门——门禁覆盖不到端点差异，读数前须自行确认端点一致
 - **`sliceText` 与 `tokenRangeToPieces` 的空白分歧**：两者对「仅含空白的页边界」处理不同——`pieces` 可能为空、`pieces[0].page` 可能大于区间起始页号、`join(pieces)` 可能带一个 `sliceText` 整段 `trim()` 已吃掉的**前导 `\n`**（`bench/src/tests/strongBaselines.test.ts:62` 已钉住）。页序与指标一律以 `pieces` / 物化页序为准，勿用 `sliceText` 反推
 - **`meta.completed` 只数走完**生成**阶段的样本**，而 `meta.total` 是**本轮尝试执行的全部样本**（含生成前失败的题）；两者差额是**索引失败 + 检索失败 + 生成失败**三者之和，而非「生成失败数」，更不是「没这题」——`total` 在检索阶段之前就已自增，索引/检索阶段失败的题同样进了 `total` 却到不了 `completed`。检索已完成的观测在生成失败时照常留在指标分母里
-- **4096-token 预算是 bench 专属**：只有 bench 注入 `materialize` 时才切到 4096-token 路径，产品侧不注入、走字符预算路径——被测的产品行为与评测口径就此分开，bench 的改动不回灌产品。注意产品并非「默认按 24000 字符截断」：`ragPipeline` 的 `maxContextChars` 是**可选且无默认值**，产品调用方（`chat.ts`）只传 `externalContext`、根本不传它，故平面路径实际上**不设上限**。24000 只作为 `DEFAULT_SEMANTIC_CONTEXT_CHARS` 存在于 `semanticRoute.ts`，且只封顶**树路由**路径的逐篇块预算，与平面路径无关。两处口径不同，勿混用
+- **4096-token 预算是 legacy bench 专属**：该历史协议注入 `materialize`，沿用旧 token 物化和截断规则。当前产品与新 `bench:product` 均显式指定 `retrievalMode: 'ek5'`，默认 `maxContextChars=120000`，整组超过字符预算即报错；不能拿历史平面路径未传预算或语义树24000字符默认值来描述当前产品。
 
 ## 缓存
 

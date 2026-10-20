@@ -1,8 +1,8 @@
 /**
- * QA 任务 Runner——整个评测的中枢编排：
+ * Legacy QA 任务 Runner（历史对照协议，非当前产品 E-k5 入口）：
  * 加载数据（由调用方完成）→ 建索引 → 分阶段跑生产 RAG 管线 → 计算检索/答案指标 → 聚合。
  * 复用 src/utils/ 的生产实现（buildPageIndex / retrieveRagContext / generateRagAnswer），
- * 评测与应用跑同一份代码，这是 benchmark 有效性的前提。
+ * 此处共享部分生产函数，但索引/检索协议与当前产品不同；产品入口见 product.ts / productCli.ts。
  *
  * 检索与生成是两个独立阶段：检索产物先落盘（页序指标与诊断），生成即便失败也不丢检索指标（§6.2 / §6.3）。
  */
