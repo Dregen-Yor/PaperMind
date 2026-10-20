@@ -104,7 +104,7 @@ const PAGE_TOP = 24
 const MAX_RENDERED_PAGES = 8
 let selectedRange: Range | null = null
 const selectionPopup = ref({ visible: false, x: 0, y: 0 })
-const highlights = ref<Highlight[]>([])
+const highlights = computed(() => paperStore.highlightsByPaper[props.paperId] ?? [])
 const activeHighlight = ref<Highlight | null>(null)
 const undoHighlight = ref<Highlight | null>(null)
 const highlightBusy = ref(false)
@@ -552,9 +552,8 @@ async function cancelHighlight() {
   highlightBusy.value = true
   highlightError.value = ''
   try {
-    await paperStore.removeHighlight(snapshot.id)
+    await paperStore.removeHighlight(snapshot.id, snapshot.paperId)
     if (generation !== documentGeneration) return
-    highlights.value = highlights.value.filter(h => h.id !== snapshot.id)
     closePopup()
     repaintHighlights(snapshot.pageNum)
     undoHighlight.value = snapshot
@@ -576,7 +575,6 @@ async function restoreLastHighlight() {
   try {
     await paperStore.restoreHighlight(snapshot)
     if (generation !== documentGeneration) return
-    highlights.value.push(snapshot)
     closePopup()
     repaintHighlights(snapshot.pageNum)
     undoHighlight.value = null
@@ -634,7 +632,7 @@ async function highlightSelection() {
   try {
     for (const segment of additions) {
       if (generation !== documentGeneration) return
-      const record = await paperStore.addHighlight({
+      await paperStore.addHighlight({
         paperId,
         text,
         pageNum: segment.page,
@@ -644,7 +642,6 @@ async function highlightSelection() {
         endOffset: segment.end,
       })
       if (generation !== documentGeneration) return
-      highlights.value.push(record)
       repaintHighlights(segment.page)
     }
   } catch {
@@ -672,14 +669,12 @@ async function loadDocument() {
   closePopup()
   dismissFeedback()
   highlightBusy.value = true
-  highlights.value = []
   hitRegions.clear()
   activeEvidence = null
   fitOnNextRender = fitMode
   try {
-    const stored = await paperStore.getHighlights(props.paperId)
+    await paperStore.getHighlights(props.paperId)
     if (generation !== documentGeneration) return
-    highlights.value = stored
   } catch {
     if (generation !== documentGeneration) return
     highlightError.value = '加载高亮失败，请重新打开论文'
@@ -702,6 +697,12 @@ async function loadDocument() {
     }
   }
 }
+
+watch(highlights, (rows, previous) => {
+  const pages = new Set([...previous, ...rows].map(h => h.pageNum))
+  for (const page of pages) repaintHighlights(page)
+  if (activeHighlight.value && !rows.some(h => h.id === activeHighlight.value?.id)) closePopup()
+})
 
 watch(() => [props.src, props.paperId], () => { void loadDocument() })
 

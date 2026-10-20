@@ -150,7 +150,7 @@
         <ul class="import-list">
           <li
             v-for="item in importItems"
-            :key="item.name"
+            :key="item.id"
             class="import-item"
             :data-status="item.status"
           >
@@ -161,6 +161,7 @@
               <span v-else class="spin">⟳</span>
             </span>
             <span class="import-item-name">{{ item.name }}</span>
+            <span class="import-item-target" :title="'导入至 ' + item.targetName">导入至 {{ item.targetName }}</span>
             <span class="import-item-stage">{{ stageLabel[item.status] }}</span>
             <span v-if="item.error" class="import-item-error" :title="item.error">{{ item.error }}</span>
           </li>
@@ -209,17 +210,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Upload, Close, MoreFilled, Document, Search, Reading } from '@element-plus/icons-vue'
 import { usePaperStore, type Paper } from '../stores/paper'
 import { useChatStore } from '../stores/chat'
-import { parsePdfMeta } from '../utils/pdfUtils'
+import { useLibraryImportStore, type ImportStatus } from '../stores/libraryImport'
 import { filterLibraryPapers, formatAuthors, type LibraryFilters } from '../utils/libraryFilters'
 
 const store = usePaperStore()
 const chatStore = useChatStore()
+const importStore = useLibraryImportStore()
 const router = useRouter()
 const fileInput = ref<HTMLInputElement>()
 const activeKbId = ref(store.knowledgeBases[0]?.id ?? 'default')
@@ -254,14 +257,6 @@ function clearFilters() {
 }
 
 // ── 导入进度状态 ──────────────────────────────────────────
-type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error' | 'skipped'
-
-interface ImportItem {
-  name: string
-  status: ImportStatus
-  error?: string
-}
-
 const stageLabel: Record<ImportStatus, string> = {
   pending: '等待中',
   parsing: '解析 PDF…',
@@ -271,92 +266,44 @@ const stageLabel: Record<ImportStatus, string> = {
   skipped: '已跳过',
 }
 
-const importItems = ref<ImportItem[]>([])
-const showImportPanel = ref(false)
-
-// 跳过重复导入也是终态：计入完成数，进度条才能走完并自动收起
-const doneCount = computed(() =>
-  importItems.value.filter(i => i.status === 'done' || i.status === 'error' || i.status === 'skipped').length,
-)
-const allDone = computed(() => doneCount.value === importItems.value.length && importItems.value.length > 0)
-const importHasError = computed(() => importItems.value.some(i => i.status === 'error'))
-const importPercent = computed(() =>
-  importItems.value.length === 0 ? 0 : Math.round((doneCount.value / importItems.value.length) * 100),
-)
+const {
+  items: importItems, showPanel: showImportPanel, doneCount, allDone,
+  hasError: importHasError, percent: importPercent,
+} = storeToRefs(importStore)
 
 let importPanelTimer: number | undefined
-watch(allDone, done => {
+watch([allDone, importHasError], ([done, hasError]) => {
   if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
-  if (done && !importHasError.value) {
-    importPanelTimer = window.setTimeout(() => { showImportPanel.value = false }, 2500)
+  if (done && !hasError) {
+    importPanelTimer = window.setTimeout(() => {
+      if (allDone.value && !importStore.running) showImportPanel.value = false
+    }, 2500)
   }
+}, { immediate: true })
+
+let viewActive = true
+onBeforeUnmount(() => {
+  viewActive = false
+  if (importPanelTimer) clearTimeout(importPanelTimer)
 })
 
 function triggerUpload() { fileInput.value?.click() }
 
 async function onFilesSelected(e: Event) {
-  const files = (e.target as HTMLInputElement).files
-  if (!files || files.length === 0) return
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length) return
 
   if (importPanelTimer) { clearTimeout(importPanelTimer); importPanelTimer = undefined }
 
-  // 初始化进度列表
-  importItems.value = Array.from(files).map(f => ({ name: f.name, status: 'pending' as ImportStatus }))
-  showImportPanel.value = true
-
-  let openPaperIdAfterImport = ''
-
-  for (let i = 0; i < importItems.value.length; i++) {
-    const file = files[i]
-    const item = importItems.value[i]
-    try {
-      item.status = 'parsing'
-      const meta = await parsePdfMeta(file)
-
-      const existing = store.papers.find(p => p.fileHash && p.fileHash === meta.fileHash)
-      if (existing) {
-        if (!await store.paperContentUrl(existing.id)) {
-          item.status = 'saving'
-          await store.restorePaperFile(existing.id, meta.fileData)
-          item.status = 'done'
-          openPaperIdAfterImport = existing.id
-          continue
-        }
-        try {
-          await ElMessageBox.confirm(
-            `《${existing.title || existing.fileName}》已在库中，是否打开现有条目？`,
-            '重复导入',
-            { type: 'info', confirmButtonText: '打开现有条目', cancelButtonText: '跳过' },
-          )
-          openPaperIdAfterImport = existing.id
-          item.status = 'done'
-        } catch {
-          item.status = 'skipped'
-        }
-        continue
-      }
-
-      item.status = 'saving'
-      const id = await store.addPaper({
-        ...meta,
-        fileName: file.name,
-        knowledgeBaseId: activeKbId.value,
-        status: 'unread',
-        tags: [],
-      })
-      item.status = 'done'
-
-      // 后台触发 pageIndex 预处理，不阻塞导入流程
-      chatStore.indexPaper(id).catch(() => {})
-    } catch (err) {
-      item.status = 'error'
-      item.error = err instanceof Error ? err.message : '未知错误'
-    }
+  const target = store.knowledgeBases.find(kb => kb.id === activeKbId.value)
+  const openPaperId = await importStore.enqueue(files, {
+    id: activeKbId.value, name: target?.name ?? '默认知识库',
+  })
+  if (openPaperId && viewActive && router.currentRoute.value.path === '/library') {
+    void router.push('/library/' + openPaperId)
   }
-
-  if (openPaperIdAfterImport) void router.push('/library/' + openPaperIdAfterImport)
-
-  ;(e.target as HTMLInputElement).value = ''
 }
 
 function createKb() {
@@ -586,9 +533,10 @@ function movePaper(paper: any) {
   padding: 0 0 6px;
 }
 .import-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 6px;
+  gap: 2px 6px;
   padding: 5px 14px;
   font-size: 12px;
   line-height: 1.5;
@@ -597,7 +545,8 @@ function movePaper(paper: any) {
 .import-item:hover { background: var(--bg-hover); }
 
 .import-item-icon {
-  flex-shrink: 0;
+  grid-column: 1;
+  grid-row: 1;
   width: 14px;
   text-align: center;
   font-size: 11px;
@@ -609,15 +558,26 @@ function movePaper(paper: any) {
 .import-item[data-status='pending'] .import-item-icon { color: var(--text-muted); }
 
 .import-item-name {
-  flex: 1;
+  grid-column: 2;
+  grid-row: 1;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
+.import-item-target {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .import-item-stage {
-  flex-shrink: 0;
+  grid-column: 3;
+  grid-row: 1;
   color: var(--text-muted);
   font-size: 11px;
 }
@@ -628,6 +588,8 @@ function movePaper(paper: any) {
 .import-item[data-status='saving']  .import-item-stage { color: var(--accent); }
 
 .import-item-error {
+  grid-column: 2 / 4;
+  grid-row: 3;
   display: block;
   font-size: 11px;
   color: var(--danger);
@@ -635,7 +597,6 @@ function movePaper(paper: any) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 200px;
 }
 
 /* 旋转动画 */

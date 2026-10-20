@@ -4,6 +4,7 @@
       <span class="notes-title">高亮与笔记</span>
       <span class="notes-count tabular-nums">{{ highlights.length }} 条</span>
     </div>
+    <p v-if="error" class="notes-error" role="alert">{{ error }}</p>
     <el-scrollbar class="notes-body">
       <div v-if="highlights.length === 0" class="notes-empty">
         <el-icon :size="30" aria-hidden="true"><EditPen /></el-icon>
@@ -16,7 +17,8 @@
         </button>
         <blockquote class="note-text">{{ h.text }}</blockquote>
         <el-input
-          v-model="h.note"
+          :model-value="draftNotes[h.id] ?? h.note"
+          @update:model-value="draftNotes[h.id] = $event"
           type="textarea"
           :rows="2"
           resize="none"
@@ -24,38 +26,61 @@
           :aria-label="'第 ' + h.pageNum + ' 页高亮的笔记'"
           @blur="save(h)"
         />
-        <button type="button" class="note-del" @click="del(h.id)">删除</button>
+        <button type="button" class="note-del" @click="del(h)">删除</button>
       </div>
     </el-scrollbar>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { EditPen } from '@element-plus/icons-vue'
-import { usePaperStore } from '../stores/paper'
+import { usePaperStore, type Highlight } from '../stores/paper'
 
 const props = defineProps<{ paperId: string }>()
 const emit = defineEmits<{ (e: 'jump', page: number): void }>()
 
 const paperStore = usePaperStore()
-const highlights = computed(() => paperStore.highlights)
+const highlights = computed(() => paperStore.highlightsByPaper[props.paperId] ?? [])
+const draftNotes = ref<Record<string, string>>(Object.create(null))
+const error = ref('')
+let generation = 0
 
-onMounted(async () => {
-  await paperStore.loadHighlights(props.paperId)
-})
-watch(() => props.paperId, (id) => {
-  paperStore.loadHighlights(id)
-})
+watch(() => props.paperId, async (id) => {
+  const current = ++generation
+  error.value = ''
+  try {
+    await paperStore.loadHighlights(id)
+  } catch {
+    if (current === generation) error.value = '加载高亮失败，请重新打开论文'
+  }
+}, { immediate: true })
 
-function save(h: { id: string; note: string }) {
-  paperStore.updateHighlight(h.id, { note: h.note })
+async function save(h: Highlight) {
+  const current = generation
+  const note = draftNotes.value[h.id] ?? h.note
+  error.value = ''
+  try {
+    await paperStore.updateHighlight(h.id, { note }, h.paperId)
+    if (current === generation && draftNotes.value[h.id] === note) delete draftNotes.value[h.id]
+  } catch {
+    if (current === generation) error.value = '保存笔记失败，请重试'
+  }
 }
 
-async function del(id: string) {
-  await ElMessageBox.confirm('删除这条高亮？', '删除', { type: 'warning' })
-  await paperStore.removeHighlight(id)
+async function del(h: Highlight) {
+  const { id, paperId } = h
+  const current = generation
+  try {
+    await ElMessageBox.confirm('删除这条高亮？', '删除', { type: 'warning' })
+    if (current === generation) error.value = ''
+  } catch { return }
+  try {
+    await paperStore.removeHighlight(id, paperId)
+  } catch {
+    if (current === generation) error.value = '删除高亮失败，请重试'
+  }
 }
 </script>
 
@@ -64,6 +89,7 @@ async function del(id: string) {
 .notes-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 14px; }
 .notes-title { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .notes-count { font-size: 11px; color: var(--text-muted); background: var(--bg-elevated); padding: 2px 7px; border-radius: 4px; }
+.notes-error { margin: 0 22px 12px; color: var(--danger); font-size: 12px; }
 .notes-body { flex: 1; min-height: 0; padding: 0 20px 20px; }
 .notes-empty { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 70px 4px; color: var(--text-muted); text-align: center; }
 .notes-empty .el-icon { color: var(--accent); margin-bottom: 6px; }

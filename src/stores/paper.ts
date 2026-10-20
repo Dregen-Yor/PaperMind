@@ -7,7 +7,11 @@ export type { Paper, KnowledgeBase, Highlight } from '../types/paper'
 export const usePaperStore = defineStore('paper', () => {
   const papers = ref<Paper[]>([])
   const knowledgeBases = ref<KnowledgeBase[]>([])
-  const highlights = ref<Highlight[]>([])
+  const highlightsByPaper = ref<Record<string, Highlight[]>>(Object.create(null))
+  const activeHighlightPaperId = ref('')
+  const highlights = computed(() => highlightsByPaper.value[activeHighlightPaperId.value] ?? [])
+  const highlightLoads = new Map<string, Promise<Highlight[]>>()
+  const highlightRevisions = new Map<string, number>()
   const loaded = ref(false)
 
   async function init() {
@@ -74,6 +78,16 @@ export const usePaperStore = defineStore('paper', () => {
 
   // ---------- Highlights ----------
 
+  function highlightPaperId(id: string) {
+    return Object.keys(highlightsByPaper.value).find(paperId =>
+      highlightsByPaper.value[paperId].some(h => h.id === id))
+  }
+
+  function publishHighlights(paperId: string, rows: Highlight[]) {
+    highlightRevisions.set(paperId, (highlightRevisions.get(paperId) ?? 0) + 1)
+    highlightsByPaper.value[paperId] = rows
+  }
+
   async function addHighlight(h: {
     paperId: string
     text: string
@@ -84,42 +98,66 @@ export const usePaperStore = defineStore('paper', () => {
     endOffset: number
   }) {
     const highlight = { id: crypto.randomUUID(), ...h, createdAt: Date.now() }
+    if (!activeHighlightPaperId.value) activeHighlightPaperId.value = highlight.paperId
     await window.db.highlight.create(highlight)
-    highlights.value.push(highlight)
+    publishHighlights(highlight.paperId, [...(highlightsByPaper.value[highlight.paperId] ?? []), highlight])
     return highlight
   }
 
   async function getHighlights(paperId: string) {
-    return window.db.highlight.listByPaper(paperId)
+    return loadHighlights(paperId)
   }
 
-  async function loadHighlights(paperId: string) {
-    highlights.value = await window.db.highlight.listByPaper(paperId)
+  async function loadHighlights(paperId: string): Promise<Highlight[]> {
+    activeHighlightPaperId.value = paperId
+    const pending = highlightLoads.get(paperId)
+    if (pending) return pending
+    const request = (async () => {
+      // A read started before a successful write may contain an older snapshot.
+      // Read again instead of replacing the persisted mutation with that snapshot.
+      while (true) {
+        const revision = highlightRevisions.get(paperId) ?? 0
+        const rows = await window.db.highlight.listByPaper(paperId)
+        if (revision !== (highlightRevisions.get(paperId) ?? 0)) continue
+        highlightsByPaper.value[paperId] = rows
+        return rows
+      }
+    })()
+    highlightLoads.set(paperId, request)
+    try {
+      return await request
+    } finally {
+      if (highlightLoads.get(paperId) === request) highlightLoads.delete(paperId)
+    }
   }
 
-  async function updateHighlight(id: string, patch: Partial<Pick<Highlight, 'note'>>) {
+  async function updateHighlight(id: string, patch: Partial<Pick<Highlight, 'note'>>, paperId = highlightPaperId(id)) {
     await window.db.highlight.update(id, patch)
-    const idx = highlights.value.findIndex(h => h.id === id)
-    if (idx !== -1) highlights.value[idx] = { ...highlights.value[idx], ...patch }
+    if (paperId !== undefined) {
+      publishHighlights(paperId, (highlightsByPaper.value[paperId] ?? []).map(h => h.id === id ? { ...h, ...patch } : h))
+    }
   }
 
-  async function removeHighlight(id: string) {
+  async function removeHighlight(id: string, paperId = highlightPaperId(id)) {
     await window.db.highlight.remove(id)
-    highlights.value = highlights.value.filter(h => h.id !== id)
+    if (paperId !== undefined) {
+      publishHighlights(paperId, (highlightsByPaper.value[paperId] ?? []).filter(h => h.id !== id))
+    }
   }
 
   async function restoreHighlight(highlight: Highlight) {
+    if (!activeHighlightPaperId.value) activeHighlightPaperId.value = highlight.paperId
     await window.db.highlight.create(highlight)
-    if (!highlights.value.some(h => h.id === highlight.id)) {
-      highlights.value = [...highlights.value, highlight].sort((a, b) => a.createdAt - b.createdAt)
-    }
+    const rows = highlightsByPaper.value[highlight.paperId] ?? []
+    publishHighlights(highlight.paperId, [...rows.filter(h => h.id !== highlight.id), highlight]
+      .sort((a, b) => a.createdAt - b.createdAt))
   }
 
   return {
     papers, knowledgeBases, loaded, init,
     addKnowledgeBase, removeKnowledgeBase,
     addPaper, removePaper, updatePaper, readPaperFile, paperContentUrl, restorePaperFile,
-    getPapersByKb, getPaper, highlights,
+    getPapersByKb, getPaper, highlights, highlightsByPaper,
     addHighlight, getHighlights, loadHighlights, updateHighlight, removeHighlight, restoreHighlight,
   }
 })
