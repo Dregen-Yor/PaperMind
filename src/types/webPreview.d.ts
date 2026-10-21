@@ -23,6 +23,7 @@ export interface PreviewSnapshot {
   contentHash: string
   byteLength: number
   archiveMhtml?: string
+  visualPdf?: string
 }
 
 export interface PreviewApi {
@@ -35,6 +36,7 @@ export interface PreviewApi {
   reload: () => Promise<void>
   close: () => Promise<void>
   openExternal: (url: string) => Promise<void>
+  summaryPdf: (snapshotId: string) => Promise<string>
   captureSnapshot: () => Promise<PreviewSnapshot>
   onState: (callback: (state: PreviewState) => void) => () => void
 }

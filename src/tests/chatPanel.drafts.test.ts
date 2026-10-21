@@ -41,6 +41,28 @@ beforeEach(() => {
 afterEach(async () => { await flushPromises(); wrappers.splice(0).forEach(wrapper => wrapper.unmount()); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('conversation-owned composer drafts', () => {
+  it('uses and persists the profile selected in the composer for the next request', async () => {
+    const store = useChatStore(pinia)
+    store.profiles = [
+      { ...store.profiles[0], id: 'first', name: 'First', model: 'first-model', apiKey: 'test' },
+      { ...store.profiles[0], id: 'second', name: 'Second', model: 'second-model', apiKey: 'test' },
+    ]
+    store.chatProfileId = 'first'
+    const conv = conversation('profile-choice')
+    store.conversations = [conv]
+    const wrapper = await panel(conv)
+    await wrapper.get('textarea').setValue('保留草稿')
+    await wrapper.get('select[aria-label="选择对话配置"]').setValue('second')
+    await flushPromises()
+    expect(text(wrapper)).toBe('保留草稿')
+    expect(store.chatProfileId).toBe('second')
+    expect(window.db.settings.set).toHaveBeenCalledWith('llm_profile_chat', 'second')
+    await wrapper.get('[aria-label="发送消息"]').trigger('click')
+    await flushPromises()
+    const requests = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)))
+    expect(requests.find(body => body.stream)?.model).toBe('second-model')
+  })
+
   it.each(['constructor', '__proto__'])('owns drafts safely for persisted conversation ID %s', async id => {
     const wrapper = await panel(conversation(id))
     await wrapper.get('textarea').setValue('自定义 ID 的草稿')

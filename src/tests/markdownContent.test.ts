@@ -4,8 +4,19 @@ import MarkdownContent from '../components/MarkdownContent.vue'
 import { renderMarkdown } from '../utils/markdown'
 const id = 'a'.repeat(64)
 const data = 'data:image/png;base64,aGVsbG8='
-beforeEach(() => { vi.mocked(window.db.docling.readAsset).mockClear().mockResolvedValue(data) })
+beforeEach(() => {
+  vi.mocked(window.db.docling.readAsset).mockClear().mockResolvedValue(data)
+  vi.mocked(window.db.documentSummary.readAsset).mockClear().mockResolvedValue(null)
+})
 describe('offline illustrated Markdown', () => {
+  it('loads native original crops without needing Docling', async () => {
+    vi.mocked(window.db.documentSummary.readAsset).mockResolvedValue(data)
+    const wrapper = mount(MarkdownContent, { props: { content: `![Original](asset:${id})` }, global: { stubs: { ElDialog: true } } })
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe(data)
+    expect(window.db.docling.readAsset).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it('renders controlled IDs with no arbitrary file or script access', () => {
     const html = renderMarkdown(`![Figure 1](asset:${id}) [p2](paper-source:paper:1) ![bad](asset:../../secret)`)
     expect(html).toContain(`data-asset-id="${id}"`)

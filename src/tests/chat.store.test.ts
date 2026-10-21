@@ -8,6 +8,9 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   default: {},
   GlobalWorkerOptions: { workerSrc: '' },
 }))
+vi.mock('../utils/visualSummaryPdf', () => ({
+  renderSummaryPdf: vi.fn().mockResolvedValue([{ page: 0, width: 10, height: 10, data: 'data:image/png;base64,aGVsbG8=' }]),
+}))
 
 import { useChatStore, CAPPED_MAX_TOKENS_DEFAULT } from '../stores/chat'
 // indexPaper 一进来就 `void ensureEmbedder()`：真实实现会动态 import transformers 并真的
@@ -224,22 +227,26 @@ describe('useChatStore', () => {
     expect(firstRoundCalls).toBe(1)
   })
 
-  it('/abstract uses Docling evidence with the current chat model', async () => {
-    const document = (await import('../utils/doclingDocument')).normalizeDoclingDocument({ texts: [{ text: 'Transformer evidence' }] })
-    vi.mocked(window.db.docling.convert).mockResolvedValue({ document, sourceHash: 'a'.repeat(64), configHash: 'b'.repeat(64), cached: true })
+  it('/abstract reads original page images with the current chat model without Docling', async () => {
+    vi.mocked(window.db.docling.convert).mockClear()
     vi.mocked(window.db.paper.get).mockResolvedValue({
       id: 'paper-1', title: 'Attention Is All You Need', authors: [], abstract: '', year: 2017,
       tags: [], status: 'unread', fileName: 'paper.pdf', fileHash: '', addedAt: 1, knowledgeBaseId: 'default',
     })
-    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: 'A transformer paper summary.' }, finish_reason: 'stop' }] }) })
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ choices: [{ message: { content: '{"materials":[]}' }, finish_reason: 'stop' }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ choices: [{ message: { content: 'A transformer paper summary.' }, finish_reason: 'stop' }] }) })
     const store = useChatStore()
     await store.init()
-    await store.setDoclingConfig({ ...(await import('../utils/doclingDocument')).DEFAULT_DOCLING_SETTINGS, baseUrl: 'http://localhost:5001' })
+    await store.updateProfile(store.chatProfile.id, { apiKey: 'test-key', model: 'deepseek-flash' })
     const conv = await store.newConversation('Summary', ['paper-1'])
     expect(await store.sendMessage(conv.id, '/abstract')).toBe('A transformer paper summary.')
     expect(conv.messages[1].sources).toEqual([{ label: 'Attention Is All You Need', paperId: 'paper-1' }])
-    expect(global.fetch).toHaveBeenCalledOnce()
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(window.db.docling.convert).not.toHaveBeenCalled()
     expect(vi.mocked(global.fetch).mock.calls[0][0]).toContain('/chat/completions')
+    const request = JSON.parse(String(vi.mocked(global.fetch).mock.calls[1][1]?.body))
+    expect(request.messages[1].content.some((part: { type: string }) => part.type === 'image_url')).toBe(true)
   })
 
   it('/abstract requires a selected paper', async () => {

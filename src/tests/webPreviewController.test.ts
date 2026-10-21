@@ -2,26 +2,44 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'crypto'
 import { readFileSync, writeFileSync } from 'fs'
 import type { BrowserWindow } from 'electron'
-import { previewControllerForSender, registerPreviewWindow, unregisterPreviewWindow } from '../../electron/webPreview'
+import { clearPreviewData, previewControllerForSender, registerPreviewWindow, unregisterPreviewWindow } from '../../electron/webPreview'
 
 const fake = vi.hoisted(() => ({
   views: [] as any[],
+  captureVisual: vi.fn(async (_contents?: unknown) => Buffer.from('%PDF-1.7\nvisual').toString('base64')),
   permissionHandler: undefined as undefined | ((_contents: unknown, permission: string, callback: (allowed: boolean) => void) => void),
   permissionCheckHandler: undefined as undefined | ((_contents: unknown, permission: string) => boolean),
   sessionHandlers: new Map<string, (...args: any[]) => void>(),
   requestHandlers: [] as Array<(details: { url: string; resourceType: string }, callback: (result: { cancel: boolean }) => void) => void>,
   externalOpen: vi.fn(async (_url: string) => {}),
   windowBySender: new Map<object, object>(),
+  clearingStartedWithLivePage: false,
+}))
+
+vi.mock('../../electron/webSummaryCapture', () => ({
+  withWebSummaryCapture: (contents: any, task: any) => task({
+    assertActive: () => {},
+    readDom: () => contents.executeJavaScript('capture DOM checkpoint'),
+    print: () => fake.captureVisual(contents),
+  }),
 }))
 
 vi.mock('electron', () => ({
-  BrowserWindow: { fromWebContents: (sender: object) => fake.windowBySender.get(sender) ?? null },
+  BrowserWindow: {
+    fromWebContents: (sender: object) => fake.windowBySender.get(sender) ?? null,
+    getAllWindows: () => [...fake.windowBySender.values()],
+  },
   session: {
     fromPartition: () => ({
       setPermissionRequestHandler: (handler: typeof fake.permissionHandler) => { fake.permissionHandler = handler },
       setPermissionCheckHandler: (handler: typeof fake.permissionCheckHandler) => { fake.permissionCheckHandler = handler },
       on: (name: string, handler: (...args: any[]) => void) => { fake.sessionHandlers.set(name, handler) },
       webRequest: { onBeforeRequest: (handler: typeof fake.requestHandlers[number]) => { fake.requestHandlers.push(handler) } },
+      clearCache: async () => {
+        fake.clearingStartedWithLivePage = fake.views.some(view => !view.webContents.isDestroyed())
+      },
+      clearStorageData: async () => {},
+      clearCodeCaches: async () => {},
     }),
   },
   shell: { openExternal: fake.externalOpen },
@@ -67,6 +85,8 @@ vi.mock('electron', () => ({
 function appWindow() {
   const win = {
     isDestroyed: vi.fn(() => false),
+    isVisible: vi.fn(() => true),
+    isMinimized: vi.fn(() => false),
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     webContents: { send: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1000, height: 800 }),
@@ -76,6 +96,7 @@ function appWindow() {
 }
 
 beforeEach(() => {
+  fake.captureVisual.mockReset().mockResolvedValue(Buffer.from('%PDF-1.7\nvisual').toString('base64'))
   fake.views.length = 0
   fake.sessionHandlers.clear()
   fake.requestHandlers.length = 0
@@ -83,9 +104,18 @@ beforeEach(() => {
   fake.permissionCheckHandler = undefined
   fake.externalOpen.mockClear()
   fake.windowBySender.clear()
+  fake.clearingStartedWithLivePage = false
 })
 
 describe('isolated HTML preview controller', () => {
+  it('closes active web pages before clearing browser data so requests cannot refill the cache', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/start', { x: 0, y: 0, width: 600, height: 400 })
+    await clearPreviewData()
+    expect(fake.clearingStartedWithLivePage).toBe(false)
+    expect(fake.views[0].webContents.isDestroyed()).toBe(true)
+    expect(controller.getState()).toMatchObject({ visible: false, loading: false, url: '' })
+  })
   it('releases child views after the owning window is destroyed without using its native view or IPC', async () => {
     const win = appWindow()
     const controller = registerPreviewWindow(win)
@@ -234,7 +264,20 @@ describe('isolated HTML preview controller', () => {
     expect(result.contentHash).toBe(createHash('sha256').update(result.html).digest('hex'))
     expect(result.capturedAt).toBeGreaterThan(0)
     expect(Buffer.from(result.archiveMhtml!, 'base64').toString()).toContain('multipart/related')
+    expect(Buffer.from(result.visualPdf!, 'base64').toString()).toContain('%PDF-')
+    expect(fake.captureVisual).toHaveBeenCalledWith(contents)
     expect(contents.savePage).toHaveBeenCalledWith(expect.stringMatching(/\.mhtml$/), 'MHTML')
+  })
+
+  it('clears a previous visual capture warning after a successful retry', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    await controller.open('https://example.org/article', { x: 80, y: 64, width: 700, height: 500 })
+    fake.views[0].webContents.emit('did-stop-loading')
+    fake.captureVisual.mockRejectedValueOnce(new Error('temporary missing resource'))
+    await controller.captureSnapshot()
+    expect(controller.getState().notice).toContain('视觉副本未就绪')
+    await controller.captureSnapshot()
+    expect(controller.getState().notice).toBe('')
   })
 
   it('keeps the DOM and conversation source when complete-page saving fails', async () => {
@@ -302,6 +345,20 @@ describe('isolated HTML preview controller', () => {
     expect(fake.views).toHaveLength(3)
     expect(fake.views[1].webContents.close).toHaveBeenCalledOnce()
     expect(fake.views[2].webContents.loadURL).toHaveBeenCalledWith('https://example.org/article')
+  })
+
+  it('starts capture at DOM readiness even if a secondary resource keeps loadURL pending', async () => {
+    const controller = registerPreviewWindow(appWindow())
+    const bounds = { x: 80, y: 64, width: 700, height: 500 }
+    await controller.open('https://example.org/initial', bounds)
+    const contents = fake.views[0].webContents
+    contents.loadURL.mockImplementationOnce(async (url: string) => {
+      contents.currentUrl = url
+      return new Promise<void>(() => {})
+    })
+    const pending = controller.openAndCapture('https://example.org/article', bounds)
+    contents.emit('dom-ready')
+    await expect(pending).resolves.toMatchObject({ finalUrl: 'https://example.org/article', visualPdf: expect.any(String) })
   })
 
   it('captures a redirected HTTPS page from one explicit open', async () => {

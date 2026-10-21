@@ -88,7 +88,7 @@
           @keydown.enter="handleEnter"
         />
         <div class="composer-footer">
-          <span class="composer-model" :title="chatStore.chatProfile?.model"><el-icon aria-hidden="true"><Cpu /></el-icon>{{ chatStore.chatProfile?.name || '对话模型' }}</span>
+          <ChatProfileSelect class="composer-model" :profiles="chatStore.profiles" :model-value="chatStore.chatProfile?.id || ''" :disabled="loading || isRunActive" @update:model-value="chatStore.setChatProfileId($event)" />
           <span class="input-hint">Enter 发送<span class="newline-hint">，Shift + Enter 换行</span></span>
           <el-button v-if="isRunActive" size="small" text aria-label="停止生成" @click="stopRun">停止</el-button>
           <el-button type="primary" :loading="loading" :disabled="!input.trim() || !conversation || isRunActive" aria-label="发送消息" @click="send" class="send-btn"><el-icon><Top /></el-icon></el-button>
@@ -103,9 +103,10 @@ import { ref, computed, watch } from 'vue'
 import { useChatScroll } from '../utils/chatScroll'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Link, Document, Close, Top, ArrowRight, Cpu } from '@element-plus/icons-vue'
+import { Link, Document, Close, Top, ArrowRight } from '@element-plus/icons-vue'
 import { useChatStore, type Conversation } from '../stores/chat'
 import MarkdownContent from './MarkdownContent.vue'
+import ChatProfileSelect from './ChatProfileSelect.vue'
 import { useChatDraftStore } from '../stores/chatDrafts'
 import { isJumpable, type SourceRef } from '../utils/sourceRef'
 
@@ -377,8 +378,7 @@ async function send() {
 .chip-close { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; flex-shrink: 0; border: 0; background: transparent; color: inherit; cursor: pointer; border-radius: 4px; }
 .chip-close:hover { color: var(--danger); }
 .composer-footer { display: flex; align-items: center; gap: 10px; padding: 0 10px 10px 14px; }
-.composer-model { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 10px; max-width: 42%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.composer-model .el-icon { font-size: 13px; flex-shrink: 0; }
+.composer-model { max-width: 42%; }
 .input-hint { font-size: 10px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
 .send-btn { width: 32px; height: 32px; padding: 0; flex-shrink: 0; border-radius: 7px; }
 .send-btn .el-icon { font-size: 17px; }

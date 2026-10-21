@@ -7,7 +7,7 @@
       <h2>从原文，读懂整篇论文</h2>
       <p>生成一份带原文依据的图文摘要，梳理研究问题、方法、结果与局限。生成后会保存在本机。</p>
       <el-button type="primary" size="large" :loading="generating" @click="generate()">生成摘要</el-button>
-      <p v-if="generating" class="abstract-progress" role="status">{{ progress }}</p>
+      <p v-if="generating || preparing" class="abstract-progress" role="status">{{ progress }} <el-button text size="small" @click="chatStore.stopPaperAbstract(props.paperId)">停止</el-button></p>
       <p v-if="error" class="abstract-error" role="alert">{{ error }}</p>
     </div>
 
@@ -19,11 +19,11 @@
         </div>
         <el-button v-if="!report.truncated" text size="small" :loading="generating" @click="generate(true)">重新生成</el-button>
       </header>
-      <p v-if="generating && !report.truncated" class="abstract-progress" role="status">{{ progress }}</p>
+      <p v-if="generating && !report.truncated" class="abstract-progress" role="status">{{ progress }} <el-button text size="small" @click="chatStore.stopPaperAbstract(props.paperId)">停止</el-button></p>
       <div v-if="report.truncated" class="abstract-continuation">
         <span>摘要尚未生成完毕</span>
         <el-button :loading="generating" @click="generate()">继续生成</el-button>
-        <p v-if="generating" role="status">{{ progress }}</p>
+        <p v-if="generating" role="status">{{ progress }} <el-button text size="small" @click="chatStore.stopPaperAbstract(props.paperId)">停止</el-button></p>
       </div>
       <p v-if="error" class="abstract-error" role="alert">{{ error }}</p>
       <MarkdownContent class="abstract-content" :content="report.content" @open-source="emit('open-source', $event)" />
@@ -36,32 +36,38 @@ import { computed, ref, watch } from 'vue'
 import { Document } from '@element-plus/icons-vue'
 import MarkdownContent from './MarkdownContent.vue'
 import { useChatStore } from '../stores/chat'
+import { useVisualSummaryStore } from '../stores/visualSummary'
 import type { SourceRef } from '../utils/sourceRef'
 import type { PaperAbstractReport } from '../utils/paperAbstract'
 
 const props = defineProps<{ paperId: string }>()
 const emit = defineEmits<{ (event: 'open-source', source: SourceRef): void }>()
 const chatStore = useChatStore()
-const report = ref<PaperAbstractReport | null>(null)
-const loadingCache = ref(true)
-const generating = ref(false)
-const error = ref('')
-const progress = computed(() => chatStore.abstractProgress[`paper-abstract:${props.paperId}`] || '正在生成摘要…')
+const visualStore = useVisualSummaryStore()
+const cachedReport = ref<PaperAbstractReport | null>(null)
+const readingCache = ref(true)
+const cacheError = ref('')
+const state = computed(() => chatStore.paperAbstractStates[props.paperId])
+const report = computed(() => state.value?.report ?? cachedReport.value)
+const loadingCache = computed(() => readingCache.value && !state.value)
+const generating = computed(() => state.value?.generating ?? false)
+const preparing = computed(() => visualStore.states[`paper:${props.paperId}`]?.preparing ?? false)
+const error = computed(() => state.value?.error || visualStore.states[`paper:${props.paperId}`]?.error || cacheError.value)
+const progress = computed(() => visualStore.states[`paper:${props.paperId}`]?.progress || chatStore.abstractProgress[`paper-abstract:${props.paperId}`] || '正在生成摘要…')
 let generation = 0
 
 watch(() => props.paperId, async paperId => {
   const current = ++generation
-  report.value = null
-  error.value = ''
-  loadingCache.value = true
-  generating.value = false
+  cachedReport.value = null
+  cacheError.value = ''
+  readingCache.value = true
   try {
     const saved = await window.db.paperAbstract.get(paperId)
-    if (current === generation) report.value = saved
+    if (current === generation) cachedReport.value = saved
   } catch (cause) {
-    if (current === generation) error.value = cause instanceof Error ? cause.message : '摘要读取失败，请重试'
+    if (current === generation) cacheError.value = cause instanceof Error ? cause.message : '摘要读取失败，请重试'
   } finally {
-    if (current === generation) loadingCache.value = false
+    if (current === generation) readingCache.value = false
   }
 }, { immediate: true })
 
@@ -69,15 +75,12 @@ async function generate(force = false) {
   if (generating.value) return
   const paperId = props.paperId
   const current = generation
-  error.value = ''
-  generating.value = true
+  cacheError.value = ''
   try {
     const saved = await chatStore.generatePaperAbstract(paperId, force)
-    if (current === generation) report.value = saved
+    if (current === generation) cachedReport.value = saved
   } catch (cause) {
-    if (current === generation) error.value = cause instanceof Error ? cause.message : '摘要生成失败，请重试'
-  } finally {
-    if (current === generation) generating.value = false
+    if (current === generation) cacheError.value = cause instanceof Error ? cause.message : '摘要生成失败，请重试'
   }
 }
 </script>

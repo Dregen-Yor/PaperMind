@@ -1,86 +1,101 @@
 <template>
   <section class="web-qa-panel" aria-label="网页问答">
     <header class="qa-header">
-      <div class="qa-heading">
-        <span class="qa-eyebrow">PAPERMIND · WEB</span>
-        <h2>网页问答</h2>
-        <p class="model-name">{{ modelName || '尚未选择模型' }}</p>
+      <div class="conversation-picker">
+        <select id="web-qa-history" aria-label="当前网页对话" :value="session?.id || ''" @change="onHistoryChange">
+          <option value="">新对话</option>
+          <option v-for="(item, index) in sessions" :key="item.id" :value="item.id" :title="`${formatTime(item.createdAt)} · ${item.title || item.finalUrl}`">{{ 'firstQuestion' in item && item.firstQuestion ? item.firstQuestion : `对话 ${index + 1}` }}</option>
+        </select>
+        <ArrowDown aria-hidden="true" />
       </div>
-      <button type="button" class="new-button" data-action="new-session" @click="emit('new')">＋ 新建问答</button>
+      <button type="button" class="new-button" data-action="new-session" aria-label="新建网页问答" title="新建问答" @click="emit('new')"><Plus aria-hidden="true" /></button>
     </header>
 
-    <div class="session-toolbar">
-      <label for="web-page-history">网页历史</label>
-      <select id="web-page-history" data-action="history-page" :value="selectedPageId || ''" @change="onPageChange">
-        <option value="">选择已保存网页</option>
-        <option v-for="page in pages || []" :key="page.id" :value="page.id">{{ page.title || page.canonicalUrl }} · {{ page.sessionCount }} 个会话</option>
-      </select>
-      <button v-if="selectedPageId" type="button" data-action="remove-page" title="删除此网页和全部会话" @click="emit('remove-page', selectedPageId)">删除</button>
-    </div>
-    <p v-if="selectedPage" class="page-meta">{{ selectedPage.snapshotCount }} 个缓存版本 · {{ formatSize(selectedPage.totalBytes) }} · 最近打开 {{ formatTime(selectedPage.lastOpenedAt) }}</p>
-    <div class="session-toolbar">
-      <label for="web-qa-history">历史会话</label>
-      <select id="web-qa-history" :value="session?.id || ''" @change="onHistoryChange">
-        <option value="">当前页面的新会话</option>
-        <option v-for="item in sessions" :key="item.id" :value="item.id">{{ 'firstQuestion' in item && item.firstQuestion ? item.firstQuestion : item.title || item.finalUrl }} · 创建 {{ formatTime(item.createdAt) }} · 更新 {{ formatTime(item.updatedAt) }} · 快照 {{ formatTime(item.capturedAt) }}</option>
-      </select>
-    </div>
-
-    <div v-if="session" class="source-card">
-      <span class="source-kicker">本轮依据的网页快照</span>
-      <strong :title="session.title">{{ session.title || '未命名网页' }}</strong>
-      <span class="source-url" :title="session.finalUrl">{{ session.finalUrl }}</span>
-      <div class="source-meta">
-        <span>{{ formatTime(session.capturedAt) }}</span>
-        <span>{{ formatSize(session.byteLength) }}</span>
-        <button type="button" @click="emit('open-source')">打开原网址 ↗</button>
+    <details class="page-details">
+      <summary><Document aria-hidden="true" /><span>网页与来源</span><ArrowDown class="details-arrow" aria-hidden="true" /></summary>
+      <div class="details-content">
+        <div class="session-toolbar">
+          <label for="web-page-history">网页历史</label>
+          <select id="web-page-history" data-action="history-page" :value="selectedPageId || ''" @change="onPageChange">
+            <option value="">选择已保存网页</option>
+            <option v-for="page in pages || []" :key="page.id" :value="page.id">{{ page.title || page.canonicalUrl }} · {{ page.sessionCount }} 个会话</option>
+          </select>
+          <button v-if="selectedPageId" type="button" data-action="remove-page" title="删除此网页和全部会话" @click="emit('remove-page', selectedPageId)">删除</button>
+        </div>
+        <p v-if="selectedPage" class="page-meta">{{ selectedPage.snapshotCount }} 个缓存版本 · {{ formatSize(selectedPage.totalBytes) }} · 最近打开 {{ formatTime(selectedPage.lastOpenedAt) }}</p>
+        <div v-if="session" class="source-card">
+          <span class="source-kicker">本轮依据的网页快照</span>
+          <strong :title="session.title">{{ session.title || '未命名网页' }}</strong>
+          <span class="source-url" :title="session.finalUrl">{{ session.finalUrl }}</span>
+          <div class="source-meta">
+            <span>{{ formatTime(session.capturedAt) }}</span>
+            <span>{{ formatSize(session.byteLength) }}</span>
+            <button type="button" @click="emit('open-source')">打开原网址 ↗</button>
+          </div>
+        </div>
       </div>
-    </div>
+    </details>
     <div v-if="sourceChanged && session" class="source-warning" role="status">
       当前网页已变化；此会话仍依据上方保存的快照。
       <button type="button" @click="emit('new')">为当前网页新建问答</button>
     </div>
 
     <div class="qa-scroll" ref="messagesRef" aria-live="polite" @scroll="onScroll">
-      <div v-if="!session" class="empty-qa">
-        <span class="empty-mark" aria-hidden="true">↗</span>
-        <h3>从这篇网页开始提问</h3>
-        <p>{{ canAsk ? '网页已保存，可以开始提问。' : '先在左侧打开或从历史中选择网页，再从这里提问。' }}</p>
+      <div v-if="!session || !session.messages.length" class="empty-qa">
+        <img class="empty-visual" :src="paperMindMark" alt="" />
+        <h2 class="font-display">读到这里，想问些什么？</h2>
+        <p>{{ canAsk ? '从一个问题开始，理解网页背后的思路。\n梳理核心观点，探索内容中的细节与启发。' : '先在左侧打开或从历史中选择网页，\n再从这里提问。' }}</p>
+        <div v-if="canAsk" class="starter-questions">
+          <button v-for="starter in starterQuestions" :key="starter.label" type="button" class="starter-question" :disabled="busy" @click="choosePrompt(starter.question)">
+            <span>{{ starter.label }}</span><ArrowRight aria-hidden="true" />
+          </button>
+        </div>
       </div>
       <div v-else class="message-list">
         <article v-for="message in session.messages" :key="message.id" class="qa-message" :class="message.role">
-          <span class="message-role">{{ message.role === 'user' ? '你' : 'PaperMind' }}</span>
-          <MarkdownContent v-if="message.role === 'assistant' && message.content" :content="message.content" class="message-body" />
-          <p v-else-if="message.content" class="message-body plain">{{ message.content }}</p>
-          <p v-if="message.role === 'assistant' && message.status === 'streaming' && !streamedText" class="message-status">正在生成…</p>
-          <p v-if="message.role === 'assistant' && message.status !== 'completed' && message.status !== 'streaming'" class="message-error">{{ message.error || '回答未完成' }}</p>
+          <div class="msg-avatar" aria-hidden="true"><span v-if="message.role === 'user'">你</span><img v-else :src="paperMindMarkLight" alt="" /></div>
+          <div class="msg-body">
+            <div v-if="message.role === 'assistant'" class="msg-author">PaperMind</div>
+            <MarkdownContent v-if="message.role === 'assistant' && message.content" :content="message.content" class="msg-content" />
+            <p v-else-if="message.content" class="msg-content plain">{{ message.content }}</p>
+            <div v-if="message.role === 'assistant' && message.status === 'streaming' && !streamedText" class="typing" role="status" aria-label="正在生成回答"><span /><span /><span /></div>
+            <p v-if="message.role === 'assistant' && message.status !== 'completed' && message.status !== 'streaming'" class="message-error">{{ message.error || '回答未完成' }}</p>
+          </div>
         </article>
         <article v-if="busy && streamedText" class="qa-message assistant live-answer">
-          <span class="message-role">PaperMind · 正在生成</span>
-          <MarkdownContent :content="streamedText" class="message-body" />
+          <div class="msg-avatar" aria-hidden="true"><img :src="paperMindMarkLight" alt="" /></div>
+          <div class="msg-body">
+            <div class="msg-author">PaperMind</div>
+            <MarkdownContent :content="streamedText" class="msg-content is-streaming" />
+          </div>
         </article>
         <button v-if="canRetry" type="button" class="retry-button" data-action="retry-question" @click="emit('retry')">重试上一问</button>
       </div>
     </div>
 
     <button v-if="!following" type="button" class="back-to-bottom" aria-label="回到底部" @click="scrollToBottom(true)">回到底部 ↓</button>
-    <div class="composer">
+    <div class="composer-wrap">
       <p v-if="error" class="composer-error" role="alert">{{ error }}</p>
-      <p v-if="!session" class="privacy-note">提问会将已保存网页的完整 DOM 发送到所选模型服务，并在本机保存问答。</p>
-      <textarea v-model="draft" aria-label="问题输入框" rows="3" placeholder="问问这篇网页…" :disabled="busy || !canAsk" @keydown.enter="handleEnter" />
-      <div class="composer-footer">
-        <span>{{ busy ? '正在生成回答' : 'Enter 发送，Shift + Enter 换行' }}</span>
-        <button v-if="busy" type="button" class="stop-button" data-action="stop-question" @click="emit('stop')">停止</button>
-        <button v-else type="button" class="send-button" data-action="send-question" :disabled="!canAsk || !draft.trim()" @click="submit">发送问题 →</button>
+      <div class="chat-input-area">
+        <textarea ref="inputRef" v-model="draft" aria-label="问题输入框" rows="2" placeholder="围绕网页提问…" :disabled="busy || !canAsk" @keydown.enter="handleEnter" />
+        <div class="composer-footer">
+          <ChatProfileSelect class="composer-model" :profiles="profiles || []" :model-value="profileId || ''" :fallback-name="modelName" :disabled="busy" @update:model-value="emit('select-profile', $event)" />
+          <span class="input-hint">Enter 发送<span class="newline-hint">，Shift + Enter 换行</span></span>
+          <button v-if="busy" type="button" class="stop-button" data-action="stop-question" @click="emit('stop')">停止</button>
+          <button v-else type="button" class="send-button" data-action="send-question" aria-label="发送消息" :disabled="!canAsk || !draft.trim()" @click="submit"><Top aria-hidden="true" /></button>
+        </div>
       </div>
+      <p v-if="!session" class="privacy-note">提问会将已保存网页的完整 DOM 发送到所选模型服务，并在本机保存问答。</p>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { ArrowDown, ArrowRight, Document, Plus, Top } from '@element-plus/icons-vue'
 import { useChatScroll } from '../utils/chatScroll'
 import MarkdownContent from './MarkdownContent.vue'
+import ChatProfileSelect, { type ChatProfileOption } from './ChatProfileSelect.vue'
 import type { WebPageSummary, WebQaMessage, WebQaSessionSummary } from '../types/webQa'
 
 const props = defineProps<{
@@ -94,8 +109,11 @@ const props = defineProps<{
   canAsk: boolean
   sourceChanged: boolean
   modelName: string
+  profiles?: ChatProfileOption[]
+  profileId?: string
 }>()
 const emit = defineEmits<{
+  'select-profile': [id: string]
   send: [question: string]
   retry: []
   stop: []
@@ -105,6 +123,18 @@ const emit = defineEmits<{
   'remove-page': [id: string]
   'open-source': []
 }>()
+const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
+const paperMindMarkLight = new URL('../../assets/brand/papermind-mark-light.svg', import.meta.url).href
+const starterQuestions = [
+  { label: '概括核心观点', question: '请概括这篇网页的核心观点和主要结论。' },
+  { label: '解释关键内容', question: '请解释这篇网页中的关键概念，以及它们之间的关系。' },
+  { label: '分析局限与启发', question: '这篇网页的观点有哪些局限？有哪些值得进一步思考的启发？' },
+]
+const inputRef = ref<HTMLTextAreaElement>()
+function choosePrompt(question: string) {
+  draft.value = question
+  inputRef.value?.focus()
+}
 const draft = ref('')
 const messagesRef = ref<HTMLElement>()
 const { following, onScroll, scrollToBottom } = useChatScroll(messagesRef)
@@ -157,48 +187,188 @@ defineExpose({ clearDraft })
 <style scoped>
 .back-to-bottom { align-self: center; margin: 6px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-base); color: var(--accent); cursor: pointer; font-size: 12px; }
 .web-qa-panel { display: flex; flex-direction: column; width: 100%; min-width: 0; height: 100%; min-height: 0; overflow: hidden; background: var(--bg-surface); color: var(--text-primary); }
-.qa-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 82px; padding: 14px 22px 12px; border-bottom: 1px solid var(--border); }
-.qa-eyebrow, .source-kicker { display: block; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .15em; }
-.qa-heading h2 { margin: 3px 0 1px; font-family: var(--font-reading); font-size: 20px; line-height: 1.2; }
-.model-name { color: var(--text-muted); font-size: 11px; }
+.source-kicker { display: block; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .15em; }
 .new-button, .source-meta button, .source-warning button, .retry-button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; }
-.new-button { flex-shrink: 0; padding: 8px 0; font-weight: 600; }
 .new-button:hover, .source-meta button:hover, .source-warning button:hover, .retry-button:hover { text-decoration: underline; }
-.session-toolbar { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px 22px; border-bottom: 1px solid var(--border-light); }
+.session-toolbar { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 8px 0; }
 .session-toolbar label { flex-shrink: 0; color: var(--text-muted); font-size: 11px; }
 .session-toolbar select { min-width: 0; flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; outline-color: var(--accent); background: var(--bg-base); color: var(--text-primary); font-size: 12px; }
 .session-toolbar button { border: 0; color: var(--danger); background: transparent; cursor: pointer; font-size: 11px; }
-.page-meta { padding: 0 22px 9px; border-bottom: 1px solid var(--border-light); color: var(--text-muted); font-size: 10px; }
-.source-card { display: flex; flex-direction: column; gap: 5px; margin: 14px 22px 0; padding: 12px 14px; border-left: 2px solid var(--accent); background: var(--bg-base); }
+.page-meta { padding: 0 0 9px; color: var(--text-muted); font-size: 10px; }
+.source-card { display: flex; flex-direction: column; gap: 5px; margin: 8px 0 0; padding: 12px 14px; border-left: 2px solid var(--accent); background: var(--bg-base); }
 .source-card strong { overflow: hidden; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }
 .source-url { overflow: hidden; color: var(--text-muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 .source-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--text-muted); font-size: 10px; }
 .source-meta button { margin-left: auto; font-size: 10px; }
 .source-warning { margin: 10px 22px 0; padding: 9px 12px; border: 1px solid var(--accent-dim); border-radius: 5px; color: var(--accent); background: var(--bg-base); font-size: 11px; line-height: 1.6; }
 .source-warning button { display: block; padding: 3px 0 0; font-weight: 600; }
-.qa-scroll { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 18px 22px; }
-.empty-qa { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; min-height: 100%; max-width: 340px; margin: 0 auto; }
-.empty-mark { margin-bottom: 12px; color: var(--accent); font-family: var(--font-reading); font-size: 34px; }
-.empty-qa h3 { font-family: var(--font-reading); font-size: 21px; font-weight: 500; }
-.empty-qa p { margin-top: 8px; color: var(--text-muted); font-size: 12px; line-height: 1.8; }
-.message-list { display: flex; flex-direction: column; min-width: 0; gap: 20px; }
-.qa-message { min-width: 0; max-width: 100%; }
-.qa-message.user { align-self: flex-end; width: max-content; max-width: 88%; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px 12px 2px 12px; background: var(--bg-base); }
-.qa-message.assistant { align-self: stretch; }
-.message-role { display: block; margin-bottom: 6px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
-.message-body { max-width: 100%; overflow-x: auto; color: var(--text-primary); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
-.message-body.plain { white-space: pre-wrap; }
-.message-status { color: var(--text-muted); font-size: 12px; }
 .message-error, .composer-error { color: var(--danger); font-size: 12px; line-height: 1.5; }
 .retry-button { align-self: flex-start; font-weight: 600; }
-.composer { flex-shrink: 0; padding: 14px 22px 18px; border-top: 1px solid var(--border); background: var(--bg-surface); }
-.privacy-note { margin-bottom: 9px; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
-.composer textarea { width: 100%; min-height: 76px; resize: vertical; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; outline: 0; background: var(--bg-base); color: var(--text-primary); font: 12px/1.6 var(--font-ui); }
-.composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
-.composer textarea:disabled { opacity: .55; }
-.composer-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; color: var(--text-muted); font-size: 10px; }
-.send-button, .stop-button { min-height: 32px; padding: 0 12px; border: 0; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 600; }
-.send-button { color: var(--bg-surface); background: var(--accent); }
+.empty-qa { width: 100%; max-width: 380px; margin: auto; padding: 20px 0; display: flex; flex-direction: column; align-items: center; text-align: center; }
+.empty-visual { display: block; width: 64px; height: 64px; margin-bottom: 24px; object-fit: contain; }
+.empty-qa h2 { font-size: 24px; font-weight: 500; line-height: 1.5; color: var(--text-primary); }
+.empty-qa p { margin-top: 12px; font-size: 12px; line-height: 1.95; color: var(--text-muted); white-space: pre-line; }
+.starter-questions { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 280px; margin-top: 28px; }
+.starter-question { display: flex; justify-content: space-between; align-items: center; gap: 16px; border: 1px solid var(--border); background: transparent; border-radius: 7px; padding: 11px 14px; color: var(--text-secondary); text-align: left; font-size: 12px; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.starter-question > svg { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-muted); font-size: 12px; }
+.starter-question:hover { border-color: var(--border-light); background: var(--bg-base); color: var(--accent); }
+.start-conversation { margin-top: 25px; }
+.qa-message { display: flex; gap: 10px; }
+.qa-message.user { flex-direction: row-reverse; }
+.msg-avatar { width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 22px; color: var(--bg-surface); background: var(--accent); line-height: 1; }
+.msg-avatar img { display: block; width: 26px; height: 26px; }
+.qa-message.user .msg-avatar { font-size: 11px; background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border); }
+.msg-body { max-width: calc(100% - 38px); min-width: 0; flex: 1; }
+.qa-message.user .msg-body { flex: 0 1 auto; max-width: 85%; }
+.msg-author { font-size: 11px; font-weight: 600; color: var(--accent); margin: 5px 0 10px; }
+.msg-content { font-size: 14px; line-height: 1.9; color: var(--text-primary); overflow-wrap: anywhere; }
+.msg-content.is-streaming::after { content: '▍'; margin-left: 2px; color: var(--accent); animation: caret-blink 1s steps(2) infinite; }
+@keyframes caret-blink { 50% { opacity: 0; } }
+.msg-error { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--danger-dim); border-radius: 8px; background: var(--danger-dim); }
+.msg-error-text { font-size: 12px; line-height: 1.7; color: var(--danger); overflow-wrap: anywhere; }
+.msg-error-actions { display: flex; gap: 8px; margin-top: 8px; }
+.msg-run-status { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+.qa-message.user .msg-content { background: var(--bg-elevated); border: 1px solid var(--border); padding: 11px 15px; border-radius: 10px 3px 10px 10px; font-size: 13px; line-height: 1.8; }
+.msg-content :deep(code) {
+  background: var(--bg-elevated);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.msg-content :deep(p) { margin: 0 0 0.75em; }
+.msg-content :deep(p:last-child) { margin-bottom: 0; }
+
+.msg-content :deep(h1),
+.msg-content :deep(h2),
+.msg-content :deep(h3),
+.msg-content :deep(h4),
+.msg-content :deep(h5),
+.msg-content :deep(h6) {
+  margin: 1em 0 0.5em;
+  color: var(--text-primary);
+  line-height: 1.35;
+}
+.msg-content :deep(h1:first-child),
+.msg-content :deep(h2:first-child),
+.msg-content :deep(h3:first-child) { margin-top: 0; }
+.msg-content :deep(h1) { font-size: 1.35em; }
+.msg-content :deep(h2) { font-size: 1.2em; }
+.msg-content :deep(h3) { font-size: 1.08em; }
+
+.msg-content :deep(ul),
+.msg-content :deep(ol) {
+  margin: 0.5em 0 0.75em;
+  padding-left: 1.5em;
+}
+.msg-content :deep(li + li) { margin-top: 0.25em; }
+.msg-content :deep(li > p) { margin-bottom: 0.35em; }
+
+.msg-content :deep(blockquote) {
+  margin: 0.75em 0;
+  padding: 0.25em 0 0.25em 0.9em;
+  color: var(--text-secondary);
+  border-left: 3px solid var(--accent);
+}
+
+.msg-content :deep(pre) {
+  margin: 0.75em 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  line-height: 1.5;
+}
+.msg-content :deep(pre code) {
+  padding: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.msg-content :deep(.katex-display) {
+  margin: 0.85em 0;
+  padding: 0.2em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.msg-content :deep(table) {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.75em 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.msg-content :deep(th),
+.msg-content :deep(td) {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.msg-content :deep(th) { background: var(--bg-elevated); }
+
+.msg-content :deep(a) {
+  color: var(--accent);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.msg-content :deep(a:hover) { text-decoration: underline; }
+.msg-content :deep(hr) {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+
+.msg-content :deep(img) { max-width: 100%; height: auto; }
+.typing { padding: 10px 0; display: flex; gap: 5px; width: fit-content; }
+.typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.45; animation: pulse 1.3s infinite; }
+.typing span:nth-child(2) { animation-delay: 0.2s; }
+.typing span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes pulse { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
+.composer-wrap { flex-shrink: 0; padding: 0 20px 20px; }
+.chat-input-area { position: relative; border: 1px solid var(--border-light); border-radius: 11px; background: var(--bg-surface); box-shadow: var(--shadow-sm); transition: border-color 0.15s, box-shadow 0.15s; }
+.chat-input-area:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+textarea { display: block; width: 100%; min-height: 76px; max-height: 200px; resize: none; border: 0; outline: 0; box-shadow: none; border-radius: 11px; padding: 15px 15px 8px; background: transparent; color: var(--text-primary); font: 13px/1.8 var(--font-ui); }
+textarea::placeholder { color: var(--text-muted); }
+textarea:disabled { opacity: .55; }
+
+.qa-header { display: flex; align-items: center; gap: 8px; padding: 12px 20px 4px; flex-shrink: 0; }
+.conversation-picker { position: relative; flex: 1; min-width: 0; }
+.conversation-picker select { width: 100%; min-height: 24px; padding: 0 24px 0 0; appearance: none; background: transparent; border: 0; outline-color: var(--accent); color: var(--text-secondary); font: 12px var(--font-ui); text-overflow: ellipsis; cursor: pointer; }
+.conversation-picker > svg { position: absolute; right: 8px; top: 7px; width: 12px; height: 12px; pointer-events: none; color: var(--text-muted); }
+.conversation-picker option { background: var(--bg-surface); color: var(--text-primary); }
+.new-button { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.new-button svg { width: 14px; height: 14px; }
+.new-button:hover { background: var(--bg-base); color: var(--accent); }
+.page-details { flex-shrink: 0; max-height: 35%; overflow-y: auto; margin: 0 20px; color: var(--text-muted); }
+.page-details summary { display: flex; align-items: center; gap: 6px; width: fit-content; padding: 6px 0; font-size: 10px; list-style: none; cursor: pointer; }
+.page-details summary::-webkit-details-marker { display: none; }
+.page-details summary svg { width: 12px; height: 12px; }
+.page-details[open] .details-arrow { transform: rotate(180deg); }
+.details-content { padding: 0 0 8px; }
+.qa-scroll { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 28px 24px; }
+.message-list { display: flex; flex-direction: column; gap: 28px; min-width: 0; }
+.plain { white-space: pre-wrap; }
+.composer-footer { display: flex; align-items: center; gap: 10px; padding: 0 10px 10px 14px; }
+.composer-model { max-width: 42%; }
+.input-hint { margin-left: auto; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.send-button { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; padding: 0; border: 0; border-radius: 7px; background: var(--accent); color: var(--bg-surface); cursor: pointer; }
+.send-button svg { width: 17px; height: 17px; }
 .send-button:disabled { opacity: .45; cursor: default; }
-.stop-button { color: var(--accent); background: var(--accent-dim); }
+.stop-button { padding: 4px 6px; border: 0; background: transparent; color: var(--accent); font-size: 12px; cursor: pointer; }
+.privacy-note { margin: 8px 4px 0; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.composer-error { margin-bottom: 10px; }
+@container (max-width: 480px) {
+  .newline-hint { display: none; }
+  .composer-model { max-width: 50%; }
+}
+@media (max-width: 900px) {
+  .qa-scroll { padding: 22px 18px; }
+  .message-list { gap: 24px; }
+  .composer-wrap { padding-left: 14px; padding-right: 14px; }
+  .newline-hint { display: none; }
+}
 </style>

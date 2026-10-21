@@ -37,17 +37,19 @@ describe('命令识别（#8）', () => {
     expect(assistant.content).toContain('/abstract')
   })
 
-  it('/ABSTRACT 大小写不敏感并使用默认 Docling 服务；解析失败文案只有一句', async () => {
+  it('/ABSTRACT 大小写不敏感；原文缺失直接报错且不调用 Docling', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('should not be called')) as any
     mockDb().docling.convert.mockReset().mockRejectedValue(new Error('未配置测试解析结果'))
+    mockDb().paper.get.mockResolvedValue(null)
+    mockDb().paper.readFile.mockResolvedValue(null)
     const store = useChatStore()
     await store.init()
     const conv = await store.newConversation('t', ['paper-1'])
 
-    await expect(store.sendMessage(conv.id, '/ABSTRACT')).rejects.toThrow('未配置测试解析结果')
-    expect(mockDb().docling.convert).toHaveBeenCalledWith('paper-1')
+    await expect(store.sendMessage(conv.id, '/ABSTRACT')).rejects.toThrow('论文不存在或 PDF 文件缺失')
+    expect(mockDb().docling.convert).not.toHaveBeenCalled()
     const assistant = conv.messages.find(m => m.role === 'assistant')!
-    expect(assistant.error).toBe('未配置测试解析结果')
+    expect(assistant.error).toBe('论文不存在或 PDF 文件缺失，请重新导入')
     expect(assistant.error).not.toContain('请检查设置中的 API 配置')
   })
 })
