@@ -25,8 +25,8 @@ import type { ChatRunStatus } from '../types/chatRun'
 import type { Message, Conversation } from '../types/chat'
 import type { PaperAbstractReport, PaperAbstractState } from '../utils/paperAbstract'
 import { DEFAULT_DOCLING_SETTINGS, DOCLING_SETTINGS_KEY, normalizeDoclingSettings, type DoclingSettings } from '../utils/doclingDocument'
-import { prepareDoclingPaper } from '../utils/doclingPdf'
-import { abstractRunKey, generateDoclingAbstract } from '../utils/doclingAbstract'
+import { useVisualSummaryStore } from './visualSummary'
+import { hashVisualSource } from '../utils/visualSummary'
 import {
   ABSTRACT_MODEL,
 } from '../utils/abstractSummarizer'
@@ -307,6 +307,7 @@ export const useChatStore = defineStore('chat', () => {
   const abstractProgress = ref<Record<string, string>>({})
   const paperAbstractStates = ref<Record<string, PaperAbstractState>>({})
   const paperAbstractJobs = new Map<string, Promise<PaperAbstractReport>>()
+  const paperAbstractControllers = new Map<string, AbortController>()
   const activeChatRuns = new Map<string, ActiveChatRun>()
   const startingChatRuns = new Set<string>()
   /**
@@ -1099,20 +1100,33 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function readPaperAbstractCache(paperId: string): Promise<PaperAbstractReport | null> {
+    const saved = await window.db.paperAbstract.get(paperId)
+    if (!saved) return null
+    const native = await window.db.documentSummary.get('paper', paperId, 'report')
+    // Historical Docling reports have no native version record and remain readable.
+    if (!native) return saved
+    const file = await window.db.paper.readFile(paperId)
+    if (!file || await hashVisualSource(file) !== native.sourceHash) return null
+    try {
+      const report = JSON.parse(native.payload)
+      return typeof report.content === 'string' && typeof report.truncated === 'boolean'
+        ? { ...saved, content: report.content, truncated: report.truncated } : null
+    } catch { return null }
+  }
+
   // ---------- /abstract ----------
 
-  async function generateAbstract(conv: Conversation, resume?: AbstractResume, run?: ActiveChatRun, prefix = '', priorSources: SourceRef[] = []): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
+  async function generateAbstract(conv: Conversation, resume?: AbstractResume, run?: ActiveChatRun, prefix = '', priorSources: SourceRef[] = [], force = false, ownerSignal?: AbortSignal): Promise<{ content: string; sources: SourceRef[]; truncated: boolean; context: string }> {
     const paperIds = [...(resume?.paperIds ?? conv.paperIds)]
     if (!paperIds.length) throw new Error('请先在当前对话中选择至少一篇论文')
-    if (doclingConfigError.value) throw new Error(doclingConfigError.value)
-    if (!doclingConfig.value.baseUrl) throw new Error('请先在设置中填写 Docling 服务地址')
     const profile = { ...chatProfile.value }
     if (!profile.model.trim()) throw new Error('请先配置当前对话模型')
     const sections: string[] = []
     const sources: SourceRef[] = []
     let truncated = false
     let context = ''
-    const signal = run?.controller.signal
+    const signal = run?.controller.signal ?? ownerSignal
     const check = () => { if (signal) throwIfCancelled(signal) }
     const wait = <T>(work: Promise<T>) => signal ? awaitOrCancel(work, signal) : work
     const progress = (label: string) => {
@@ -1126,36 +1140,14 @@ export const useChatStore = defineStore('chat', () => {
         const paper = await wait(window.db.paper.get(paperId))
         check()
         const title = paper?.title || paperId
-        // Parsing may be shared and has no AbortSignal API. Cancel this consumer only;
-        // the checks below prevent late model, checkpoint and report writes.
-        const document = await wait(prepareDoclingPaper(paperId, progress))
+        progress('准备原文页面与素材')
+        // The application-owned job survives route changes and independent chat cancellation.
+        const visual = await wait(useVisualSummaryStore().generatePaper(paperId, profile, force, previous))
         check()
-        const profileIdentity = JSON.stringify({ provider: profile.provider, model: profile.model, baseUrl: profile.baseUrl,
-          temperature: profile.temperature, maxTokens: profile.maxTokens, topK: profile.topK, systemPrompt: profile.systemPrompt })
-        const runKey = await abstractRunKey(document, title, profileIdentity, previous)
-        check()
-        const checkpoint = {
-          load: async (stage: string, position: number) => {
-            check()
-            const saved = await wait(window.db.abstractCheckpoint.get(paperId, runKey, stage, position))
-            check()
-            return saved
-          },
-          save: async (stage: string, position: number, content: string) => {
-            check()
-            await wait(window.db.abstractCheckpoint.save(paperId, runKey, stage, position, content))
-            check()
-          },
-        }
-        const result = await wait(generateDoclingAbstract(document, paperId, title, messages => {
-          check()
-          const configured = messages.map(message => ({ ...message }))
-          configured[0].content = profile.systemPrompt + '\n\n' + configured[0].content
-          return requestCompletion(configured, profile, { timeoutMs: 300_000, signal })
-        }, progress, previous, checkpoint))
-        check()
+        const result = { ...visual, content: previous ? visual.delta ?? (visual.content.startsWith(previous)
+          ? visual.content.slice(previous.length).trimStart() : visual.content) : visual.content }
         sections.push(paperIds.length > 1 && !previous ? `## ${title}\n\n${result.content}` : result.content)
-        sources.push(...(result.sources.length ? result.sources.map(ref => ({ ...ref, label: `${title} · ${ref.label}` })) : [{ label: title, paperId }]))
+        sources.push({ label: title, paperId })
         truncated ||= result.truncated
         if (result.truncated) {
           context = JSON.stringify({ kind: 'docling-abstract', paperIds, index, previous: (previous + '\n\n' + result.content).slice(-9000) } satisfies AbstractResume)
@@ -1176,10 +1168,13 @@ export const useChatStore = defineStore('chat', () => {
     } finally { delete abstractProgress.value[conv.id] }
   }
 
-  /** The summary tab reuses the exact Docling/LLM pipeline without adding chat messages. */
+  /** Both summary entry points share original-page vision and material preparation. */
   async function generatePaperAbstract(paperId: string, force = false): Promise<PaperAbstractReport> {
     const ongoing = paperAbstractJobs.get(paperId)
     if (ongoing) return ongoing
+    const controller = new AbortController()
+    paperAbstractControllers.set(paperId, controller)
+    const signal = controller.signal
     paperAbstractStates.value[paperId] = {
       generating: true,
       report: paperAbstractStates.value[paperId]?.report ?? null,
@@ -1188,19 +1183,22 @@ export const useChatStore = defineStore('chat', () => {
     const state = paperAbstractStates.value[paperId]
     const task = (async () => {
       try {
-        const saved = await window.db.paperAbstract.get(paperId)
+        const saved = await awaitOrCancel(readPaperAbstractCache(paperId), signal)
+        throwIfCancelled(signal)
         state.report = saved ?? state.report
         if (saved && !saved.truncated && !force) return saved
         const conv: Conversation = { id: `paper-abstract:${paperId}`, title: '', paperIds: [paperId], messages: [], createdAt: 0 }
         const resume: AbstractResume | undefined = saved?.truncated && !force
-          ? { kind: 'docling-abstract', paperIds: [paperId], index: 0, previous: saved.content.slice(-9000) }
+          ? { kind: 'docling-abstract', paperIds: [paperId], index: 0, previous: saved.content }
           : undefined
-        const result = await generateAbstract(conv, resume)
+        const result = await generateAbstract(conv, resume, undefined, '', [], force, signal)
+        throwIfCancelled(signal)
         const sources = [...new Map([...(resume ? saved?.sources ?? [] : []), ...result.sources]
           .map(source => [`${source.paperId}:${source.startPage}:${source.label}`, source])).values()]
-        const report = await window.db.paperAbstract.save({ paperId,
+        const report = await awaitOrCancel(window.db.paperAbstract.save({ paperId,
           content: resume ? `${saved!.content}\n\n${result.content}` : result.content,
-          sources, truncated: result.truncated })
+          sources, truncated: result.truncated }), signal)
+        throwIfCancelled(signal)
         state.report = report
         return report
       } catch (cause) {
@@ -1211,7 +1209,17 @@ export const useChatStore = defineStore('chat', () => {
       }
     })()
     paperAbstractJobs.set(paperId, task)
-    try { return await task } finally { paperAbstractJobs.delete(paperId) }
+    try { return await task } finally {
+      if (paperAbstractJobs.get(paperId) === task) paperAbstractJobs.delete(paperId)
+      if (paperAbstractControllers.get(paperId) === controller) paperAbstractControllers.delete(paperId)
+    }
+  }
+
+  function stopPaperAbstract(paperId: string) {
+    paperAbstractControllers.get(paperId)?.abort()
+    useVisualSummaryStore().cancel('paper', paperId)
+    const state = paperAbstractStates.value[paperId]
+    if (state) state.error = '任务已取消'
   }
 
   async function runAbstractReply(conv: Conversation, existing?: Message, resume?: AbstractResume, force = false): Promise<string> {
@@ -1221,18 +1229,21 @@ export const useChatStore = defineStore('chat', () => {
     const run = await beginChatRun(conv, existing)
     const signal = run.controller.signal
     const previous = resume ? existing?.content ?? '' : ''
+    if (resume?.previous && paperIds.length === 1 && previous.endsWith(resume.previous)) {
+      resume = { ...resume, previous }
+    }
     return settleChatRun(run, async () => {
       // Capture the source selection before the first asynchronous operation so failed retries
       // cannot silently switch to the conversation's newer selection.
       await queueRunPatch(run, { context: JSON.stringify(resume ?? { kind: 'docling-abstract', paperIds, index: 0, previous: '' }) })
       throwIfCancelled(signal)
       const cached = paperIds.length === 1 && !force && !resume
-        ? await awaitOrCancel(window.db.paperAbstract.get(paperIds[0]), signal) : null
+        ? await awaitOrCancel(readPaperAbstractCache(paperIds[0]), signal) : null
       throwIfCancelled(signal)
       const result = cached
         ? { content: cached.content, sources: cached.sources, truncated: cached.truncated, context: cached.truncated
           ? JSON.stringify({ kind: 'docling-abstract', paperIds, index: 0, previous: cached.content.slice(-9000) } satisfies AbstractResume) : '' }
-        : await generateAbstract(snapshot, resume, run, previous, resume ? existing?.sources : [])
+        : await generateAbstract(snapshot, resume, run, previous, resume ? existing?.sources : [], force)
       throwIfCancelled(signal)
       const sources = resume ? [...new Map([...(existing?.sources ?? []), ...result.sources]
         .map(ref => [`${ref.paperId}:${ref.startPage}:${ref.label}`, ref])).values()] : result.sources
@@ -1493,7 +1504,7 @@ export const useChatStore = defineStore('chat', () => {
     addProfile, updateProfile, removeProfile,
     setChatProfileId, setIndexProfileId, setAbstractToken, setTreeEnabled,
     newConversation, addMessage, updateMessage, removeConversation, discardEmptyConversation, syncPaperIds, autoTitleConversation,
-    sendMessage, retryMessage, continueMessage, stopConversationRun, generatePaperAbstract, requestCompletion,
+    sendMessage, retryMessage, continueMessage, stopConversationRun, generatePaperAbstract, stopPaperAbstract, requestCompletion,
     collectIndexedPapers, indexPaper, buildPaperTree, rebuildAllTrees, loadSemanticIndex,
     ABSTRACT_MODEL,
   }

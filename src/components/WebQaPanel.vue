@@ -1,11 +1,7 @@
 <template>
   <section class="web-qa-panel" aria-label="网页问答">
     <header class="qa-header">
-      <div class="qa-heading">
-        <span class="qa-eyebrow">PAPERMIND · WEB</span>
-        <h2>网页问答</h2>
-        <p class="model-name">{{ modelName || '尚未选择模型' }}</p>
-      </div>
+      <p class="model-name">{{ modelName || '尚未选择模型' }}</p>
       <button type="button" class="new-button" data-action="new-session" @click="emit('new')">＋ 新建问答</button>
     </header>
 
@@ -157,9 +153,8 @@ defineExpose({ clearDraft })
 <style scoped>
 .back-to-bottom { align-self: center; margin: 6px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-base); color: var(--accent); cursor: pointer; font-size: 12px; }
 .web-qa-panel { display: flex; flex-direction: column; width: 100%; min-width: 0; height: 100%; min-height: 0; overflow: hidden; background: var(--bg-surface); color: var(--text-primary); }
-.qa-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 82px; padding: 14px 22px 12px; border-bottom: 1px solid var(--border); }
-.qa-eyebrow, .source-kicker { display: block; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .15em; }
-.qa-heading h2 { margin: 3px 0 1px; font-family: var(--font-reading); font-size: 20px; line-height: 1.2; }
+.qa-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 43px; padding: 6px 20px; border-bottom: 1px solid var(--border); }
+.source-kicker { display: block; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .15em; }
 .model-name { color: var(--text-muted); font-size: 11px; }
 .new-button, .source-meta button, .source-warning button, .retry-button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; }
 .new-button { flex-shrink: 0; padding: 8px 0; font-weight: 600; }

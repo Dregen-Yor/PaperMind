@@ -29,6 +29,7 @@ export interface WebSnapshotPreview {
   byteLength: number
   contentHash: string
   hasOriginalAppearance?: boolean
+  hasSummaryVisual?: boolean
   preview: WebReadPreview
 }
 

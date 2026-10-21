@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ GlobalWorkerOptions: { workerSrc: '' } }))
 vi.mock('../utils/transformersEmbedder', () => ({ createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('offline test')) }))
+vi.mock('../utils/visualSummaryPdf', () => ({ renderSummaryPdf: vi.fn().mockResolvedValue([{ page: 0, width: 100, height: 100, data: 'data:image/png;base64,YQ==' }]) }))
+vi.mock('../utils/visualSummary', async original => ({ ...await original<object>(), hashVisualSource: vi.fn().mockResolvedValue('visual-test-hash') }))
+
 import { useChatStore } from '../stores/chat'
 import { DEFAULT_DOCLING_SETTINGS, normalizeDoclingDocument } from '../utils/doclingDocument'
-import { buildEvidenceChunks } from '../utils/doclingAbstract'
+import { renderSummaryPdf } from '../utils/visualSummaryPdf'
 const db = () => (globalThis as any).mockDb
 const ok = (content: string, reason = 'stop') => ({ ok: true, json: async () => ({ choices: [{ message: { content }, finish_reason: reason }] }) })
 const configure = async () => {
@@ -15,6 +18,12 @@ const configure = async () => {
 }
 beforeEach(() => {
   setActivePinia(createPinia())
+  vi.mocked(renderSummaryPdf).mockReset().mockResolvedValue([{ page: 0, width: 100, height: 100, data: 'data:image/png;base64,YQ==' }])
+  db().paper.readFile.mockReset().mockResolvedValue('YQ==')
+  db().documentSummary.get.mockReset().mockImplementation(async (_kind: string, _id: string, slot: string) => slot === 'materials' ? {
+    sourceHash: 'visual-test-hash', payload: JSON.stringify({ version: 1, sourceHash: 'visual-test-hash', protocol: 'visual-materials-v2-padded-crops', items: [], coveredPages: [0], usage: [] }),
+  } : null)
+  db().documentSummary.save.mockReset().mockResolvedValue({})
   db().settings.get.mockResolvedValue(null)
   db().chat.listConversations.mockResolvedValue([])
   db().index.list.mockResolvedValue([])
@@ -28,7 +37,7 @@ beforeEach(() => {
   db().paperAbstract.save.mockReset().mockImplementation(async (report: any) => ({ ...report, updatedAt: 1 }))
   db().chat.updateMessage.mockClear()
 })
-describe('native /abstract Docling integration', () => {
+describe('native /abstract original-page integration', () => {
   it('reuses a saved single-paper summary without a configured model or Docling service', async () => {
     db().paperAbstract.get.mockResolvedValue({
       paperId: 'paper', content: '# Existing report', sources: [{ label: '文1', paperId: 'paper' }],
@@ -60,24 +69,22 @@ describe('native /abstract Docling integration', () => {
     await store.sendMessage(second.id, '/abstract')
     expect(second.messages.at(-1)?.content).toBe(first.messages.at(-1)?.content)
     expect(reports.get('paper')?.content).toBe(first.messages.at(-1)?.content)
-    expect(db().docling.convert).toHaveBeenCalledTimes(1)
+    expect(db().docling.convert).not.toHaveBeenCalled()
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
   it('uses the active chat model and preserves paper/page references', async () => {
-    const timeout = vi.spyOn(AbortSignal, 'timeout')
     const request = vi.fn().mockResolvedValue(ok('## 解读\nEvidence {{cite:text-1}}'))
     global.fetch = request
     const store = await configure(); const conv = await store.newConversation('t', ['paper'])
     await store.sendMessage(conv.id, '/abstract')
     const body = JSON.parse(request.mock.calls[0][1].body)
     expect(body.model).toBe('my-chat-model')
-    expect(body.messages[0].content).toContain('中文')
-    expect(conv.messages.at(-1)?.content).toContain('paper-source:paper:1')
+    expect(body.messages[1].content).toContainEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,YQ==' } })
+    expect(conv.messages.at(-1)?.sources).toEqual([{ label: 'paper', paperId: 'paper' }])
     expect(store.abstractProgress[conv.id]).toBeUndefined()
     expect(db().index.get).not.toHaveBeenCalled()
-    expect(timeout).toHaveBeenCalledWith(300_000)
-    timeout.mockRestore()
+    expect(db().docling.convert).not.toHaveBeenCalled()
   })
   it('retries a failed generation in place and reuses the successful parse', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('model unavailable'))
@@ -91,31 +98,14 @@ describe('native /abstract Docling integration', () => {
     expect(failed.content).toContain('Recovered')
     expect(db().docling.save).not.toHaveBeenCalled()
   })
-  it('retries a long abstract from the first unfinished evidence chunk', async () => {
-    const document = normalizeDoclingDocument({ texts: [{ text: 'Evidence '.repeat(4000), prov: [{ page_no: 2 }] }] })
-    db().docling.convert.mockResolvedValue({ document, sourceHash: 'a'.repeat(64), configHash: 'b'.repeat(64), cached: true })
-    const saved = new Map<string, string>()
-    db().abstractCheckpoint.get.mockImplementation(async (_paper: string, key: string, stage: string, position: number) => saved.get(`${key}:${stage}:${position}`) ?? null)
-    db().abstractCheckpoint.save.mockImplementation(async (_paper: string, key: string, stage: string, position: number, content: string) => {
-      saved.set(`${key}:${stage}:${position}`, content)
-    })
-    let calls = 0
-    global.fetch = vi.fn(async (_url, init) => {
-      calls++
-      if (calls === 2) throw new Error('model unavailable')
-      const prompt = JSON.parse(init.body).messages[1].content as string
-      return ok(prompt.includes('提炼这一部分') ? `note-${calls}` : '# Complete report {{cite:text-1}}')
-    }) as any
+  it('retries generation using already prepared materials without re-running localization', async () => {
+    global.fetch = vi.fn().mockRejectedValueOnce(new Error('model unavailable')).mockResolvedValue(ok('# Complete report'))
     const store = await configure(); const conv = await store.newConversation('t', ['paper'])
-    await expect(store.sendMessage(conv.id, '/abstract')).rejects.toThrow('提炼论文内容（2/')
-    const failed = conv.messages.at(-1)!
-    expect(saved.size).toBe(1)
-    await store.retryMessage(conv.id, failed.id)
-    expect(failed.error).toBe('')
-    expect(failed.content).toContain('Complete report')
-    const mapRequests = vi.mocked(global.fetch).mock.calls.filter(call => JSON.parse(call[1]!.body as string).messages[1].content.includes('提炼这一部分'))
-    expect(mapRequests).toHaveLength(buildEvidenceChunks(document).length + 1)
-    expect(db().docling.convert).toHaveBeenCalledTimes(2)
+    await expect(store.sendMessage(conv.id, '/abstract')).rejects.toThrow('model unavailable')
+    await store.retryMessage(conv.id, conv.messages.at(-1)!.id)
+    expect(conv.messages.at(-1)?.content).toBe('# Complete report')
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(db().docling.convert).not.toHaveBeenCalled()
   })
   it('continues a truncated abstract using its original paper and avoids RAG', async () => {
     global.fetch = vi.fn().mockResolvedValue(ok('Beginning {{cite:text-1}}', 'length'))
@@ -125,7 +115,7 @@ describe('native /abstract Docling integration', () => {
     conv.paperIds = ['another-paper']
     global.fetch = vi.fn().mockResolvedValue(ok(' Continued {{cite:text-1}}'))
     await store.continueMessage(conv.id, target.id)
-    expect(db().docling.convert.mock.calls.at(-1)[0]).toBe('paper')
+    expect(db().paper.readFile).toHaveBeenLastCalledWith('paper')
     expect(target.content).toContain('Beginning')
     expect(target.content).toContain('Continued')
     expect(target.truncated).toBe(false)
@@ -162,18 +152,18 @@ describe('native /abstract Docling integration', () => {
     expect(target.content.match(/## second/g)).toHaveLength(1)
     expect(target.truncated).toBe(false)
     expect(target.context).toBe('')
-    expect(vi.mocked(window.db.docling.convert).mock.calls.map((call: any[]) => call[0])).toEqual(['first', 'second', 'second', 'third'])
+    expect(db().docling.convert).not.toHaveBeenCalled()
     const firstBody = JSON.parse(vi.mocked(global.fetch).mock.calls[0][1]!.body as string)
     const nextBody = JSON.parse(vi.mocked(global.fetch).mock.calls[1][1]!.body as string)
-    expect(firstBody.messages[1].content).toContain('Second partial')
-    expect(nextBody.messages[1].content).not.toContain('Second partial')
+    expect(firstBody.messages[0].content).toContain('Second partial')
+    expect(nextBody.messages[0].content).not.toContain('Second partial')
   })
 })
 
 describe('/abstract run ownership', () => {
-  it('locks the conversation and reserves its assistant while Docling waits, then cancels without late writes', async () => {
+  it('locks the conversation while pages render, then cancels without late chat writes', async () => {
     let release!: (value: any) => void
-    db().docling.convert.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    vi.mocked(renderSummaryPdf).mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
     global.fetch = vi.fn().mockResolvedValue(ok('Late report'))
     const store = await configure()
     const conv = await store.newConversation('t', ['paper'])
@@ -185,11 +175,10 @@ describe('/abstract run ownership', () => {
     expect(await store.stopConversationRun(conv.id)).toBe(true)
     await pending
     expect(conv.messages.at(-1)?.runStatus).toBe('cancelled')
-    release({ document: normalizeDoclingDocument({ texts: [{ text: 'Late evidence' }] }), cached: true })
+    release([{ page: 0, width: 100, height: 100, data: 'data:image/png;base64,YQ==' }])
     await new Promise(resolve => setTimeout(resolve, 10))
-    expect(global.fetch).not.toHaveBeenCalled()
     expect(db().paperAbstract.save).not.toHaveBeenCalled()
-    expect(db().abstractCheckpoint.save).not.toHaveBeenCalled()
+    expect(conv.messages.at(-1)?.content).toBe('')
   })
 
   it('retries the original selection after the conversation selection changes', async () => {
@@ -201,7 +190,7 @@ describe('/abstract run ownership', () => {
     conv.paperIds = ['changed']
     global.fetch = vi.fn().mockResolvedValue(ok('Recovered'))
     await store.retryMessage(conv.id, target.id)
-    expect(db().docling.convert.mock.calls.at(-1)[0]).toBe('paper')
+    expect(db().paper.readFile).toHaveBeenLastCalledWith('paper')
     expect(target.runStatus).toBe('completed')
     expect(conv.messages).toHaveLength(2)
   })
@@ -219,10 +208,10 @@ it('cancelling a chat-owned summary does not cancel an independent summary-tab j
   await vi.waitFor(() => expect(requests).toHaveLength(1))
   const conv = await store.newConversation('t', ['paper'])
   const chat = store.sendMessage(conv.id, '/abstract')
-  await vi.waitFor(() => expect(requests).toHaveLength(2))
+  await vi.waitFor(() => expect(conv.messages).toHaveLength(2))
   await store.stopConversationRun(conv.id)
   await chat
-  expect(requests[1].signal.aborted).toBe(true)
+  expect(requests).toHaveLength(1)
   expect(requests[0].signal.aborted).toBe(false)
   expect(db().paperAbstract.save).not.toHaveBeenCalled()
   requests[0].resolve(ok('Independent report'))
@@ -243,7 +232,7 @@ it('keeps completed papers when a later paper fails and continues from that pape
   await store.continueMessage(conv.id, target.id)
   expect(target.content).toContain('First complete')
   expect(target.content).toContain('Second completed')
-  expect(db().docling.convert.mock.calls.map((call: any[]) => call[0])).toEqual(['first', 'second', 'second'])
+  expect(db().docling.convert).not.toHaveBeenCalled()
 })
 
 it('retries even a completed cached summary against its original selection', async () => {
@@ -255,7 +244,7 @@ it('retries even a completed cached summary against its original selection', asy
   conv.paperIds = ['changed']
   global.fetch = vi.fn().mockResolvedValue(ok('Regenerated'))
   await store.retryMessage(conv.id, target.id)
-  expect(db().docling.convert.mock.calls.at(-1)[0]).toBe('paper')
+  expect(db().paper.readFile).toHaveBeenLastCalledWith('paper')
 })
 
 it('preserves the resume checkpoint when a continuation fails before producing another paper', async () => {

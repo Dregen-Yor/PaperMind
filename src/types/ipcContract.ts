@@ -5,12 +5,14 @@ import type { PreviewBounds, PreviewSnapshot } from './webPreview'
 import type { Conversation } from './chat'
 import type { WebPageSummary, WebQaAppendInput, WebQaCreateInput, WebQaMessage, WebQaMessagePatch, WebQaNewSessionInput, WebQaPageSessionSummary, WebQaSavedSession, WebQaSessionDetail, WebQaSessionSummary, WebSnapshotPreview } from './webQa'
 import type { Paper, KnowledgeBase, Highlight } from './paper'
+import type { DocumentSummaryApi } from './documentSummary'
 
 export type PaperCreateInput = Paper & { fileData: string }
 export type ChatConversationWrite = Omit<Conversation, 'messages'>
 
 // One contract for renderer callers, preload wrappers, and main handlers.
 export interface DbApi {
+  documentSummary: DocumentSummaryApi
   webQa: {
     listPages: () => Promise<WebPageSummary[]>
     archive: (snapshot: PreviewSnapshot, openedAt: number) => Promise<WebPageSummary>
@@ -100,6 +102,7 @@ export interface DbApi {
 }
 
 export interface PreviewInvokeApi {
+  summaryPdf: (snapshotId: string) => Promise<string>
   open: (url: string, bounds: PreviewBounds) => Promise<void>
   openAndCapture: (url: string, bounds: PreviewBounds) => Promise<PreviewSnapshot>
   setBounds: (bounds: PreviewBounds) => Promise<void>

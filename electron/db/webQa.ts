@@ -6,17 +6,23 @@ import type { WebPageSummary, WebQaAppendInput, WebQaBackup, WebQaCreateInput, W
 import { normalizeWebQaBackup } from './backupValidation'
 import { extractWebReadPreview } from '../../src/utils/webReadPreview'
 import { archiveAppearanceHash } from './webArchiveHash'
+import { decodeWebVisualPdf, webVisualAppearance } from './webVisualPdf'
 
 type SessionRow = { id: string; snapshot_id: string; final_url: string; title: string; captured_at: number; byte_length: number; created_at: number; updated_at: number }
-type SnapshotRow = { id: string; final_url: string; title: string; html: string; captured_at: number; content_hash: string; byte_length: number }
+type SnapshotRow = { id: string; final_url: string; title: string; html: string; captured_at: number; content_hash: string; byte_length: number; archive_mhtml?: Buffer | null; visual_pdf?: Buffer | null }
 type MessageRow = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; status: WebQaMessage['status']; error: string; model_id: string; created_at: number }
 type PageRow = { id: string; canonical_url: string; title: string; created_at: number; last_opened_at: number; latest_snapshot_id: string; snapshot_count: number; session_count: number; total_bytes: number }
 type PageSessionRow = SessionRow & { page_id: string; first_question: string }
-type PreviewRow = SnapshotRow & { page_id: string; preview_json: string; has_original_appearance: number }
+type PreviewRow = SnapshotRow & { page_id: string; preview_json: string; has_original_appearance: number; has_summary_visual: number }
 type BackupSnapshotRow = SnapshotRow & { page_id: string; preview_json: string; last_seen_at: number; archive_mhtml: Buffer | null }
 const statuses = new Set(['completed', 'streaming', 'failed', 'cancelled', 'interrupted'])
 const validId = (v: unknown): v is string => typeof v === 'string' && /^[\w-]{1,128}$/.test(v)
 const validTime = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0
+
+function snapshotAppearance(archiveBytes: Buffer | null, pdfBytes: Buffer | null): string {
+  const archiveHash = archiveBytes ? archiveAppearanceHash(archiveBytes) : ''
+  return pdfBytes ? createHash('sha256').update(`${archiveHash}:pdf:${webVisualAppearance(pdfBytes)}`).digest('hex') : archiveHash
+}
 
 function checkSnapshot(s: PreviewSnapshot) {
   if (!s || typeof s.title !== 'string' || typeof s.html !== 'string' || !validTime(s.capturedAt)) throw new Error('网页快照无效')
@@ -31,6 +37,7 @@ function checkSnapshot(s: PreviewSnapshot) {
       || s.archiveMhtml.length % 4 !== 0 || Buffer.byteLength(s.archiveMhtml, 'base64') > 32 * 1024 * 1024
       || Buffer.from(s.archiveMhtml, 'base64').toString('base64') !== s.archiveMhtml) throw new Error('网页原貌缓存无效')
   }
+  if (s.visualPdf !== undefined) decodeWebVisualPdf(s.visualPdf)
 }
 
 function checkMessage(m: WebQaMessage) {
@@ -61,7 +68,7 @@ export function createWebQaRepository(db: Database.Database) {
     (SELECT id FROM web_snapshots WHERE page_id=p.id ORDER BY last_seen_at DESC, captured_at DESC, id DESC LIMIT 1) AS latest_snapshot_id,
     (SELECT COUNT(*) FROM web_snapshots WHERE page_id=p.id) AS snapshot_count,
     (SELECT COUNT(*) FROM web_qa_sessions s JOIN web_snapshots v ON v.id=s.snapshot_id WHERE v.page_id=p.id) AS session_count,
-    (SELECT COALESCE(SUM(byte_length + COALESCE(length(archive_mhtml),0)),0) FROM web_snapshots WHERE page_id=p.id) AS total_bytes
+    (SELECT COALESCE(SUM(byte_length + COALESCE(length(archive_mhtml),0) + COALESCE(length(visual_pdf),0)),0) FROM web_snapshots WHERE page_id=p.id) AS total_bytes
     FROM web_pages p`
   const listPages = (): WebPageSummary[] => (db.prepare(`${pageSummaryQuery} ORDER BY p.last_opened_at DESC, p.id DESC`).all() as PageRow[]).map(mapPage)
   const getPage = (id: string): WebPageSummary | null => {
@@ -84,7 +91,8 @@ export function createWebQaRepository(db: Database.Database) {
           .run(id, canonical, snapshot.title, openedAt, openedAt)
       }
       const archiveBytes = snapshot.archiveMhtml ? Buffer.from(snapshot.archiveMhtml, 'base64') : null
-      const appearanceHash = archiveBytes ? archiveAppearanceHash(archiveBytes) : ''
+      const pdfBytes = snapshot.visualPdf ? decodeWebVisualPdf(snapshot.visualPdf) : null
+      const appearanceHash = snapshotAppearance(archiveBytes, pdfBytes)
       const existing = db.prepare(`SELECT id FROM web_snapshots
         WHERE page_id=? AND content_hash=? AND appearance_hash=? ORDER BY captured_at DESC LIMIT 1`)
         .get(id, snapshot.contentHash, appearanceHash) as { id: string } | undefined
@@ -92,11 +100,11 @@ export function createWebQaRepository(db: Database.Database) {
         db.prepare('UPDATE web_snapshots SET last_seen_at=? WHERE id=?').run(openedAt, existing.id)
       } else {
         db.prepare(`INSERT INTO web_snapshots
-          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), id, snapshot.finalUrl,
+          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash, visual_pdf)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), id, snapshot.finalUrl,
             snapshot.title, snapshot.html, snapshot.capturedAt, snapshot.contentHash,
             snapshot.byteLength, JSON.stringify(preview), openedAt,
-            archiveBytes, appearanceHash)
+            archiveBytes, appearanceHash, pdfBytes)
       }
       return id
     })()
@@ -105,7 +113,7 @@ export function createWebQaRepository(db: Database.Database) {
 
   const getPreview = (snapshotId: string): WebSnapshotPreview | null => {
     const row = db.prepare(`SELECT id, page_id, final_url, title, captured_at,
-      content_hash, byte_length, preview_json, archive_mhtml IS NOT NULL AS has_original_appearance
+      content_hash, byte_length, preview_json, archive_mhtml IS NOT NULL AS has_original_appearance, visual_pdf IS NOT NULL AS has_summary_visual
       FROM web_snapshots WHERE id=?`).get(snapshotId) as PreviewRow | undefined
     if (!row) return null
     let preview: WebReadPreview
@@ -119,7 +127,7 @@ export function createWebQaRepository(db: Database.Database) {
     }
     return { id: row.id, pageId: row.page_id, finalUrl: row.final_url, title: row.title,
       capturedAt: row.captured_at, byteLength: row.byte_length, contentHash: row.content_hash,
-      hasOriginalAppearance: !!row.has_original_appearance, preview }
+      hasOriginalAppearance: !!row.has_original_appearance, ...(row.has_summary_visual ? { hasSummaryVisual: true } : {}), preview }
   }
 
   const findAppearance = (pageId: string, contentHash: string): WebSnapshotPreview | null => {
@@ -137,7 +145,9 @@ export function createWebQaRepository(db: Database.Database) {
   const getSnapshot = (snapshotId: string): PreviewSnapshot | null => {
     const row = db.prepare('SELECT * FROM web_snapshots WHERE id=?').get(snapshotId) as SnapshotRow | undefined
     return row ? { finalUrl: row.final_url, title: row.title, html: row.html,
-      capturedAt: row.captured_at, contentHash: row.content_hash, byteLength: row.byte_length } : null
+      capturedAt: row.captured_at, contentHash: row.content_hash, byteLength: row.byte_length,
+      ...(row.archive_mhtml ? { archiveMhtml: row.archive_mhtml.toString('base64') } : {}),
+      ...(row.visual_pdf ? { visualPdf: row.visual_pdf.toString('base64') } : {}) } : null
   }
 
   const pageSessionQuery = `SELECT s.*, v.page_id, v.final_url, v.title, v.captured_at, v.byte_length,
@@ -237,11 +247,11 @@ export function createWebQaRepository(db: Database.Database) {
       const s = input.snapshot
       const pageId = pageForSnapshot(s)
       db.prepare(`INSERT INTO web_snapshots
-        (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`)
+        (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash, visual_pdf)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)`)
         .run(input.sessionId, pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash,
           s.byteLength, s.capturedAt, s.archiveMhtml ? Buffer.from(s.archiveMhtml, 'base64') : null,
-          s.archiveMhtml ? archiveAppearanceHash(Buffer.from(s.archiveMhtml, 'base64')) : '')
+          snapshotAppearance(s.archiveMhtml ? Buffer.from(s.archiveMhtml, 'base64') : null, s.visualPdf ? decodeWebVisualPdf(s.visualPdf) : null), s.visualPdf ? decodeWebVisualPdf(s.visualPdf) : null)
       db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)').run(input.sessionId, input.sessionId, input.createdAt, input.createdAt)
       db.prepare('INSERT INTO web_qa_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(input.messageId, input.sessionId, 'user', input.question, 'completed', '', '', input.createdAt)
@@ -277,6 +287,7 @@ export function createWebQaRepository(db: Database.Database) {
       id: r.id, finalUrl: r.final_url, title: r.title, html: r.html, capturedAt: r.captured_at,
       contentHash: r.content_hash, byteLength: r.byte_length, pageId: r.page_id,
       archiveMhtml: r.archive_mhtml?.toString('base64'),
+      ...(r.visual_pdf ? { visualPdf: r.visual_pdf.toString('base64') } : {}),
       lastSeenAt: r.last_seen_at,
       preview: r.preview_json ? JSON.parse(r.preview_json) as WebReadPreview : { blocks: [], truncated: false },
     })),
@@ -298,12 +309,12 @@ export function createWebQaRepository(db: Database.Database) {
         try { preview = extractWebReadPreview(s.html) }
         catch { preview = { blocks: [], truncated: false } }
         db.prepare(`INSERT INTO web_snapshots
-          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          (id, page_id, final_url, title, html, captured_at, content_hash, byte_length, preview_json, last_seen_at, archive_mhtml, appearance_hash, visual_pdf)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(s.id, s.pageId, s.finalUrl, s.title, s.html, s.capturedAt, s.contentHash,
             s.byteLength, JSON.stringify(preview), s.lastSeenAt,
             s.archiveMhtml ? Buffer.from(s.archiveMhtml, 'base64') : null,
-            s.archiveMhtml ? archiveAppearanceHash(Buffer.from(s.archiveMhtml, 'base64')) : '')
+            snapshotAppearance(s.archiveMhtml ? Buffer.from(s.archiveMhtml, 'base64') : null, s.visualPdf ? decodeWebVisualPdf(s.visualPdf) : null), s.visualPdf ? decodeWebVisualPdf(s.visualPdf) : null)
       }
       for (const s of backup.sessions) db.prepare('INSERT INTO web_qa_sessions VALUES (?, ?, ?, ?)')
         .run(s.id, s.snapshotId, s.createdAt, s.updatedAt)

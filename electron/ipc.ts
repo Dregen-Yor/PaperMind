@@ -3,6 +3,8 @@ import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, getPaperAbstractRepository, getWebQaRepository, exportAll, clearAll, importAll } from './db'
 import { createDoclingFacade } from './docling'
+import { getDocumentSummaryRepository } from './db'
+import { captureWebSummaryPdf } from './webSummaryCapture'
 import { testDoclingConnection } from './doclingClient'
 import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
 import { backupFileName } from '../src/utils/exportSanitize'
@@ -24,7 +26,12 @@ export function registerIpc() {
   const abstractCheckpoint = getAbstractCheckpointRepository()
   const paperAbstract = getPaperAbstractRepository()
   const webQa = getWebQaRepository()
+  const documentSummary = getDocumentSummaryRepository()
   const handlers = {
+    'documentSummary:get': (_e, kind, sourceId, slot) => documentSummary.get(kind, sourceId, slot),
+    'documentSummary:save': (_e, record) => documentSummary.save(record),
+    'documentSummary:saveAsset': (_e, kind, sourceId, data) => documentSummary.saveAsset(kind, sourceId, data),
+    'documentSummary:readAsset': (_e, id) => documentSummary.readAsset(id),
     'webQa:listPages': () => webQa.listPages(),
     'webQa:archive': (_e, snapshot, openedAt) => webQa.archive(snapshot, openedAt),
     'webQa:getPreview': (_e, id) => webQa.getPreview(id),
@@ -84,6 +91,13 @@ export function registerIpc() {
     'preview:close': e => previewControllerForSender(e.sender).close(),
     'preview:openExternal': (e, url) => previewControllerForSender(e.sender).openExternal(url),
     'preview:captureSnapshot': e => previewControllerForSender(e.sender).captureSnapshot(),
+    'preview:summaryPdf': (e, snapshotId) => {
+      previewControllerForSender(e.sender)
+      if (typeof snapshotId !== 'string' || !snapshotId || snapshotId.length > 200) throw new Error('网页快照 ID 无效')
+      const snapshot = webQa.getSnapshot(snapshotId)
+      if (!snapshot) throw new Error('网页快照已不存在')
+      return captureWebSummaryPdf(snapshot)
+    },
     // chat
     'chat:listConversations': () => chatApi.listConversations(),
     'chat:createConversation': (_e, conv) => chatApi.createConversation(conv),

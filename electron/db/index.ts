@@ -5,6 +5,7 @@ import { createHash } from 'crypto'
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, lstatSync } from 'fs'
 import { SCHEMA } from './schema'
 import { createDoclingRepository } from './docling'
+import { createDocumentSummaryRepository } from './documentSummary'
 import { createAbstractCheckpointRepository } from './abstractCheckpoint'
 import { createPaperAbstractRepository, PAPER_ABSTRACT_PIPELINE_VERSION } from './paperAbstract'
 import { createWebQaRepository } from './webQa'
@@ -54,6 +55,8 @@ export function initDb() {
   // Recover interrupted file switches before migrations or callers see the data.
   paperFiles.recover()
   migrateWebPageHistory(db)
+  const webSnapshotColumns = (db.prepare('PRAGMA table_info(web_snapshots)').all() as Array<{ name: string }>).map(row => row.name)
+  if (!webSnapshotColumns.includes('visual_pdf')) db.exec('ALTER TABLE web_snapshots ADD COLUMN visual_pdf BLOB')
 
   // Migration: highlight character offsets (added 2026-08-16)
   const highlightCols = (db.prepare('PRAGMA table_info(highlights)').all() as Array<{ name: string }>).map(c => c.name)
@@ -400,6 +403,7 @@ export const treeApi = {
 }
 
 export const getDoclingRepository = () => createDoclingRepository(db)
+export const getDocumentSummaryRepository = () => createDocumentSummaryRepository(db)
 export const getAbstractCheckpointRepository = () => createAbstractCheckpointRepository(db)
 export const getPaperAbstractRepository = () => createPaperAbstractRepository(db)
 export const getWebQaRepository = () => createWebQaRepository(db)
@@ -425,6 +429,7 @@ export function exportAll(opts: { includeApiKey?: boolean } = {}) {
     paperIndexes: db.prepare('SELECT paper_id, index_json, pages_json FROM paper_indexes').all(),
     paperTrees: db.prepare('SELECT * FROM paper_trees').all(),
     docling: getDoclingRepository().exportBackup(),
+    documentSummary: getDocumentSummaryRepository().exportBackup(),
     paperAbstracts: db.prepare('SELECT * FROM paper_abstracts').all(),
     webQa: getWebQaRepository().exportBackup(),
     settings: opts.includeApiKey ? settingsRows : stripApiKeysFromSettings(settingsRows),
@@ -536,6 +541,7 @@ export function importAll(input: unknown) {
 
     getDoclingRepository().importBackup(data.docling)
     getWebQaRepository().importBackup(webQa)
+    getDocumentSummaryRepository().importBackup(data.documentSummary)
 
     for (const row of paperAbstracts) {
       getPaperAbstractRepository().save({

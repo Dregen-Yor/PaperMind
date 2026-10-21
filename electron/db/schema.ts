@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS web_snapshots (
   byte_length INTEGER NOT NULL,
   preview_json TEXT NOT NULL DEFAULT '',
   archive_mhtml BLOB,
+  visual_pdf BLOB,
   appearance_hash TEXT NOT NULL DEFAULT '',
   last_seen_at INTEGER NOT NULL,
   FOREIGN KEY (page_id) REFERENCES web_pages(id) ON DELETE CASCADE
@@ -179,4 +180,29 @@ CREATE TABLE IF NOT EXISTS web_qa_messages (
   FOREIGN KEY (session_id) REFERENCES web_qa_sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_web_qa_messages_session ON web_qa_messages(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS document_summary_records (
+  kind TEXT NOT NULL CHECK(kind IN ('paper','web')),
+  source_id TEXT NOT NULL,
+  slot TEXT NOT NULL CHECK(slot IN ('materials','report','task')),
+  source_hash TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  paper_id TEXT REFERENCES papers(id) ON DELETE CASCADE,
+  snapshot_id TEXT REFERENCES web_snapshots(id) ON DELETE CASCADE,
+  PRIMARY KEY(kind,source_id,slot),
+  CHECK((kind='paper' AND paper_id=source_id AND snapshot_id IS NULL)
+    OR (kind='web' AND snapshot_id=source_id AND paper_id IS NULL))
+);
+CREATE TABLE IF NOT EXISTS document_summary_assets (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('paper','web')),
+  source_id TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  paper_id TEXT REFERENCES papers(id) ON DELETE CASCADE,
+  snapshot_id TEXT REFERENCES web_snapshots(id) ON DELETE CASCADE,
+  CHECK((kind='paper' AND paper_id=source_id AND snapshot_id IS NULL)
+    OR (kind='web' AND snapshot_id=source_id AND paper_id IS NULL))
+);
 `

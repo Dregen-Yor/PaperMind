@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
+import { withWebSummaryCapture } from './webSummaryCapture'
 import { isAllowedExternalUrl, isAllowedPreviewUrl } from '../src/utils/webPreviewUrl'
 import type { PreviewBounds, PreviewSnapshot, PreviewState } from '../src/types/webPreview'
 
@@ -32,6 +33,7 @@ function configureSession(previewSession: Session) {
 }
 
 function loadErrorMessage(description: string): string {
+  if (description.includes('主文档加载超时')) return description
   if (description.includes('CERT')) return '网站证书无效，请检查链接或在系统浏览器中打开。'
   if (description.includes('NAME_NOT_RESOLVED')) return '找不到网站，请检查地址或网络连接。'
   if (description.includes('INTERNET_DISCONNECTED')) return '网络已断开，请连接网络后重试。'
@@ -152,6 +154,7 @@ export class PreviewController {
     const view = new WebContentsView({
       webPreferences: {
         partition: PREVIEW_PARTITION,
+        backgroundThrottling: false,
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
@@ -193,6 +196,7 @@ export class PreviewController {
     })
     contents.on('did-start-loading', () => { if (this.view === view) this.publish({ loading: true, notice: '' }) })
     contents.on('did-stop-loading', () => { if (this.view === view) this.publish({ loading: false }) })
+    contents.on('dom-ready', () => { if (this.view === view) this.publish({ loading: false }) })
     contents.on('did-navigate', (_event, url) => {
       if (this.view !== view) return
       if (!isAllowedPreviewUrl(url)) return
@@ -290,14 +294,26 @@ export class PreviewController {
     const generation = ++this.generation
     this.targetUrl = url
     this.publish({ url, loading: true, error: '', notice: '', visible: true })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onReady: () => void = () => {}
     try {
-      await view.webContents.loadURL(url)
+      const domReady = new Promise<void>((resolve, reject) => {
+        onReady = resolve
+        view.webContents.on('dom-ready', onReady)
+        timer = setTimeout(() => reject(new Error('网页主文档加载超时，请重试')), 20_000)
+      })
+      // loadURL also waits for secondary resources. A stalled image must not
+      // prevent the capture layer from applying its own bounded resource policy.
+      await Promise.race([view.webContents.loadURL(url), domReady])
     } catch (error) {
       if (generation !== this.generation || this.view !== view) return
       const description = error instanceof Error ? error.message : String(error)
       if (description.includes('ERR_ABORTED')) return
       this.detach()
       this.publish({ loading: false, error: loadErrorMessage(description), visible: false })
+    } finally {
+      if (timer) clearTimeout(timer)
+      view.webContents.removeListener('dom-ready', onReady)
     }
   }
 
@@ -330,55 +346,70 @@ export class PreviewController {
     const beforeUrl = contents.getURL()
     if (!isAllowedPreviewUrl(beforeUrl)) throw new Error('仅支持 HTTPS 网页')
     const beforeGeneration = this.generation
-    const readDom = `({
-      doctype: document.doctype ? new XMLSerializer().serializeToString(document.doctype) : '',
-      html: document.documentElement.outerHTML,
-      title: document.title,
-      url: location.href
-    })`
-    const raw = await contents.executeJavaScript(readDom) as { doctype: string; html: string; title: string; url: string }
-    if (this.generation !== beforeGeneration || this.view?.webContents !== contents
-      || contents.getURL() !== beforeUrl || raw.url !== beforeUrl || this.state.loading) {
-      throw new Error('网页已变化，请重试采集')
-    }
-    if (typeof raw.html !== 'string' || typeof raw.title !== 'string' || typeof raw.doctype !== 'string') {
-      throw new Error('网页 DOM 采集失败，请重试')
-    }
-    const html = raw.doctype ? `${raw.doctype}\n${raw.html}` : raw.html
-    const byteLength = Buffer.byteLength(html, 'utf8')
-    if (byteLength > 8 * 1024 * 1024) throw new Error('网页超过 8 MiB，无法完整发送')
-    let archiveMhtml: string | undefined
-    try {
-      const dir = mkdtempSync(join(tmpdir(), 'papermind-web-capture-'))
-      try {
-        const file = join(dir, 'page.mhtml')
-        await contents.savePage(file, 'MHTML')
-        const archive = readFileSync(file)
-        if (!archive.length || archive.length > 32 * 1024 * 1024) throw new Error('网页原貌缓存超过 32 MiB')
-        archiveMhtml = archive.toString('base64')
-      } finally {
-        rmSync(dir, { recursive: true, force: true })
+    return withWebSummaryCapture(contents, async capture => {
+      const raw = await capture.readDom() as { doctype: string; html: string; title: string; url: string }
+      if (this.generation !== beforeGeneration || this.view?.webContents !== contents
+        || contents.getURL() !== beforeUrl || raw.url !== beforeUrl || this.state.loading) {
+        throw new Error('网页已变化，请重试采集')
       }
-    } catch {
-      this.publish({ notice: '网页原貌缓存失败，已保存阅读内容；问答仍可继续。' })
-    }
-    if (this.generation !== beforeGeneration || this.view?.webContents !== contents
-      || contents.getURL() !== beforeUrl || this.state.loading) throw new Error('网页已变化，请重试采集')
-    const after = await contents.executeJavaScript(readDom) as typeof raw
-    if (after.url !== beforeUrl || after.doctype !== raw.doctype || after.html !== raw.html
-      || after.title !== raw.title || this.generation !== beforeGeneration
-      || this.view?.webContents !== contents || contents.getURL() !== beforeUrl || this.state.loading) {
-      throw new Error('网页已变化，请重试采集')
-    }
-    return {
-      finalUrl: beforeUrl,
-      title: raw.title,
-      html,
-      capturedAt: Date.now(),
-      contentHash: createHash('sha256').update(html, 'utf8').digest('hex'),
-      byteLength,
-      archiveMhtml,
-    }
+      if (typeof raw.html !== 'string' || typeof raw.title !== 'string' || typeof raw.doctype !== 'string') {
+        throw new Error('网页 DOM 采集失败，请重试')
+      }
+      const html = raw.doctype ? `${raw.doctype}\n${raw.html}` : raw.html
+      const byteLength = Buffer.byteLength(html, 'utf8')
+      if (byteLength > 8 * 1024 * 1024) throw new Error('网页超过 8 MiB，无法完整发送')
+      this.publish({ notice: '' })
+      let visualPdf: string | undefined
+      let visualError = ''
+      try { visualPdf = await capture.print() }
+      catch (cause) {
+        capture.assertActive()
+        visualError = cause instanceof Error ? cause.message : '网页视觉副本采集失败'
+      }
+      capture.assertActive()
+      if (this.generation !== beforeGeneration || this.view?.webContents !== contents || contents.getURL() !== beforeUrl) {
+        throw new Error('网页已变化，请重试采集')
+      }
+      let archiveMhtml: string | undefined
+      try {
+        const dir = mkdtempSync(join(tmpdir(), 'papermind-web-capture-'))
+        try {
+          const file = join(dir, 'page.mhtml')
+          await contents.savePage(file, 'MHTML')
+          const archive = readFileSync(file)
+          if (!archive.length || archive.length > 32 * 1024 * 1024) throw new Error('网页原貌缓存超过 32 MiB')
+          archiveMhtml = archive.toString('base64')
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      } catch {
+        capture.assertActive()
+        if (this.generation !== beforeGeneration || this.view?.webContents !== contents) throw new Error('网页已变化，请重试采集')
+        this.publish({ notice: visualPdf
+          ? '原貌浏览缓存失败，已保存摘要视觉副本和阅读内容。'
+          : `网页原貌缓存失败，已保存阅读内容；摘要视觉副本未就绪：${visualError}` })
+      }
+      capture.assertActive()
+      if (!visualPdf && archiveMhtml) this.publish({ notice: `摘要视觉副本未就绪，将尝试原貌缓存：${visualError}` })
+      if (this.generation !== beforeGeneration || this.view?.webContents !== contents
+        || contents.getURL() !== beforeUrl || this.state.loading) throw new Error('网页已变化，请重试采集')
+      const after = await capture.readDom() as typeof raw
+      if (after.url !== beforeUrl || after.doctype !== raw.doctype || after.html !== raw.html
+        || after.title !== raw.title || this.generation !== beforeGeneration
+        || this.view?.webContents !== contents || contents.getURL() !== beforeUrl || this.state.loading) {
+        throw new Error('网页已变化，请重试采集')
+      }
+      return {
+        finalUrl: beforeUrl,
+        title: raw.title,
+        html,
+        capturedAt: Date.now(),
+        contentHash: createHash('sha256').update(html, 'utf8').digest('hex'),
+        byteLength,
+        archiveMhtml,
+        visualPdf,
+      }
+    }, { visible: this.win.isVisible() && !this.win.isMinimized() })
   }
 
   async openExternal(url: string) {

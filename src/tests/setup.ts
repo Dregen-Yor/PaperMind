@@ -2,6 +2,12 @@
 import { vi } from 'vitest'
 
 const mockDb = {
+  documentSummary: {
+    get: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockImplementation(record => Promise.resolve({ ...record, updatedAt: Date.now() })),
+    saveAsset: vi.fn().mockResolvedValue('a'.repeat(64)),
+    readAsset: vi.fn().mockResolvedValue(null),
+  },
   webQa: {
     listPages: vi.fn().mockResolvedValue([]),
     archive: vi.fn().mockRejectedValue(new Error('未配置网页归档测试结果')),

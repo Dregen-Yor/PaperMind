@@ -3,6 +3,7 @@ import { computed, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { usePaperStore } from './paper'
 import { useChatStore } from './chat'
+import { useVisualSummaryStore } from './visualSummary'
 import { parsePdfMeta } from '../utils/pdfUtils'
 
 export type ImportStatus = 'pending' | 'parsing' | 'saving' | 'done' | 'error' | 'skipped'
@@ -74,6 +75,7 @@ export const useLibraryImportStore = defineStore('libraryImport', () => {
             if (!await papers.paperContentUrl(existing.id)) {
               item.status = 'saving'
               await papers.restorePaperFile(existing.id, meta.fileData)
+              void useVisualSummaryStore().preparePaper(existing.id, { ...chats.chatProfile }).catch(() => {})
               item.status = 'done'
               openPaperId = existing.id
               continue
@@ -102,6 +104,8 @@ export const useLibraryImportStore = defineStore('libraryImport', () => {
           item.status = 'done'
           // Indexing remains independent of the import queue.
           chats.indexPaper(id).catch(() => {})
+          // Preparation has its own queue and never rolls back a successful import.
+          void useVisualSummaryStore().preparePaper(id, { ...chats.chatProfile }).catch(() => {})
         } catch (error) {
           item.status = 'error'
           item.error = error instanceof Error ? error.message : '未知错误'

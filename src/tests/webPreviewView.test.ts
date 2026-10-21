@@ -34,6 +34,7 @@ beforeEach(() => {
   vi.mocked(window.db.webQa.listSessions).mockResolvedValue([])
   unsubscribe = vi.fn()
   preview = {
+    summaryPdf: vi.fn(async () => 'pdf'),
     open: vi.fn(async () => {}),
     openAndCapture: vi.fn(async () => ({
       finalUrl: 'https://example.org/', title: 'Example', html: '<html></html>',
@@ -77,6 +78,32 @@ afterEach(() => {
 })
 
 describe('HTML preview page', () => {
+  it('switches right-side question and summary tabs while preserving the webpage and question draft', async () => {
+    vi.mocked(window.db.webQa.listPages).mockResolvedValue([page])
+    vi.mocked(preview.showCached).mockResolvedValue(true)
+    wrapper = mount(WebPreviewView)
+    await flushPromises()
+    await wrapper.get('[data-action="history-page"]').setValue(page.id)
+    await flushPromises()
+    const tabs = wrapper.get('.web-split-right').findAll('.right-tab')
+    expect(tabs.map(tab => tab.text())).toEqual(['网页问答', '网页摘要'])
+    expect(tabs[0].attributes('aria-pressed')).toBe('true')
+    const question = wrapper.get('.web-qa-panel textarea')
+    await question.setValue('保留的问题草稿')
+    await tabs[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.web-split-right [aria-label="网页摘要"]').text()).toContain('生成摘要')
+    expect(wrapper.get('.web-split-left .preview-stage').isVisible()).toBe(true)
+    expect(wrapper.get('.web-qa-panel').isVisible()).toBe(false)
+    expect(preview.setBounds).toHaveBeenLastCalledWith({ x: 72, y: 64, width: 900, height: 700 })
+    await tabs[0].trigger('click')
+    await flushPromises()
+    expect((wrapper.get('.right-pane-content').element as HTMLElement).style.display).not.toBe('none')
+    expect(tabs[0].attributes('aria-pressed')).toBe('true')
+    expect((wrapper.get('.web-qa-panel textarea').element as HTMLTextAreaElement).value).toBe('保留的问题草稿')
+    expect(preview.summaryPdf).not.toHaveBeenCalled()
+  })
+
   it('is reachable from the sidebar as an independent compact reading page', async () => {
     expect(router.resolve('/web-preview').matched.at(-1)?.path).toBe('/web-preview')
     await router.push('/web-preview')
@@ -408,6 +435,10 @@ describe('HTML preview page', () => {
     pushState?.({ ...emptyState, url: 'https://example.org/', visible: true })
     await wrapper.get('[aria-label="显示问答面板"]').trigger('click')
     await flushPromises()
+    expect(preview.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+    await wrapper.get('.right-tabs .right-tab:last-child').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="网页摘要"]').exists()).toBe(true)
     expect(preview.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
   })
 })

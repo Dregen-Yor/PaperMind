@@ -81,12 +81,23 @@
         @mousedown.prevent="startResize" @keydown.left.prevent="adjustSplit(-2)" @keydown.right.prevent="adjustSplit(2)"
         @keydown.home.prevent="setSplit(30)" @keydown.end.prevent="setSplit(75)" @dblclick="setSplit(58)"><span aria-hidden="true" /></div>
       <aside class="web-split-right" :class="{ 'mobile-active': mobilePane === 'qa' }">
-        <WebQaPanel ref="qaPanel" :session="qa.currentSession.value" :sessions="qa.sessions.value"
-          :pages="history.pages.value" :selected-page-id="history.selectedPage.value?.id || ''" :busy="qa.busy.value"
-          :error="qa.error.value" :streamed-text="qa.streamedText.value" :can-ask="canAsk"
-          :source-changed="sourceChanged" :model-name="chatStore.chatProfile.name"
-          @send="sendQuestion" @retry="qa.retry" @stop="qa.stop" @new="startNewSession"
-          @load="loadSession" @select-page="selectPage" @remove-page="removePage" @open-source="openSavedSource" />
+        <div class="right-tabs" role="group" aria-label="网页问答与摘要">
+          <button type="button" class="right-tab" :class="{ active: rightTab === 'chat' }" :aria-pressed="rightTab === 'chat'" @click="rightTab = 'chat'"><el-icon aria-hidden="true"><ChatLineRound /></el-icon> 网页问答</button>
+          <button type="button" class="right-tab" :class="{ active: rightTab === 'summary' }" :aria-pressed="rightTab === 'summary'" @click="rightTab = 'summary'"><el-icon aria-hidden="true"><Document /></el-icon> 网页摘要</button>
+        </div>
+        <div v-show="rightTab === 'chat'" class="right-pane-content">
+          <WebQaPanel ref="qaPanel" :session="qa.currentSession.value" :sessions="qa.sessions.value"
+            :pages="history.pages.value" :selected-page-id="history.selectedPage.value?.id || ''" :busy="qa.busy.value"
+            :error="qa.error.value" :streamed-text="qa.streamedText.value" :can-ask="canAsk"
+            :source-changed="sourceChanged" :model-name="chatStore.chatProfile.name"
+            @send="sendQuestion" @retry="qa.retry" @stop="qa.stop" @new="startNewSession"
+            @load="loadSession" @select-page="selectPage" @remove-page="removePage" @open-source="openSavedSource" />
+        </div>
+        <WebAbstractPanel v-if="rightTab === 'summary'" :snapshot="history.selectedSnapshotPreview.value"
+          :content="webSummary.state.value?.report?.content || webSummary.state.value?.content || ''"
+          :busy="webSummary.busy.value" :loading="webSummary.cacheLoading.value" :progress="webSummary.progress.value"
+          :error="webSummary.error.value" :truncated="webSummary.state.value?.report?.truncated || webSummary.state.value?.truncated || false"
+          @generate="generateWebSummary" @stop="webSummary.cancel()" />
       </aside>
     </div>
   </div>
@@ -94,7 +105,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeft, ArrowRight, Refresh, TopRight } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, ChatLineRound, Document, Refresh, TopRight } from '@element-plus/icons-vue'
 import { isAllowedExternalUrl, normalizePreviewUrl } from '../utils/webPreviewUrl'
 import type { PreviewBounds, PreviewState } from '../types/webPreview'
 import WebQaPanel from '../components/WebQaPanel.vue'
@@ -102,12 +113,25 @@ import { useWebQa } from '../composables/useWebQa'
 import { useChatStore } from '../stores/chat'
 import { useWebPageHistory } from '../composables/useWebPageHistory'
 import WebCachedPreview from '../components/WebCachedPreview.vue'
+import WebAbstractPanel from '../components/WebAbstractPanel.vue'
+import { useWebSummary } from '../composables/useWebSummary'
 import { ElMessageBox } from 'element-plus'
 
 const window = globalThis.window
 const chatStore = useChatStore()
 const qa = useWebQa()
-const history = useWebPageHistory(window.preview, window.db.webQa, qa)
+const history = useWebPageHistory(window.preview, window.db.webQa, qa, snapshotId => {
+  // Captures and model tasks belong to the saved source, independent of selection.
+  void window.db.webQa.getPreview(snapshotId).then(snapshot => {
+    if (snapshot) return webSummary.prepare(snapshot)
+  }).catch(() => {})
+})
+const webSummary = useWebSummary(history.selectedSnapshotPreview)
+const rightTab = ref<'chat' | 'summary'>('chat')
+async function generateWebSummary(force: boolean) {
+  if (webSummary.busy.value) return
+  try { await webSummary.generate(force) } catch { /* Persistent source state displays the error. */ }
+}
 const qaPanel = ref<InstanceType<typeof WebQaPanel>>()
 const readerSplit = ref<HTMLElement>()
 const splitRatio = ref(58)
@@ -271,6 +295,7 @@ async function removePage(id: string) {
     await ElMessageBox.confirm('将删除此网页的全部缓存版本及其问答会话。确认删除？', '删除网页历史', { type: 'warning' })
   } catch { return }
   try {
+    webSummary.cancelPage(id)
     await history.removePage(id)
     sourceChanged.value = false
   } catch (cause) { inputError.value = cause instanceof Error ? cause.message : '网页历史删除失败' }
@@ -330,14 +355,23 @@ onBeforeUnmount(() => {
 })
 
 watch(splitRatio, () => { void nextTick(syncBounds) })
+watch(() => history.nativeCached.value, () => { void nextTick(syncBounds) })
+watch(() => history.selectedSnapshotPreview.value, () => { void nextTick(syncBounds) })
 watch(() => history.mode.value, () => { void nextTick(syncBounds) })
 </script>
 
 <style scoped>
 .web-preview-view { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-base); }
+.right-tabs { display: flex; align-items: stretch; gap: clamp(10px, 2vw, 22px); padding: 0 20px; min-height: 51px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.right-tab { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 15px 1px 13px; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 12px; color: var(--text-muted); cursor: pointer; white-space: nowrap; }
+.right-tab .el-icon { font-size: 15px; }
+.right-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.right-tab:hover { color: var(--accent); }
 .web-reader-split { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.web-split-left { height: 100%; min-width: 0; overflow: hidden; flex-grow: 0; flex-shrink: 1; }
-.web-split-right { display: flex; flex: 1; min-width: 340px; height: 100%; overflow: hidden; border-left: 1px solid var(--border); }
+.web-split-left { display: flex; flex-direction: column; height: 100%; min-width: 0; overflow: hidden; flex-grow: 0; flex-shrink: 1; }
+.web-split-right { display: flex; flex-direction: column; flex: 1; min-width: 340px; height: 100%; overflow: hidden; border-left: 1px solid var(--border); }
+.right-pane-content, .web-split-right > .web-abstract-panel { flex: 1; min-height: 0; height: auto; }
+.right-pane-content { overflow: hidden; }
 .resizer { display: flex; align-items: center; justify-content: center; width: 7px; flex-shrink: 0; border-left: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--bg-elevated); cursor: col-resize; }
 .resizer span { width: 2px; height: 30px; border-radius: 2px; background: var(--border-light); }
 .resizer:hover, .resizer:focus-visible { background: var(--accent-dim); }
@@ -363,7 +397,7 @@ watch(() => history.mode.value, () => { void nextTick(syncBounds) })
 .external-button { gap: 6px; height: 40px; padding: 0 10px; border-radius: var(--radius-sm); font-size: 12px; white-space: nowrap; }
 .loading-line { height: 2px; flex-shrink: 0; background: linear-gradient(90deg, transparent 0%, var(--accent) 45%, transparent 90%); background-size: 180% 100%; animation: loading-move 1.2s linear infinite; }
 .toolbar-notice { padding: 7px 20px; border-bottom: 1px solid var(--border); color: var(--danger); background: var(--danger-dim); font-size: 12px; }
-.preview-stage { height: 100%; min-height: 0; padding: 12px; background: var(--bg-reader); }
+.preview-stage { flex: 1; height: 100%; min-height: 0; padding: 12px; background: var(--bg-reader); }
 .preview-slot { position: relative; width: 100%; height: 100%; min-height: 0; background: var(--bg-surface); }
 .preview-message { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 10px; width: min(520px, calc(100% - 48px)); height: 100%; margin: 0 auto; color: var(--text-secondary); }
 .message-title { font-size: clamp(23px, 3vw, 30px); line-height: 1.25; font-weight: 500; color: var(--text-primary); }
@@ -381,7 +415,7 @@ watch(() => history.mode.value, () => { void nextTick(syncBounds) })
   .web-mode-switch button { flex: 1; padding: 9px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 12px; }
   .web-mode-switch button.active { background: var(--accent-dim); color: var(--accent); }
   .web-split-left, .web-split-right { display: none; flex-basis: 100% !important; width: 100%; min-width: 0; }
-  .web-split-left.mobile-active { display: block; }
+  .web-split-left.mobile-active { display: flex; }
   .web-split-right.mobile-active { display: flex; }
   .resizer { display: none; }
 }

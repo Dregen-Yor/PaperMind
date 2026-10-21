@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { useVisualSummaryStore } from './visualSummary'
 import { ref, computed } from 'vue'
 import type { Paper, KnowledgeBase, Highlight } from '../types/paper'
 
@@ -29,6 +30,7 @@ export const usePaperStore = defineStore('paper', () => {
   }
 
   async function removeKnowledgeBase(id: string) {
+    for (const paper of papers.value.filter(p => p.knowledgeBaseId === id)) useVisualSummaryStore().cancel('paper', paper.id)
     await window.db.kb.remove(id)
     knowledgeBases.value = knowledgeBases.value.filter(k => k.id !== id)
     papers.value = papers.value.filter(p => p.knowledgeBaseId !== id)
@@ -45,6 +47,7 @@ export const usePaperStore = defineStore('paper', () => {
   }
 
   async function removePaper(id: string) {
+    useVisualSummaryStore().cancel('paper', id)
     await window.db.paper.remove(id)
     papers.value = papers.value.filter(p => p.id !== id)
   }
@@ -65,6 +68,7 @@ export const usePaperStore = defineStore('paper', () => {
   }
 
   function restorePaperFile(id: string, fileData: string): Promise<void> {
+    useVisualSummaryStore().cancel('paper', id)
     return window.db.paper.restoreFile(id, fileData)
   }
 

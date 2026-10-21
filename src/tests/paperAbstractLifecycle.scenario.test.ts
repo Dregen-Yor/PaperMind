@@ -5,6 +5,9 @@ import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ GlobalWorkerOptions: { workerSrc: '' } }))
 vi.mock('../utils/transformersEmbedder', () => ({ createTransformersEmbedder: vi.fn().mockRejectedValue(new Error('offline test')) }))
+vi.mock('../utils/visualSummaryPdf', () => ({ renderSummaryPdf: vi.fn().mockResolvedValue([{ page: 0, width: 100, height: 100, data: 'data:image/png;base64,YQ==' }]) }))
+vi.mock('../utils/visualSummary', async original => ({ ...await original<object>(), hashVisualSource: vi.fn().mockResolvedValue('visual-test-hash') }))
+
 
 import PaperAbstractPanel from '../components/PaperAbstractPanel.vue'
 import { useChatStore } from '../stores/chat'
@@ -24,6 +27,11 @@ beforeEach(() => {
   requests.length = 0
   tasks.length = 0
   reports = new Map()
+  db().paper.readFile.mockResolvedValue('YQ==')
+  db().documentSummary.get.mockReset().mockImplementation(async (_kind: string, _id: string, slot: string) => slot === 'materials' ? {
+    sourceHash: 'visual-test-hash', payload: JSON.stringify({ version: 1, sourceHash: 'visual-test-hash', protocol: 'visual-materials-v2-padded-crops', items: [], coveredPages: [0], usage: [] }),
+  } : null)
+  db().documentSummary.save.mockReset().mockResolvedValue({})
   db().settings.get.mockResolvedValue(null)
   db().chat.listConversations.mockResolvedValue([])
   db().index.list.mockResolvedValue([])
@@ -104,6 +112,19 @@ describe('paper summary survives feature navigation', () => {
     expect(db().paperAbstract.save).toHaveBeenCalledTimes(1)
   })
 
+  it('lets the user stop a PDF summary and rejects a late model response', async () => {
+    const { start } = await openPanel()
+    const { task } = await start()
+    const stop = wrapper!.findAll('button').find(button => button.text() === '停止')
+    expect(stop).toBeDefined()
+    await stop!.trigger('click')
+    expect(requests[0].signal.aborted).toBe(true)
+    requests[0].resolve(response('Cancelled late result'))
+    await task.catch(() => {})
+    await flushPromises()
+    expect(reports.has('paper')).toBe(false)
+    expect(wrapper!.text()).not.toContain('Cancelled late result')
+  })
   it('displays a report completed while another feature was open', async () => {
     const { start, navigate } = await openPanel()
     const { task } = await start()

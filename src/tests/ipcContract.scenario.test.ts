@@ -24,7 +24,7 @@ vi.mock('electron', () => ({
   },
 }))
 
-import { clearAll, exportAll, getWebQaRepository, importAll, initDb, paperApi } from '../../electron/db'
+import { clearAll, exportAll, getWebQaRepository, getDocumentSummaryRepository, importAll, initDb, paperApi } from '../../electron/db'
 import { registerIpc } from '../../electron/ipc'
 
 const taskRoot = mkdtempSync(join(tmpdir(), 'papermind-ipc-contract-'))
@@ -186,5 +186,24 @@ describe('same backup import task before and after IPC boundary changes', () => 
     expect(appPath.browserData.get('persist:papermind-preview')).toEqual({ cache: [], storage: [], codeCache: [] })
     expect(appPath.browserData.get('unrelated')).toEqual({ cache: ['keep.css'], storage: ['keep-cookie'], codeCache: ['keep.js'] })
     expect(getWebQaRepository().listPages()).toEqual([])
+  })
+
+  it('roundtrips native summary assets and rejects an orphan backup before replacing existing data', () => {
+    importAll(backup('native-paper'))
+    const repo = getDocumentSummaryRepository()
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0ioAAAAASUVORK5CYII='
+    const image = repo.saveAsset('paper', 'native-paper', png)
+    repo.save({ kind: 'paper', sourceId: 'native-paper', slot: 'report', sourceHash: 'native-v1',
+      payload: JSON.stringify({ content: `![Original](asset:${image})` }) })
+    const saved = exportAll()
+    const bad = structuredClone(saved)
+    bad.documentSummary.records[0].sourceId = 'missing-paper'
+    expect(() => importAll(bad)).toThrow('摘要备份来源不存在')
+    expect(repo.readAsset(image)).toBe(png)
+    clearAll()
+    expect(repo.readAsset(image)).toBeNull()
+    importAll(saved)
+    expect(repo.readAsset(image)).toBe(png)
+    expect(repo.get('paper', 'native-paper', 'report')?.payload).toContain(image)
   })
 })

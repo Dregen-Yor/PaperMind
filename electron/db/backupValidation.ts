@@ -5,6 +5,8 @@ import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun
 import type { WebQaBackup } from '../../src/types/webQa'
 import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
 import { normalizeDoclingSettings } from '../../src/utils/doclingDocument'
+import { validateDocumentSummaryBackup } from './documentSummary'
+import { decodeWebVisualPdf } from './webVisualPdf'
 
 const runStatuses = new Set(['preparing', 'streaming', 'completed', 'failed', 'cancelled', 'interrupted'])
 
@@ -173,6 +175,8 @@ export function normalizeWebQaBackup(value: unknown): WebQaBackup {
     if (Buffer.byteLength(html, 'utf8') !== s.byteLength || Number(s.byteLength) > 8 * 1024 * 1024) invalid('网页快照大小')
     if (createHash('sha256').update(html, 'utf8').digest('hex') !== s.contentHash) invalid('网页快照指纹')
     const archiveMhtml = s.archiveMhtml === undefined ? undefined : string(s.archiveMhtml, '网页原貌缓存')
+    const visualPdf = s.visualPdf === undefined ? undefined : string(s.visualPdf, '网页视觉 PDF')
+    if (visualPdf !== undefined) decodeWebVisualPdf(visualPdf)
     if (archiveMhtml !== undefined && (!/^[A-Za-z0-9+/]+={0,2}$/.test(archiveMhtml)
       || archiveMhtml.length % 4 !== 0 || Buffer.byteLength(archiveMhtml, 'base64') > 32 * 1024 * 1024
       || Buffer.from(archiveMhtml, 'base64').toString('base64') !== archiveMhtml)) invalid('网页原貌缓存')
@@ -192,7 +196,7 @@ export function normalizeWebQaBackup(value: unknown): WebQaBackup {
         if (capturedAt > page.lastOpenedAt) { page.lastOpenedAt = capturedAt; page.title = title }
       }
     }
-    normalizedSnapshots.push({ id: snapshotId, pageId, finalUrl: url, title, html, archiveMhtml,
+    normalizedSnapshots.push({ id: snapshotId, pageId, finalUrl: url, title, html, archiveMhtml, ...(visualPdf ? { visualPdf } : {}),
       capturedAt, contentHash: String(s.contentHash), byteLength: Number(s.byteLength),
       lastSeenAt: time(s.lastSeenAt ?? capturedAt, '网页快照最近查看时间'),
       preview: { blocks: [], truncated: false } })
@@ -297,6 +301,8 @@ export function validateBackupInput(value: unknown): void {
   }
 
   const conversations = entries(data.conversations, 'conversations')
+  const snapshots = data.webQa === undefined ? [] : normalizeWebQaBackup(data.webQa).snapshots
+  validateDocumentSummaryBackup(data.documentSummary, paperIds, new Set(snapshots.map(row => row.id)))
   const conversationIds = new Set<string>()
   const messageIds = new Set<string>()
   for (const conversation of conversations) {

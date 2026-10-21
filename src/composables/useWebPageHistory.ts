@@ -8,7 +8,7 @@ type QaController = ReturnType<typeof createWebQaController>
 type WebRepository = Pick<DbApi['webQa'], 'listPages' | 'archive' | 'getPreview' | 'findAppearance' | 'removePage'>
 const zeroBounds = { x: 0, y: 0, width: 0, height: 0 }
 
-export function useWebPageHistory(preview: PreviewApi, repository: WebRepository, qa: QaController) {
+export function useWebPageHistory(preview: PreviewApi, repository: WebRepository, qa: QaController, onArchive?: (snapshotId: string) => void) {
   const pages = ref<WebPageSummary[]>([])
   const selectedPage = ref<WebPageSummary | null>(null)
   const selectedSnapshotPreview = ref<WebSnapshotPreview | null>(null)
@@ -68,6 +68,7 @@ export function useWebPageHistory(preview: PreviewApi, repository: WebRepository
     const snapshot = await preview.openAndCapture(url, bounds)
     if (version !== selectionVersion) throw new Error('网页选择已变化')
     const page = await repository.archive(snapshot, Date.now())
+    onArchive?.(page.latestSnapshotId)
     if (version !== selectionVersion) throw new Error('网页选择已变化')
     await useArchivedPage(page, version)
     return page
@@ -88,6 +89,7 @@ export function useWebPageHistory(preview: PreviewApi, repository: WebRepository
     const snapshot = await preview.captureSnapshot()
     if (version !== selectionVersion) throw new Error('网页选择已变化')
     const page = await repository.archive(snapshot, Date.now())
+    onArchive?.(page.latestSnapshotId)
     if (version !== selectionVersion) throw new Error('网页选择已变化')
     mode.value = 'live'
     await useArchivedPage(page, version)

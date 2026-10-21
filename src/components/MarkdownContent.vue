@@ -35,7 +35,10 @@ watch(() => props.content, async () => {
     const id = image.dataset.assetId!
     let request = localAssets.get(id)
     if (!request) {
-      request = window.db.docling.readAsset(id).catch(() => null)
+      request = (async () => {
+        const asset = await window.db.documentSummary?.readAsset(id).catch(() => null)
+        return asset ?? await window.db.docling.readAsset(id).catch(() => null)
+      })()
       localAssets.set(id, request)
     }
     const data = await request

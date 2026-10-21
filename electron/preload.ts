@@ -6,6 +6,12 @@ const invoke: TypedInvoke = (channel, ...args) => ipcRenderer.invoke(channel, ..
 
 // Typed wrapper around ipcRenderer.invoke. Each method maps to a handler in ipc.ts.
 const db: DbApi = {
+  documentSummary: {
+    get: (kind, sourceId, slot) => invoke('documentSummary:get', kind, sourceId, slot),
+    save: record => invoke('documentSummary:save', record),
+    saveAsset: (kind, sourceId, data) => invoke('documentSummary:saveAsset', kind, sourceId, data),
+    readAsset: id => invoke('documentSummary:readAsset', id),
+  },
   webQa: {
     listPages: () => invoke('webQa:listPages'),
     archive: (snapshot, openedAt) => invoke('webQa:archive', snapshot, openedAt),
@@ -95,6 +101,7 @@ const db: DbApi = {
 contextBridge.exposeInMainWorld('db', db)
 
 const preview: PreviewInvokeApi & { onState: (callback: (state: PreviewState) => void) => () => void } = {
+  summaryPdf: snapshotId => invoke('preview:summaryPdf', snapshotId),
   open: (url: string, bounds: PreviewBounds) => invoke('preview:open', url, bounds),
   openAndCapture: (url: string, bounds: PreviewBounds) => invoke('preview:openAndCapture', url, bounds),
   setBounds: (bounds: PreviewBounds) => invoke('preview:setBounds', bounds),
