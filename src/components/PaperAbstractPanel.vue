@@ -42,26 +42,29 @@ import type { PaperAbstractReport } from '../utils/paperAbstract'
 const props = defineProps<{ paperId: string }>()
 const emit = defineEmits<{ (event: 'open-source', source: SourceRef): void }>()
 const chatStore = useChatStore()
-const report = ref<PaperAbstractReport | null>(null)
-const loadingCache = ref(true)
-const generating = ref(false)
-const error = ref('')
+const cachedReport = ref<PaperAbstractReport | null>(null)
+const readingCache = ref(true)
+const cacheError = ref('')
+const state = computed(() => chatStore.paperAbstractStates[props.paperId])
+const report = computed(() => state.value?.report ?? cachedReport.value)
+const loadingCache = computed(() => readingCache.value && !state.value)
+const generating = computed(() => state.value?.generating ?? false)
+const error = computed(() => state.value?.error ?? cacheError.value)
 const progress = computed(() => chatStore.abstractProgress[`paper-abstract:${props.paperId}`] || '正在生成摘要…')
 let generation = 0
 
 watch(() => props.paperId, async paperId => {
   const current = ++generation
-  report.value = null
-  error.value = ''
-  loadingCache.value = true
-  generating.value = false
+  cachedReport.value = null
+  cacheError.value = ''
+  readingCache.value = true
   try {
     const saved = await window.db.paperAbstract.get(paperId)
-    if (current === generation) report.value = saved
+    if (current === generation) cachedReport.value = saved
   } catch (cause) {
-    if (current === generation) error.value = cause instanceof Error ? cause.message : '摘要读取失败，请重试'
+    if (current === generation) cacheError.value = cause instanceof Error ? cause.message : '摘要读取失败，请重试'
   } finally {
-    if (current === generation) loadingCache.value = false
+    if (current === generation) readingCache.value = false
   }
 }, { immediate: true })
 
@@ -69,15 +72,12 @@ async function generate(force = false) {
   if (generating.value) return
   const paperId = props.paperId
   const current = generation
-  error.value = ''
-  generating.value = true
+  cacheError.value = ''
   try {
     const saved = await chatStore.generatePaperAbstract(paperId, force)
-    if (current === generation) report.value = saved
+    if (current === generation) cachedReport.value = saved
   } catch (cause) {
-    if (current === generation) error.value = cause instanceof Error ? cause.message : '摘要生成失败，请重试'
-  } finally {
-    if (current === generation) generating.value = false
+    if (current === generation) cacheError.value = cause instanceof Error ? cause.message : '摘要生成失败，请重试'
   }
 }
 </script>

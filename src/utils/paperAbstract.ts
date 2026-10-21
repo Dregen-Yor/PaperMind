@@ -8,3 +8,10 @@ export interface PaperAbstractReport {
   truncated: boolean
   updatedAt: number
 }
+
+/** Application-owned state; survives summary panel and route changes. */
+export interface PaperAbstractState {
+  generating: boolean
+  report: PaperAbstractReport | null
+  error: string
+}

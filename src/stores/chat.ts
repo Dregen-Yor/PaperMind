@@ -23,7 +23,7 @@ import type { PaperTreeRecord } from '../types/db'
 import type { SourceRef } from '../utils/sourceRef'
 import type { ChatRunStatus } from '../types/chatRun'
 import type { Message, Conversation } from '../types/chat'
-import type { PaperAbstractReport } from '../utils/paperAbstract'
+import type { PaperAbstractReport, PaperAbstractState } from '../utils/paperAbstract'
 import { DEFAULT_DOCLING_SETTINGS, DOCLING_SETTINGS_KEY, normalizeDoclingSettings, type DoclingSettings } from '../utils/doclingDocument'
 import { prepareDoclingPaper } from '../utils/doclingPdf'
 import { abstractRunKey, generateDoclingAbstract } from '../utils/doclingAbstract'
@@ -305,6 +305,7 @@ export const useChatStore = defineStore('chat', () => {
   const doclingConfig = ref<DoclingSettings>({ ...DEFAULT_DOCLING_SETTINGS })
   const doclingConfigError = ref('')
   const abstractProgress = ref<Record<string, string>>({})
+  const paperAbstractStates = ref<Record<string, PaperAbstractState>>({})
   const paperAbstractJobs = new Map<string, Promise<PaperAbstractReport>>()
   const activeChatRuns = new Map<string, ActiveChatRun>()
   const startingChatRuns = new Set<string>()
@@ -1179,19 +1180,35 @@ export const useChatStore = defineStore('chat', () => {
   async function generatePaperAbstract(paperId: string, force = false): Promise<PaperAbstractReport> {
     const ongoing = paperAbstractJobs.get(paperId)
     if (ongoing) return ongoing
+    paperAbstractStates.value[paperId] = {
+      generating: true,
+      report: paperAbstractStates.value[paperId]?.report ?? null,
+      error: '',
+    }
+    const state = paperAbstractStates.value[paperId]
     const task = (async () => {
-      const saved = await window.db.paperAbstract.get(paperId)
-      if (saved && !saved.truncated && !force) return saved
-      const conv: Conversation = { id: `paper-abstract:${paperId}`, title: '', paperIds: [paperId], messages: [], createdAt: 0 }
-      const resume: AbstractResume | undefined = saved?.truncated && !force
-        ? { kind: 'docling-abstract', paperIds: [paperId], index: 0, previous: saved.content.slice(-9000) }
-        : undefined
-      const result = await generateAbstract(conv, resume)
-      const sources = [...new Map([...(resume ? saved?.sources ?? [] : []), ...result.sources]
-        .map(source => [`${source.paperId}:${source.startPage}:${source.label}`, source])).values()]
-      return window.db.paperAbstract.save({ paperId,
-        content: resume ? `${saved!.content}\n\n${result.content}` : result.content,
-        sources, truncated: result.truncated })
+      try {
+        const saved = await window.db.paperAbstract.get(paperId)
+        state.report = saved ?? state.report
+        if (saved && !saved.truncated && !force) return saved
+        const conv: Conversation = { id: `paper-abstract:${paperId}`, title: '', paperIds: [paperId], messages: [], createdAt: 0 }
+        const resume: AbstractResume | undefined = saved?.truncated && !force
+          ? { kind: 'docling-abstract', paperIds: [paperId], index: 0, previous: saved.content.slice(-9000) }
+          : undefined
+        const result = await generateAbstract(conv, resume)
+        const sources = [...new Map([...(resume ? saved?.sources ?? [] : []), ...result.sources]
+          .map(source => [`${source.paperId}:${source.startPage}:${source.label}`, source])).values()]
+        const report = await window.db.paperAbstract.save({ paperId,
+          content: resume ? `${saved!.content}\n\n${result.content}` : result.content,
+          sources, truncated: result.truncated })
+        state.report = report
+        return report
+      } catch (cause) {
+        state.error = cause instanceof Error ? cause.message : '摘要生成失败，请重试'
+        throw cause
+      } finally {
+        state.generating = false
+      }
     })()
     paperAbstractJobs.set(paperId, task)
     try { return await task } finally { paperAbstractJobs.delete(paperId) }
@@ -1223,8 +1240,15 @@ export const useChatStore = defineStore('chat', () => {
       if (paperIds.length === 1 && !cached) {
         // Chat-owned jobs deliberately do not enter paperAbstractJobs: cancelling a chat
         // cannot abort or claim ownership of a summary-tab consumer's independent job.
-        await awaitOrCancel(window.db.paperAbstract.save({ paperId: paperIds[0], content: answer, sources, truncated: result.truncated }), signal)
+        const report = await awaitOrCancel(window.db.paperAbstract.save({ paperId: paperIds[0], content: answer, sources, truncated: result.truncated }), signal)
         throwIfCancelled(signal)
+        const state = paperAbstractStates.value[paperIds[0]]
+        if (state) {
+          state.report = report
+          if (!state.generating) state.error = ''
+        } else {
+          paperAbstractStates.value[paperIds[0]] = { generating: false, report, error: '' }
+        }
       }
       return { answer, sources, truncated: result.truncated, context: result.context }
     })
@@ -1463,7 +1487,7 @@ export const useChatStore = defineStore('chat', () => {
     retrievalContextChars, setRetrievalContextChars, rebuildEk5Indexes, vectorModelState,
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
-    loaded, indexingPapers, indexedPapers, abstractToken, doclingConfig, doclingConfigError, abstractProgress, setDoclingConfig,
+    loaded, indexingPapers, indexedPapers, abstractToken, doclingConfig, doclingConfigError, abstractProgress, paperAbstractStates, setDoclingConfig,
     treeEnabled, treeReadyPapers, treeIndexingPapers,
     init,
     addProfile, updateProfile, removeProfile,
