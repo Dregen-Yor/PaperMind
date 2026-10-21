@@ -90,6 +90,8 @@
             :pages="history.pages.value" :selected-page-id="history.selectedPage.value?.id || ''" :busy="qa.busy.value"
             :error="qa.error.value" :streamed-text="qa.streamedText.value" :can-ask="canAsk"
             :source-changed="sourceChanged" :model-name="chatStore.chatProfile.name"
+            :profiles="chatStore.profiles" :profile-id="chatStore.chatProfile.id"
+            @select-profile="chatStore.setChatProfileId($event)"
             @send="sendQuestion" @retry="qa.retry" @stop="qa.stop" @new="startNewSession"
             @load="loadSession" @select-page="selectPage" @remove-page="removePage" @open-source="openSavedSource" />
         </div>
