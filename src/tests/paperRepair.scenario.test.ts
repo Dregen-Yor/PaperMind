@@ -6,12 +6,16 @@ import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import Database from 'better-sqlite3'
 
-const environment = vi.hoisted(() => ({ userData: '', handlers: new Map<string, (...args: unknown[]) => unknown>() }))
-vi.mock('electron', () => ({ app: { getPath: () => environment.userData },
+const environment = vi.hoisted(() => ({ userData: '', frame: { url: 'file:///app/dist/index.html' }, handlers: new Map<string, (...args: unknown[]) => unknown>() }))
+vi.mock('electron', () => ({ app: { getPath: () => environment.userData, getAppPath: () => '/app', isPackaged: true },
+  BrowserWindow: { getAllWindows: () => [{ webContents: trustedSender }] },
   ipcMain: { handle: (channel: string, handler: (...args: unknown[]) => unknown) => environment.handlers.set(channel, handler) },
 }))
 import { chatApi, highlightApi, importAll, initDb, paperApi } from '../../electron/db'
 import { registerIpc } from '../../electron/ipc'
+
+const trustedSender = { mainFrame: environment.frame }
+const trustedEvent = { sender: trustedSender, senderFrame: environment.frame }
 
 const root = mkdtempSync(join(tmpdir(), 'papermind-repair-'))
 const bytes = Buffer.from('%PDF-1.7\noriginal PDF')
@@ -145,10 +149,11 @@ describe('repairing a restored paper PDF', () => {
     registerIpc()
     const restore = environment.handlers.get('paper:restoreFile')!
     expect(restore).toBeTypeOf('function')
-    expect(() => restore({}, '../escape', fileData)).toThrow('ID')
-    expect(() => restore({}, 'saved-paper', { fileData })).toThrow('数据无效')
+    expect(() => restore({}, 'saved-paper', fileData)).toThrow('IPC')
+    expect(() => restore(trustedEvent, '../escape', fileData)).toThrow('ID')
+    expect(() => restore(trustedEvent, 'saved-paper', { fileData })).toThrow('数据无效')
     expect(existsSync(filePath())).toBe(false)
-    restore({}, 'saved-paper', fileData)
+    restore(trustedEvent, 'saved-paper', fileData)
     expect(readFileSync(filePath())).toEqual(bytes)
   })
 })

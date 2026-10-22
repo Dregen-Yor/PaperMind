@@ -1,3 +1,5 @@
+import { MAX_SERVICE_JSON_BYTES } from '../../../src/utils/serviceSecurity'
+
 export interface ParsedStream {
   content: string
   usage?: { inputTokens: number; outputTokens: number }
@@ -32,6 +34,7 @@ export async function parseOpenAiSse(
 ): Promise<ParsedStream> {
   const decoder = new TextDecoder()
   const reader = stream.getReader()
+  let receivedBytes = 0
   let carry = ''
   let content = ''
   let usage: ParsedStream['usage']
@@ -92,31 +95,38 @@ export async function parseOpenAiSse(
     return false
   }
 
-  while (!terminalSeen) {
-    const { done, value } = await reader.read()
-    if (done) break
-    carry += decoder.decode(value, { stream: true })
-    if (parseCompleteEvents()) {
+  try {
+    while (!terminalSeen) {
+      const { done, value } = await reader.read()
+      if (done) break
+      receivedBytes += value.byteLength
+      if (receivedBytes > MAX_SERVICE_JSON_BYTES) throw new Error('服务响应超过大小上限')
+      carry += decoder.decode(value, { stream: true })
+      if (parseCompleteEvents()) {
+        carry += decoder.decode()
+        if (carry.trim().length > 0) {
+          throw new Error('OpenAI SSE data appeared after the [DONE] terminal marker')
+        }
+      }
+    }
+
+    if (!terminalSeen) {
       carry += decoder.decode()
-      if (carry.trim().length > 0) {
-        throw new Error('OpenAI SSE data appeared after the [DONE] terminal marker')
+      parseCompleteEvents()
+      if (terminalSeen) {
+        if (carry.trim().length > 0) {
+          throw new Error('OpenAI SSE data appeared after the [DONE] terminal marker')
+        }
+      } else {
+        if (carry.length > 0) throw new Error('incomplete OpenAI SSE event')
+        throw new Error('OpenAI SSE stream ended before the [DONE] terminal marker')
       }
     }
-  }
 
-  if (!terminalSeen) {
-    carry += decoder.decode()
-    parseCompleteEvents()
-    if (terminalSeen) {
-      if (carry.trim().length > 0) {
-        throw new Error('OpenAI SSE data appeared after the [DONE] terminal marker')
-      }
-    } else {
-      if (carry.length > 0) throw new Error('incomplete OpenAI SSE event')
-      throw new Error('OpenAI SSE stream ended before the [DONE] terminal marker')
-    }
+    if (content.length === 0) throw new Error('OpenAI SSE stream ended with empty final content')
+    return usage ? { content, usage } : { content }
+  } finally {
+    cancelReader()
+    reader.releaseLock()
   }
-
-  if (content.length === 0) throw new Error('OpenAI SSE stream ended with empty final content')
-  return usage ? { content, usage } : { content }
 }

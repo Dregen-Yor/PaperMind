@@ -168,7 +168,9 @@ describe('流式输出（#6）', () => {
     const assistant = conv.messages.find(m => m.role === 'assistant')!
     const firstRunId = assistant.runId
     assistant.runStatus = 'cancelled'
-    global.fetch = vi.fn().mockResolvedValue(sse(['续上'])) as any
+    global.fetch = vi.fn(async (_url, init) => JSON.parse(String(init?.body)).stream
+      ? sse(['续上'])
+      : new Response(JSON.stringify({ choices: [{ message: { content: '问题' } }] }))) as any
 
     await store.continueMessage(conv.id, assistant.id)
 

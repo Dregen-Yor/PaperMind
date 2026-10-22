@@ -29,6 +29,7 @@ describe('Docling HTTP boundary', () => {
     const [url, init] = request.mock.calls[0]
     expect(url).toBe('http://localhost:5001/prefix/v1/convert/file')
     expect(init.headers['X-Api-Key']).toBe('test-key')
+    expect(init.redirect).toBe('error')
     expect(init.body.get('to_formats')).toBe('json')
     expect(init.body.get('target_type')).toBe('inbody')
     expect(init.body.get('image_export_mode')).toBe('embedded')
@@ -58,5 +59,22 @@ describe('Docling HTTP boundary', () => {
       await vi.advanceTimersByTimeAsync(30_001)
       await check
     } finally { vi.useRealTimers() }
+  })
+  it('rejects oversized uploads before any request is sent', async () => {
+    const request = vi.fn()
+    await expect(convertPdf(new Uint8Array(64 * 1024 * 1024 + 1), 'large.pdf', settings, request)).rejects.toThrow('上传大小上限')
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('caps in-flight parsing requests and releases capacity after failures', async () => {
+    let reject!: (error: Error) => void
+    const pending = new Promise<Response>((_resolve, fail) => { reject = fail })
+    const request = vi.fn(() => pending)
+    const first = convertPdf(new Uint8Array(), 'a.pdf', settings, request)
+    const second = convertPdf(new Uint8Array(), 'b.pdf', settings, request)
+    await expect(convertPdf(new Uint8Array(), 'c.pdf', settings, request)).rejects.toThrow('请求过多')
+    const settled = Promise.allSettled([first, second])
+    reject(new Error('connection closed'))
+    await settled
+    await expect(convertPdf(new Uint8Array(), 'd.pdf', settings, vi.fn().mockResolvedValue(response()))).resolves.toBeDefined()
   })
 })
