@@ -6,7 +6,7 @@
   "main": "dist-electron/main.js",
   "packageManager": "npm@10.9.4",
   "engines": {
-    "node": "^22.14.0 || >=24.0.0",
+    "node": ">=24.22.1 <25",
     "npm": ">=10.0.0 <11"
   },
   "scripts": {
@@ -17,14 +17,29 @@
     "test": "vitest run && npm run test:branding",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "test:branding": "node --test scripts/tests/icon-assets.test.mjs scripts/tests/dev-branding.test.mjs scripts/tests/linux-install.test.mjs",
+    "test:branding": "node --test scripts/tests/icon-assets.test.mjs scripts/tests/dev-branding.test.mjs scripts/tests/linux-install.test.mjs scripts/tests/runtime-security.test.mjs",
     "icons:generate": "node scripts/generate-icons.mjs",
     "icons:check": "node scripts/check-icons.mjs",
     "bench": "tsx bench/src/cli.ts",
     "bench:product": "tsx bench/src/productCli.ts",
     "bench:trees": "tsx bench/src/treeInspectCli.ts",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
-    "postinstall": "electron-rebuild -f -w better-sqlite3"
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "security:node": "node scripts/check-runtime.mjs",
+    "security:runtime": "node scripts/check-runtime.mjs --electron",
+    "security:test": "node --test scripts/tests/runtime-security.test.mjs",
+    "preinstall": "node scripts/check-runtime.mjs",
+    "predev": "node scripts/check-runtime.mjs",
+    "prebuild": "node scripts/check-runtime.mjs --electron",
+    "pretest": "node scripts/check-runtime.mjs",
+    "pretypecheck": "node scripts/check-runtime.mjs",
+    "prerebuild": "node scripts/check-runtime.mjs",
+    "prepreview": "node scripts/check-runtime.mjs",
+    "pretest:watch": "node scripts/check-runtime.mjs",
+    "pretest:ui": "node scripts/check-runtime.mjs",
+    "prebench": "node scripts/check-runtime.mjs",
+    "prebench:product": "node scripts/check-runtime.mjs",
+    "prebench:trees": "node scripts/check-runtime.mjs"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
@@ -34,7 +49,7 @@
     "@vitejs/plugin-vue": "^5.2.4",
     "@vitest/ui": "^4.1.8",
     "@vue/test-utils": "^2.4.11",
-    "electron": "^44.2.0",
+    "electron": "44.9.3",
     "electron-builder": "^24.0.0",
     "jsdom": "^29.1.1",
     "sharp": "0.34.5",
@@ -97,6 +112,7 @@
     "win": {
       "target": "nsis",
       "icon": "assets/icons/win.ico"
-    }
+    },
+    "afterPack": "scripts/check-packaged-runtime.cjs"
   }
 }

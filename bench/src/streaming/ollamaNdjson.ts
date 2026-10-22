@@ -1,3 +1,5 @@
+import { MAX_SERVICE_JSON_BYTES } from '../../../src/utils/serviceSecurity'
+
 export interface ParsedStream {
   content: string
   usage?: { inputTokens: number; outputTokens: number }
@@ -20,6 +22,7 @@ export async function parseOllamaNdjson(
 ): Promise<ParsedStream> {
   const decoder = new TextDecoder()
   const reader = stream.getReader()
+  let receivedBytes = 0
   let carry = ''
   let content = ''
   let usage: ParsedStream['usage']
@@ -74,34 +77,41 @@ export async function parseOllamaNdjson(
     return false
   }
 
-  while (!terminalSeen) {
-    const { done: streamDone, value } = await reader.read()
-    if (streamDone) break
-    carry += decoder.decode(value, { stream: true })
-    if (parseCompleteLines()) {
+  try {
+    while (!terminalSeen) {
+      const { done: streamDone, value } = await reader.read()
+      if (streamDone) break
+      receivedBytes += value.byteLength
+      if (receivedBytes > MAX_SERVICE_JSON_BYTES) throw new Error('服务响应超过大小上限')
+      carry += decoder.decode(value, { stream: true })
+      if (parseCompleteLines()) {
+        carry += decoder.decode()
+        if (carry.trim().length > 0) {
+          throw new Error('Ollama NDJSON data appeared after the done:true terminal marker')
+        }
+      }
+    }
+
+    if (!terminalSeen) {
       carry += decoder.decode()
+      parseCompleteLines()
+      if (!terminalSeen && carry.length > 0) {
+        const finalLine = carry.replace(/\r$/, '')
+        carry = ''
+        parseLine(finalLine)
+      }
+      if (!terminalSeen) {
+        throw new Error('Ollama NDJSON stream ended before the done:true terminal marker')
+      }
       if (carry.trim().length > 0) {
         throw new Error('Ollama NDJSON data appeared after the done:true terminal marker')
       }
     }
-  }
 
-  if (!terminalSeen) {
-    carry += decoder.decode()
-    parseCompleteLines()
-    if (!terminalSeen && carry.length > 0) {
-      const finalLine = carry.replace(/\r$/, '')
-      carry = ''
-      parseLine(finalLine)
-    }
-    if (!terminalSeen) {
-      throw new Error('Ollama NDJSON stream ended before the done:true terminal marker')
-    }
-    if (carry.trim().length > 0) {
-      throw new Error('Ollama NDJSON data appeared after the done:true terminal marker')
-    }
+    if (content.length === 0) throw new Error('Ollama NDJSON stream ended with empty final content')
+    return usage ? { content, usage } : { content }
+  } finally {
+    cancelReader()
+    reader.releaseLock()
   }
-
-  if (content.length === 0) throw new Error('Ollama NDJSON stream ended with empty final content')
-  return usage ? { content, usage } : { content }
 }

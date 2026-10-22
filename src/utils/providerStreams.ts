@@ -8,6 +8,7 @@ export async function readProviderStream(
   if (!response.body) throw new Error('流式响应不可用')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
+  let bytes = 0
   let buffer = ''
   let content = ''
   let truncated = false
@@ -48,6 +49,8 @@ export async function readProviderStream(
       signal?.throwIfAborted()
       const { done, value } = await reader.read()
       signal?.throwIfAborted()
+      bytes += value?.byteLength ?? 0
+      if (bytes > 32 * 1024 * 1024) throw new Error('模型流式响应超过大小上限')
       buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''

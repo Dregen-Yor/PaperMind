@@ -8,13 +8,14 @@ import { createHash } from 'crypto'
 
 const appPath = vi.hoisted(() => ({
   userData: '',
+  frame: { url: 'file:///app/dist/index.html#/reader/a' },
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   browserData: new Map<string, { cache: string[]; storage: string[]; codeCache: string[] }>(),
 }))
 vi.mock('electron', () => ({
-  app: { getPath: () => appPath.userData },
+  app: { getPath: () => appPath.userData, getAppPath: () => '/app', isPackaged: true },
   ipcMain: { handle: (channel: string, handler: (...args: unknown[]) => unknown) => appPath.handlers.set(channel, handler) },
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: { getAllWindows: () => [{ webContents: trustedSender }] },
   session: {
     fromPartition: (partition: string) => ({
       clearCache: async () => { appPath.browserData.get(partition)!.cache = [] },
@@ -26,6 +27,9 @@ vi.mock('electron', () => ({
 
 import { clearAll, exportAll, getWebQaRepository, getDocumentSummaryRepository, importAll, initDb, paperApi } from '../../electron/db'
 import { registerIpc } from '../../electron/ipc'
+
+const trustedSender = { mainFrame: appPath.frame }
+const trustedEvent = { sender: trustedSender, senderFrame: appPath.frame }
 
 const taskRoot = mkdtempSync(join(tmpdir(), 'papermind-ipc-contract-'))
 appPath.userData = join(taskRoot, 'user-data')
@@ -129,7 +133,7 @@ describe('same backup import task before and after IPC boundary changes', () => 
   it('rejects a bad chat run state at the IPC handler before writing a message', () => {
     registerIpc()
     const add = appPath.handlers.get('chat:addMessage')!
-    expect(() => add({}, {
+    expect(() => add(trustedEvent, {
       id: 'invalid-message', conversationId: 'conversation-1', role: 'assistant',
       content: 'partial', sources: [], timestamp: 4, runId: 'run-2', runStatus: 'unknown-state',
     })).toThrow()
@@ -138,8 +142,15 @@ describe('same backup import task before and after IPC boundary changes', () => 
 
   it('rejects a bad chat run state when updating an existing message', () => {
     const update = appPath.handlers.get('chat:updateMessage')!
-    expect(() => update({}, 'message-1', { runStatus: 'unknown-state' })).toThrow()
+    expect(() => update(trustedEvent, 'message-1', { runStatus: 'unknown-state' })).toThrow()
     expect(exportAll().conversations[0].messages[0].runStatus).toBe('cancelled')
+  })
+
+  it('rejects every registered privileged channel before dispatch for unknown windows or child frames', () => {
+    for (const handler of appPath.handlers.values()) {
+      expect(() => handler({ sender: { mainFrame: appPath.frame }, senderFrame: appPath.frame })).toThrow('IPC')
+      expect(() => handler({ sender: trustedSender, senderFrame: { ...appPath.frame } })).toThrow('IPC')
+    }
   })
 
   it('accepts empty display labels from an older version-1 backup', () => {
@@ -182,7 +193,7 @@ describe('same backup import task before and after IPC boundary changes', () => 
   it('clears persistent webpage resources and site storage with application data without touching other sessions', async () => {
     appPath.browserData.set('persist:papermind-preview', { cache: ['article.css'], storage: ['site-cookie'], codeCache: ['article.js'] })
     appPath.browserData.set('unrelated', { cache: ['keep.css'], storage: ['keep-cookie'], codeCache: ['keep.js'] })
-    await appPath.handlers.get('data:clear')!({})
+    await appPath.handlers.get('data:clear')!(trustedEvent)
     expect(appPath.browserData.get('persist:papermind-preview')).toEqual({ cache: [], storage: [], codeCache: [] })
     expect(appPath.browserData.get('unrelated')).toEqual({ cache: ['keep.css'], storage: ['keep-cookie'], codeCache: ['keep.js'] })
     expect(getWebQaRepository().listPages()).toEqual([])
