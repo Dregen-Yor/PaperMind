@@ -69,6 +69,8 @@ function failingStreamAfter(text: string, error: Error): ReadableStream<Uint8Arr
   let readCount = 0
   return {
     getReader: () => ({
+      cancel: async () => {},
+      releaseLock: () => {},
       read: async () => {
         readCount++
         if (readCount === 1) return { done: false, value: encoder.encode(text) }
@@ -82,6 +84,8 @@ function streamThenAbort(text: string, signal: AbortSignal): ReadableStream<Uint
   let readCount = 0
   return {
     getReader: () => ({
+      cancel: async () => {},
+      releaseLock: () => {},
       read: async () => {
         readCount++
         if (readCount === 1) return { done: false, value: encoder.encode(text) }
@@ -144,7 +148,7 @@ describe('generation-limit cache isolation', () => {
   ])('separates cached responses when a generation parameter changes', async (first, second) => {
     const firstFetch = vi.fn().mockResolvedValue(okResponse('first'))
     const secondFetch = vi.fn().mockResolvedValue(okResponse('second'))
-    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir }
     expect(await createLlmClient({ ...common, ...first, fetchImpl: firstFetch as unknown as typeof fetch }).complete('q')).toBe('first')
     expect(await createLlmClient({ ...common, ...second, fetchImpl: secondFetch as unknown as typeof fetch }).complete('q')).toBe('second')
     expect(secondFetch).toHaveBeenCalledOnce()
@@ -156,7 +160,7 @@ describe('generation-limit cache isolation', () => {
       bodies.push(JSON.parse(String(init?.body)))
       return bodies.length === 1 ? okResponse('answer') : openAiStream('answer', 1, 1)
     }) as unknown as typeof fetch
-    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, useCache: false, topP: 0.7, thinking: 'disabled', stop: ['END'], fetchImpl })
+    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir, useCache: false, topP: 0.7, thinking: 'disabled', stop: ['END'], fetchImpl })
     await client.complete('q')
     await client.chatStream([{ role: 'user', content: 'q' }], () => {})
     for (const body of bodies) expect(body).toMatchObject({ top_p: 0.7, thinking: { type: 'disabled' }, stop: ['END'] })
@@ -172,7 +176,7 @@ describe('generation-limit cache isolation', () => {
   })
 
   it('rejects invalid generation settings before a request', () => {
-    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir }
     expect(() => createLlmClient({ ...common, topP: Number.NaN })).toThrow(/topP/)
     expect(() => createLlmClient({ ...common, thinking: 'maybe' as 'enabled' })).toThrow(/thinking/)
     expect(() => createLlmClient({ ...common, stop: ['END', 3] as string[] })).toThrow(/stop/)
@@ -180,7 +184,7 @@ describe('generation-limit cache isolation', () => {
   it('does not reuse a response cached under a different maxTokens limit', async () => {
     const firstFetch = vi.fn().mockResolvedValue(okResponse('long'))
     const secondFetch = vi.fn().mockResolvedValue(okResponse('short'))
-    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir }
     expect(await createLlmClient({ ...common, maxTokens: 100, fetchImpl: firstFetch as unknown as typeof fetch }).complete('q')).toBe('long')
     expect(await createLlmClient({ ...common, maxTokens: 10, fetchImpl: secondFetch as unknown as typeof fetch }).complete('q')).toBe('short')
     expect(secondFetch).toHaveBeenCalledOnce()
@@ -189,7 +193,7 @@ describe('generation-limit cache isolation', () => {
   it('does not reuse a response cached under a different temperature', async () => {
     const firstFetch = vi.fn().mockResolvedValue(okResponse('cold'))
     const secondFetch = vi.fn().mockResolvedValue(okResponse('warm'))
-    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir }
+    const common = { provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir }
     expect(await createLlmClient({ ...common, temperature: 0, fetchImpl: firstFetch as unknown as typeof fetch }).complete('q')).toBe('cold')
     expect(await createLlmClient({ ...common, temperature: 0.7, fetchImpl: secondFetch as unknown as typeof fetch }).complete('q')).toBe('warm')
     expect(secondFetch).toHaveBeenCalledOnce()
@@ -199,7 +203,7 @@ describe('generation-limit cache isolation', () => {
 describe('request timeout', () => {
   it('maps an AbortError caused by its timer to a diagnostic timeout', async () => {
     const fetchImpl = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))))
-    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, timeoutMs: 1, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir, timeoutMs: 1, fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(client.complete('q')).rejects.toThrow(/请求超时/)
   })
 })
@@ -210,7 +214,7 @@ describe('recoverable request retries', () => {
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockRejectedValueOnce(new Error('terminated'))
       .mockResolvedValue(okResponse('recovered'))
-    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, retryAttempts: 2, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir, retryAttempts: 2, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(client.complete('q')).resolves.toBe('recovered')
     expect(fetchImpl).toHaveBeenCalledTimes(3)
   })
@@ -221,7 +225,7 @@ describe('recoverable request retries', () => {
       .mockResolvedValueOnce({ ok: false, status: 429, text: async () => 'rate limited' } as unknown as Response)
       .mockResolvedValue(okResponse('recovered'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir,
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir,
       retryAttempts: 2, retryBaseDelayMs: 0, onRetry,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
@@ -235,7 +239,7 @@ describe('recoverable request retries', () => {
 
   it('does not retry non-recoverable authorization failures', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 401, text: async () => 'unauthorized' } as unknown as Response)
-    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, retryAttempts: 3, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir, retryAttempts: 3, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(client.complete('q')).rejects.toThrow(/401/)
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
@@ -246,7 +250,7 @@ describe('recoverable request retries', () => {
       .mockRejectedValueOnce(new Error('terminated'))
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockResolvedValue(okResponse('eventually recovered'))
-    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, retryAttempts: Number.POSITIVE_INFINITY, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
+    const client = createLlmClient({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir, retryAttempts: Number.POSITIVE_INFINITY, retryBaseDelayMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(client.complete('q')).resolves.toBe('eventually recovered')
     expect(fetchImpl).toHaveBeenCalledTimes(4)
   })
@@ -262,7 +266,7 @@ describe('provider usage telemetry', () => {
       }),
     } as unknown as Response)
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -291,7 +295,7 @@ describe('provider usage telemetry', () => {
   it('marks a real response without usable usage as incomplete while cache hits remain neutral', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -311,7 +315,7 @@ describe('provider usage telemetry', () => {
       }),
     } as unknown as Response)
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -325,7 +329,7 @@ describe('streaming requests', () => {
     const visible: string[] = []
     const fetchImpl = vi.fn().mockResolvedValue(openAiStream('answer', 12, 4))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'sk-openai', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'sk-openai', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -350,7 +354,7 @@ describe('streaming requests', () => {
   it('uses Anthropic-compatible auth while requesting usage-enabled SSE', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(openAiStream('answer', 9, 2))
     const client = createLlmClient({
-      provider: 'anthropic', model: 'claude', apiKey: 'sk-ant', baseUrl: 'http://x/v1',
+      provider: 'anthropic', model: 'claude', apiKey: 'sk-ant', baseUrl: 'https://x/v1',
       cacheDir, useCache: false, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -399,7 +403,7 @@ describe('streaming requests', () => {
       provider,
       model: 'm',
       apiKey: 'k',
-      baseUrl: provider === 'ollama' ? 'http://localhost:11434' : 'http://x/v1',
+      baseUrl: provider === 'ollama' ? 'http://localhost:11434' : 'https://x/v1',
       cacheDir,
       useCache: false,
       fetchImpl: vi.fn().mockResolvedValue(streamingResponse(streamFromText(bodyText))) as unknown as typeof fetch,
@@ -425,7 +429,7 @@ describe('streaming requests', () => {
       provider,
       model: 'm',
       apiKey: 'k',
-      baseUrl: provider === 'ollama' ? 'http://localhost:11434' : 'http://x/v1',
+      baseUrl: provider === 'ollama' ? 'http://localhost:11434' : 'https://x/v1',
       cacheDir,
       useCache: false,
       fetchImpl: vi.fn().mockResolvedValue(streamingResponse(transport.body)) as unknown as typeof fetch,
@@ -446,7 +450,7 @@ describe('streaming requests', () => {
       init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
     }))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, timeoutMs: 1, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -468,7 +472,7 @@ describe('streaming requests', () => {
         init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
       }))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir,
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir,
       timeoutMs: 1, retryAttempts: 1, retryBaseDelayMs: 0, onRetry,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
@@ -493,7 +497,7 @@ describe('streaming requests', () => {
       .mockResolvedValueOnce(streamingResponse(failingStreamAfter(partial, new Error('terminated'))))
       .mockResolvedValueOnce(openAiStream('fresh', 10, 2))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir,
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir,
       retryAttempts: 1, retryBaseDelayMs: 0, onRetry,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })
@@ -522,7 +526,7 @@ describe('streaming requests', () => {
     ].join('')
     const fetchImpl = vi.fn().mockResolvedValue(streamingResponse(streamFromText(body)))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -535,7 +539,7 @@ describe('createLlmClient 缓存', () => {
   it('相同 prompt 第二次命中缓存，不再发请求', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -549,7 +553,7 @@ describe('createLlmClient 缓存', () => {
 
   it('不同 model 不共享缓存', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
-    const base = { provider: 'openai', apiKey: 'k', baseUrl: 'http://x/v1', cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch }
+    const base = { provider: 'openai', apiKey: 'k', baseUrl: 'https://x/v1', cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch }
 
     await createLlmClient({ ...base, model: 'm1' }).complete('hello')
     await createLlmClient({ ...base, model: 'm2' }).complete('hello')
@@ -560,7 +564,7 @@ describe('createLlmClient 缓存', () => {
   it('useCache=false 时绕过缓存', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, useCache: false, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -575,7 +579,7 @@ describe('createLlmClient 缓存', () => {
       ok: false, status: 503, text: async () => 'overloaded',
     } as unknown as Response)
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -612,7 +616,7 @@ describe('createLlmClient 缓存', () => {
   it('记录每次真实请求的耗时', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -625,7 +629,7 @@ describe('createLlmClient 缓存', () => {
   it('miss 记录 cacheHit=false、有限 elapsedMs 与 networkLatencyMs，latencies 仅含 miss', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -645,7 +649,7 @@ describe('createLlmClient 缓存', () => {
   it('命中同一缓存第二次调用记录 cacheHit=true，且 latencies 长度不增加', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -665,7 +669,7 @@ describe('createLlmClient 缓存', () => {
       ok: false, status: 503, text: async () => 'overloaded',
     } as unknown as Response)
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -681,7 +685,7 @@ describe('createLlmClient 缓存', () => {
       ok: true, json: async () => ({ error: { message: 'content_filter' } }),
     } as unknown as Response)
     const client = createLlmClient({
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -743,7 +747,7 @@ describe('createLlmClient 缓存', () => {
     const otherBaseFetch = vi.fn().mockResolvedValue(okResponse('from-other-base'))
 
     await createLlmClient({
-      provider: 'openai', model: 'llama3', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'llama3', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: openaiFetch as unknown as typeof fetch,
     }).complete('hello')
 
@@ -755,7 +759,7 @@ describe('createLlmClient 缓存', () => {
 
     // 同名 model、同 provider、不同 baseUrl：同样不能共享
     await createLlmClient({
-      provider: 'openai', model: 'llama3', apiKey: 'k', baseUrl: 'http://y/v1',
+      provider: 'openai', model: 'llama3', apiKey: 'k', baseUrl: 'https://y/v1',
       cacheDir, fetchImpl: otherBaseFetch as unknown as typeof fetch,
     }).complete('hello')
 
@@ -767,7 +771,7 @@ describe('createLlmClient 缓存', () => {
   it('缓存文件损坏时当作 miss 重新请求，不抛错', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const opts = {
-      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'http://x/v1',
+      provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     }
 
@@ -784,7 +788,7 @@ describe('createLlmClient 缓存', () => {
   it('anthropic 分支带 x-api-key 与 anthropic-version 请求头', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okResponse('answer'))
     const client = createLlmClient({
-      provider: 'anthropic', model: 'claude', apiKey: 'sk-ant', baseUrl: 'http://x/v1',
+      provider: 'anthropic', model: 'claude', apiKey: 'sk-ant', baseUrl: 'https://x/v1',
       cacheDir, fetchImpl: fetchImpl as unknown as typeof fetch,
     })
 
@@ -794,5 +798,22 @@ describe('createLlmClient 缓存', () => {
     expect(headers['x-api-key']).toBe('sk-ant')
     expect(headers['anthropic-version']).toBe('2023-06-01')
     expect(headers['Authorization']).toBeUndefined()
+  })
+})
+
+
+describe('benchmark transport security', () => {
+  it('rejects remote plaintext endpoints before sending credentials', async () => {
+    const transport = vi.fn()
+    const client = createLlmClient({ model: 'test', apiKey: 'test-key', baseUrl: 'http://example.org/v1', useCache: false, fetchImpl: transport })
+    await expect(client.complete('hello')).rejects.toThrow('HTTPS')
+    expect(transport).not.toHaveBeenCalled()
+  })
+  it('forbids redirects on authenticated requests', async () => {
+    const transport = vi.fn().mockResolvedValue(okResponse('ok'))
+    const client = createLlmClient({ model: 'test', apiKey: 'test-key', baseUrl: 'https://example.org/v1', useCache: false, fetchImpl: transport })
+    await client.complete('hello')
+    expect(transport.mock.calls[0][1].redirect).toBe('error')
+    expect(transport.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
   })
 })

@@ -1,3 +1,4 @@
+import { validateServiceUrl } from './serviceSecurity'
 /** Shared boundary between Docling, Electron persistence and the renderer. Pages are 0-based. */
 export interface DoclingSettings {
   baseUrl: string
@@ -55,6 +56,7 @@ export function normalizeDoclingSettings(value: unknown): DoclingSettings {
   const raw = object(value)
   let baseUrl = (string(raw.baseUrl).trim() || DEFAULT_DOCLING_SETTINGS.baseUrl).replace(/\/+$/, '')
   if (baseUrl) {
+    validateServiceUrl(baseUrl)
     let url: URL
     try { url = new URL(baseUrl) } catch { throw new Error('Docling 服务地址必须是有效的 HTTP/HTTPS 地址') }
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Docling 服务地址必须使用 HTTP/HTTPS')

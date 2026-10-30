@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readBoundedJson, readBoundedText, validateServiceUrl } from '../../src/utils/serviceSecurity'
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -125,7 +126,7 @@ function cacheKey(provider: string, baseUrl: string, model: string, messages: Ch
 
 async function readErrorBody(res: Response): Promise<string> {
   try {
-    return (await res.text()).slice(0, 300)
+    return (await readBoundedText(res)).slice(0, 300)
   } catch {
     return ''
   }
@@ -161,7 +162,8 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
   if (env.provider === 'ollama' && opts.thinking !== undefined) throw new Error('Ollama does not support the explicit thinking option')
   const cacheDir = opts.cacheDir ?? defaultCacheDir()
   const useCache = opts.useCache !== false
-  const doFetch = opts.fetchImpl ?? fetch
+  const transport = opts.fetchImpl ?? fetch
+  const doFetch = (url: string, init: RequestInit) => transport(validateServiceUrl(url), { ...init, redirect: 'error' })
 
   let hits = 0
   let misses = 0
@@ -278,14 +280,15 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
   }
 
   async function requestOnce(run: (signal?: AbortSignal) => Promise<StreamCompletion>): Promise<StreamCompletion> {
-    const controller = opts.timeoutMs === undefined ? undefined : new AbortController()
-    const timeout = controller === undefined ? undefined : setTimeout(() => controller.abort(), opts.timeoutMs)
+    const timeoutMs = opts.timeoutMs ?? 300_000
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       return await run(controller?.signal)
     } catch (caught) {
       const { error, usage } = unwrapAttemptError(caught)
       if (controller?.signal.aborted && (error as { name?: unknown })?.name === 'AbortError') {
-        throwWithUsage(new Error(`LLM 请求超时（${opts.timeoutMs}ms）`), usage)
+        throwWithUsage(new Error(`LLM 请求超时（${timeoutMs}ms）`), usage)
       }
       throw caught
     } finally {
@@ -302,7 +305,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
         signal,
       })
       if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
-      const data = await res.json()
+      const data = await readBoundedJson(res)
       const usage = tokenUsage(data?.prompt_eval_count, data?.eval_count)
       let content: string
       try {
@@ -336,7 +339,7 @@ export function createLlmClient(opts: LlmClientOptions = {}): StreamingLlmClient
       signal,
     })
     if (!res.ok) throw new Error(`LLM 请求失败 ${res.status}: ${await readErrorBody(res)}`)
-    const data = await res.json()
+    const data = await readBoundedJson(res)
     const usage = tokenUsage(data?.usage?.prompt_tokens, data?.usage?.completion_tokens)
     let content: string
     try {

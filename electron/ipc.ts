@@ -1,4 +1,6 @@
-import { app, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { pathToFileURL } from 'node:url'
+import { isTrustedApplicationFrame } from './ipcSecurity'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { kbApi, paperApi, chatApi, highlightApi, settingsApi, indexApi, treeApi, getDoclingRepository, getAbstractCheckpointRepository, getPaperAbstractRepository, getWebQaRepository, exportAll, clearAll, importAll } from './db'
@@ -142,6 +144,14 @@ export function registerIpc() {
   } satisfies IpcHandlers<Electron.IpcMainInvokeEvent>
 
   for (const [channel, fn] of Object.entries(handlers)) {
-    ipcMain.handle(channel, fn)
+    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+      const expected = !app.isPackaged && process.env.VITE_DEV_SERVER_URL
+        ? process.env.VITE_DEV_SERVER_URL
+        : pathToFileURL(join(app.getAppPath(), 'dist/index.html')).href
+      if (!isTrustedApplicationFrame(event, BrowserWindow.getAllWindows().map(window => window.webContents), expected)) {
+        throw new Error('拒绝来自非应用主页面的 IPC 调用')
+      }
+      return (fn as (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown)(event, ...args)
+    })
   }
 }

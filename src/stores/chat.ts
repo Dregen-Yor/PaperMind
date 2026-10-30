@@ -1,3 +1,4 @@
+import { validateServiceUrl, readBoundedJson } from '../utils/serviceSecurity'
 import { readProviderStream } from '../utils/providerStreams'
 import { createEk5Store } from '../utils/ek5/store'
 import { defineStore } from 'pinia'
@@ -228,7 +229,7 @@ function normalizeConversationTitle(value: string): string {
 
 async function readErrorBody(res: Response): Promise<string> {
   try {
-    const data = await res.json()
+    const data = await readBoundedJson(res)
     const err = data?.error
     if (typeof err === 'string' && err) return err
     if (err && typeof err === 'object' && typeof err.message === 'string') return err.message
@@ -246,7 +247,8 @@ async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: num
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const signal = userSignal ? AbortSignal.any([timeoutSignal, userSignal]) : timeoutSignal
   try {
-    return await fetch(url, { ...init, signal })
+    validateServiceUrl(url)
+    return await fetch(url, { ...init, redirect: 'error', signal })
   } catch (error) {
     if (userSignal?.aborted) throw error
     if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
@@ -529,7 +531,7 @@ export const useChatStore = defineStore('chat', () => {
       }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
       if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
       if (opts.onToken) return readProviderStream(res, 'ollama', opts.onToken, opts.signal)
-      const data = await res.json()
+      const data = await readBoundedJson(res)
       if (typeof data.message?.content !== 'string' || !data.message.content.trim()) throw new Error('模型返回了空响应')
       return { content: data.message.content, truncated: data.done_reason === 'length' }
     }
@@ -582,7 +584,7 @@ export const useChatStore = defineStore('chat', () => {
         anthropicTokenCeilings.set(ceilingKey, ANTHROPIC_LEGACY_MAX_TOKENS)
       }
       if (opts.onToken) return readProviderStream(res, 'anthropic', opts.onToken, opts.signal)
-      const data = await res.json()
+      const data = await readBoundedJson(res)
       const content = data.content?.[0]?.text
       if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
       return { content, truncated: data.stop_reason === 'max_tokens' }
@@ -607,7 +609,7 @@ export const useChatStore = defineStore('chat', () => {
     }, opts.timeoutMs ?? (opts.onToken ? LLM_STREAM_TIMEOUT_MS : LLM_REQUEST_TIMEOUT_MS), opts.signal)
     if (!res.ok) throw new Error(`LLM 请求失败 (${res.status})：${await readErrorBody(res)}`)
     if (opts.onToken) return readProviderStream(res, 'openai', opts.onToken, opts.signal)
-    const data = await res.json()
+    const data = await readBoundedJson(res)
     const content = data.choices?.[0]?.message?.content
     if (typeof content !== 'string' || !content.trim()) throw new Error('模型返回了空响应')
     return { content, truncated: data.choices?.[0]?.finish_reason === 'length' }

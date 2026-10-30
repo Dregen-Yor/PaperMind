@@ -34,6 +34,10 @@ const createWindow = () => {
     icon: process.platform === 'darwin' ? undefined : getRuntimeIconPath(),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+      allowRunningInsecureContent: false,
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -63,7 +67,7 @@ const createWindow = () => {
     openExternalUrl(url)
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (!app.isPackaged && process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL)
   } else {
     win.loadFile(join(__dirname, '../dist/index.html'))

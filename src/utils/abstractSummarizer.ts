@@ -1,3 +1,4 @@
+import { readBoundedJson } from './serviceSecurity'
 export const ABSTRACT_MODEL = 'Bashaarat1/t5-small-arxiv-summarizer'
 export const ABSTRACT_API_URL =
   `https://api-inference.huggingface.co/models/${ABSTRACT_MODEL}`
@@ -46,7 +47,7 @@ export function splitAbstractText(text: string, maxChars = MAX_CHUNK_CHARS): str
 
 async function readErrorMessage(response: Response): Promise<string> {
   try {
-    const data = await response.json()
+    const data = await readBoundedJson(response)
     if (typeof data?.error === 'string') return data.error
     if (typeof data?.message === 'string') return data.message
   } catch {
@@ -58,6 +59,8 @@ async function readErrorMessage(response: Response): Promise<string> {
 export async function callAbstractModel(text: string, token: string): Promise<string> {
   const response = await fetch(ABSTRACT_API_URL, {
     method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(300_000),
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
@@ -78,7 +81,7 @@ export async function callAbstractModel(text: string, token: string): Promise<st
     throw new Error(`Hugging Face 摘要服务请求失败：${detail}`)
   }
 
-  const data = await response.json()
+  const data = await readBoundedJson(response)
   const summary = Array.isArray(data)
     ? data[0]?.summary_text
     : data?.summary_text ?? data?.generated_text
