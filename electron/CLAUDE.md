@@ -1,74 +1,95 @@
-[根目录](../CLAUDE.md) > **electron**
+[根目录](../CLAUDE.md) > **electron/**
 
-# electron/ — 主进程模块
+# electron/ — Main Process and Preload
 
-**变更记录**
-- 2026-08-02T15:49:42: 补记 `index` IPC 命名空间（PageIndex）、GPU 崩溃修复与外链拦截、7 张表；拆分数据层细节到 `electron/db/CLAUDE.md`
-- 2026-06-07T21:33:55: 初始化文档
+## Responsibilities
 
-## 模块职责
+`electron/` owns OS and privileged capabilities:
 
-Electron 主进程的全部逻辑：应用生命周期管理、BrowserWindow 创建、外部链接拦截、IPC 通道注册、SQLite 数据库初始化与所有 CRUD/索引操作。数据层建表与 API 细节见 [electron/db](./db/CLAUDE.md)。
+- application lifecycle, single-instance behavior, and BrowserWindow creation;
+- typed IPC registration and preload wrappers;
+- SQLite and managed PDF files;
+- `papermind-paper://` local PDF delivery;
+- Docling networking and the #14 managed SSH tunnel;
+- isolated web preview, snapshot capture, and cached replay;
+- HTML/PDF material parsing for the unified summary pipeline.
 
-## 入口与启动
+Selected types and pure validators come from `src/types/` and `src/utils/`.
+Those imports are a current shared-code boundary, not renderer execution.
 
-`electron/main.ts` 是主进程入口：
-1. 启动即 `appendSwitch('disable-gpu')` + `disable-software-rasterizer`，规避 Linux Intel GBM/Wayland ENOMEM 的 GPU 崩溃
-2. `app.whenReady()` 触发后依次调用 `initDb()` → `registerIpc()` → `createWindow()`
-3. 开发环境加载 `process.env.VITE_DEV_SERVER_URL`，生产环境加载 `../dist/index.html`
-4. `contextIsolation: true` / `nodeIntegration: false`，`preload: preload.js` 安全隔离
-5. **外链拦截**：`setWindowOpenHandler` 与 `will-navigate` 拦截所有导航，仅对 `http:`/`https:` 调用 `shell.openExternal`，其余一律 `deny`/`preventDefault`（防止渲染层被导航劫持）
+## Startup
 
-## 对外接口（IPC 通道）
+`electron/main.ts` performs:
 
-所有通道通过 `ipcMain.handle` 注册（`electron/ipc.ts`），渲染层经 `window.db.*` 调用（`electron/preload.ts` 暴露）：
+1. privileged protocol declaration and product identity setup;
+2. single-instance lock;
+3. after `app.whenReady()`: `initDb()`;
+4. register `papermind-paper` with the managed file lookup;
+5. `registerIpc()`;
+6. create the main window and register its preview controller.
 
-| 命名空间 | 通道 | 说明 |
-|----------|------|------|
-| kb | `kb:list/create/remove` | 知识库 CRUD |
-| paper | `paper:list/get/create/update/remove/readFile` | 论文 CRUD + 读取 PDF base64 |
-| chat | `chat:listConversations/createConversation/updateConversation/removeConversation/addMessage` | 对话与消息 |
-| highlight | `highlight:listByPaper/create/remove` | 高亮批注（当前 UI 未直接落库，接口预留） |
-| settings | `settings:get/set` | KV 设置（LLM profiles、HF token 等） |
-| data | `data:export/clear` | 全量导出 / 清空所有数据 |
-| index | `index:list/get/set` | **PageIndex RAG 索引**（新增）：列出/读取/写入论文索引 |
+The window uses `sandbox: true`, `contextIsolation: true`,
+`nodeIntegration: false`, and `webSecurity: true`. New-window and navigation
+requests are denied in-app; valid HTTP(S) targets are handed to the system
+browser.
 
-> 新增/修改通道时务必四处同步：`ipc.ts`（handler）、`preload.ts`（`window.db` 方法）、`src/types/db.d.ts`（类型）、以及调用方 store。
+## IPC Surface
 
-## 关键依赖与配置
+`electron/preload.ts` exposes:
 
-- `better-sqlite3`：同步 SQLite，native 模块，需 rebuild（`postinstall` 已挂 `electron-rebuild`）；`vite.config.ts` 中标记为 `external`，`electron-builder` 的 `asarUnpack` 解压其原生二进制
-- WAL 模式 + 外键约束在 `initDb()` 中通过 `db.pragma` 启用
-- 数据存储路径：`app.getPath('userData')/papermind.db` 与 `userData/papers/`（PDF 以 `<paperId>.pdf` 落盘）
+- `window.db`: `documentSummary`, `webQa`, `docling`,
+  `abstractCheckpoint`, `paperAbstract`, `kb`, `paper`, `chat`,
+  `highlight`, `settings`, `data`, `index`, and `tree`;
+- `window.preview`: live/cached preview control and state subscription.
 
-## 数据模型
+All invoke channels are registered in `electron/ipc.ts`. Preview channels are
+registered there too, then delegated to controllers from `webPreview.ts`.
 
-7 张表，定义在 `electron/db/schema.ts`（详见 [electron/db](./db/CLAUDE.md)）：
+`ipcSecurity.ts` only validates that a call came from the registered
+application main frame at the expected URL. Runtime argument validation is
+distributed across handlers, `backupValidation.ts`, repositories, URL/service
+validators, and preview controllers.
 
-| 表 | 说明 |
-|----|------|
-| `knowledge_bases` | 知识库，seed 默认 id=`default` 记录 |
-| `papers` | 论文元数据，`file_path` 为磁盘绝对路径，`authors`/`tags` 为 JSON 数组 |
-| `conversations` | 对话，`paper_ids` 为 JSON 数组 |
-| `messages` | 消息，`sources` 为 JSON 数组，`ON DELETE CASCADE` 关联 conversation |
-| `highlights` | 高亮批注，关联 paper |
-| `settings` | KV 存储，`value` 为 JSON 字符串 |
-| `paper_indexes` | **新增**：PageIndex（`index_json` + `pages_json`），`ON DELETE CASCADE` 关联 paper |
+When changing a channel, synchronize `src/types/ipcContract.ts`,
+`electron/ipc.ts`, `electron/preload.ts`, global declarations, and test mocks.
 
-删除知识库或论文时，`index.ts` 会同步 `unlinkSync` 磁盘 PDF；子表（messages/highlights/paper_indexes）由 `ON DELETE CASCADE` 清理。
+## Main-Process Modules
 
-## 相关文件
+| Module | Responsibility |
+|---|---|
+| `main.ts` | Lifecycle, window, single-instance lock, local PDF protocol |
+| `ipc.ts` | Typed channel registration and trusted-frame gate |
+| `preload.ts` | Context-bridge wrappers |
+| `ipcSecurity.ts` | Application-frame identity check |
+| `paperProtocol.ts` | Safe managed-PDF URL mapping and range responses |
+| `docling.ts` | Legacy Docling facade/repository integration |
+| `doclingClient.ts` | Docling HTTP requests and summary conversion |
+| `doclingTunnel.ts` | #14 SSH forwarding to `ubuntu@101.76.222.224` |
+| `summaryParsing.ts` | Unified paper/web material parsing and cache identity |
+| `htmlSummary.ts` | Parse saved HTML/MHTML into `ParsedDocument` |
+| `webPreview.ts` | Isolated live/cached preview controller |
+| `webSummaryCapture.ts` | Snapshot-time DOM/MHTML/visual-PDF capture |
+| `db/` | SQLite, repositories, backup, and file recovery |
 
-- `electron/main.ts` — 应用入口、GPU 修复、外链拦截
-- `electron/preload.ts` — contextBridge 注入 `window.db`，导出 `DbApi` 类型
-- `electron/ipc.ts` — 所有 IPC handler 注册（channel → db api 映射表）
-- `electron/db/schema.ts` — SQL 建表语句
-- `electron/db/index.ts` — 数据库初始化 + 所有 API 实现
+At #14, `DEFAULT_DOCLING_SETTINGS.baseUrl` is `http://127.0.0.1:5001`.
+Using that default starts the managed SSH tunnel. The Settings help text still
+mentions an older host; `doclingTunnel.ts` is authoritative.
 
-## 常见问题
+## Summary Boundary
 
-**Q: 为什么在 Linux 上禁用 GPU？**
-Intel GBM/Wayland 环境下 Electron 31 GPU 进程易 ENOMEM 崩溃，禁用后以软件渲染保证稳定启动（见 `main.ts` 顶部注释）。
+`documentSummary:parse` reads a managed paper or saved web snapshot. PDF
+conversion calls `convertPdfForSummary`; HTML conversion calls
+`parseHtmlSummary`. The result and images are stored in
+`document_summary_records` / `document_summary_assets`.
 
-**Q: 高亮为什么有表却看不到持久化？**
-`highlights` 表与 `highlight:*` 通道已就绪，但当前 `PdfViewer` 的高亮为前端内存态（`highlightSegments`），尚未接入 IPC 落库——属预留能力。
+`document_parses` / `document_assets` and `abstract_checkpoints` are legacy
+surfaces. Do not describe them as the active parsed-summary storage path.
+
+## Security Notes
+
+- Remote service URLs must pass `serviceSecurity` rules.
+- Redirects are disabled for provider and Docling requests.
+- The renderer never receives an arbitrary filesystem path for PDF reads.
+- API keys are locally stored settings; default backup export strips them.
+- Main-process synchronous database and full-backup work can block the event
+  loop at scale; measure before claiming performance characteristics.
