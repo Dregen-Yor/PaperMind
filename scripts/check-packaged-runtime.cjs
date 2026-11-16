@@ -1,15 +1,37 @@
 const { spawnSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
-const { readFileSync, rmSync, writeFileSync } = require('node:fs')
-const { join, relative } = require('node:path')
+const { lstatSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
+const { isAbsolute, join, relative, sep } = require('node:path')
 
-function packagedNativeErrors(result) {
+function relativeInside(root, candidate) {
+  const value = relative(root, candidate)
+  return value && value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value) ? value : null
+}
+
+function packagedNativePaths(result, resources) {
+  const archive = join(resources, 'app.asar')
+  const unpacked = join(resources, 'app.asar.unpacked')
+  const physicalPath = value => {
+    if (typeof value !== 'string') return null
+    const inner = relativeInside(archive, value) ?? relativeInside(unpacked, value)
+    return inner ? join(unpacked, inner) : null
+  }
+  return {
+    sqliteBinding: physicalPath(result?.sqliteBinding),
+    sharpBinding: physicalPath(result?.sharpBinding),
+  }
+}
+
+function packagedNativeErrors(result, resources) {
   const errors = []
-  for (const [name, value] of [['better-sqlite3', result?.sqliteBinding], ['Sharp', result?.sharpBinding]]) {
-    const normalized = typeof value === 'string' ? value.replaceAll('\\', '/') : ''
-    if (!normalized.includes('/app.asar.unpacked/')) {
-      errors.push(`${name} binding must load from app.asar.unpacked: actual=${value ?? 'missing'}`)
-    }
+  const paths = resources ? packagedNativePaths(result, resources) : {}
+  for (const [name, source, physical] of [
+    ['better-sqlite3', result?.sqliteBinding, paths.sqliteBinding],
+    ['Sharp', result?.sharpBinding, paths.sharpBinding],
+  ]) {
+    let isFile = false
+    try { isFile = !!physical && lstatSync(physical).isFile() } catch {}
+    if (!isFile) errors.push(`${name} binding must exist in app.asar.unpacked: expected=${physical ?? 'unresolved'} actual=${source ?? 'missing'}`)
   }
   return errors
 }
@@ -39,8 +61,9 @@ async function afterPack(context) {
     requireRoot: join(resources, 'app.asar', 'package.json'),
     timeout: 45_000,
   })
-  const nativeErrors = [...nativeProbeErrors(native), ...packagedNativeErrors(native)]
+  const nativeErrors = [...nativeProbeErrors(native), ...packagedNativeErrors(native, resources)]
   if (nativeErrors.length) throw new Error(`安装包原生模块检查失败：\n${nativeErrors.join('\n')}`)
+  const nativePaths = packagedNativePaths(native, resources)
 
   const policy = readFileSync(join(__dirname, '../config/runtime-security.json'))
   const receipt = {
@@ -50,8 +73,8 @@ async function afterPack(context) {
     native: {
       sqliteValue: native.sqliteValue,
       sharp: native.sharp,
-      sqliteBinding: relative(resources, native.sqliteBinding),
-      sharpBinding: relative(resources, native.sharpBinding),
+      sqliteBinding: relative(resources, nativePaths.sqliteBinding),
+      sharpBinding: relative(resources, nativePaths.sharpBinding),
     },
   }
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`)
@@ -59,4 +82,5 @@ async function afterPack(context) {
 }
 
 afterPack.packagedNativeErrors = packagedNativeErrors
+afterPack.packagedNativePaths = packagedNativePaths
 module.exports = afterPack

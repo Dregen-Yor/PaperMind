@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { nodeSecurityErrors, electronSecurityErrors } from '../lib/runtime-security.mjs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { mkdtempSync, mkdirSync, symlinkSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import afterPack from '../check-packaged-runtime.cjs'
 
 test('rejects every pre-patch supported runtime and unknown release lines', () => {
@@ -58,18 +58,30 @@ test('builder afterPack checks the actual executable before writing an approval 
 })
 
 test('builder afterPack requires native bindings to come from app.asar.unpacked', () => {
-  const workingNativeResult = {
-    ok: true,
-    electron: '44.11.3',
-    node: '24.22.2',
-    chrome: '152.0.7977.169',
-    platform: 'linux',
-    arch: 'x64',
-    sqliteValue: 42,
-    sharp: { width: 2, height: 2, format: 'png' },
-    sqliteBinding: '/resources/app.asar/node_modules/better-sqlite3/prebuilds/linux-x64.node',
-    sharpBinding: '/resources/app.asar.unpacked/node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64.node',
-  }
-  const errors = afterPack.packagedNativeErrors(workingNativeResult)
-  assert.ok(errors.some(error => /app\.asar\.unpacked/.test(error)))
+  const resources = mkdtempSync(join(tmpdir(), 'papermind-native-unpack-'))
+  const sqliteRelative = join('node_modules', 'better-sqlite3', 'prebuilds', 'linux-x64.node')
+  const sharpRelative = join('node_modules', '@img', 'sharp-linux-x64', 'lib', 'sharp-linux-x64.node')
+  try {
+    for (const relative of [sqliteRelative, sharpRelative]) {
+      const physical = join(resources, 'app.asar.unpacked', relative)
+      mkdirSync(dirname(physical), { recursive: true })
+      writeFileSync(physical, 'native fixture')
+    }
+    const workingNativeResult = {
+      ok: true,
+      electron: '44.11.3',
+      node: '24.22.2',
+      chrome: '152.0.7977.169',
+      platform: 'linux',
+      arch: 'x64',
+      sqliteValue: 42,
+      sharp: { width: 2, height: 2, format: 'png' },
+      sqliteBinding: join(resources, 'app.asar', sqliteRelative),
+      sharpBinding: join(resources, 'app.asar', sharpRelative),
+    }
+    assert.deepEqual(afterPack.packagedNativeErrors(workingNativeResult, resources), [])
+    rmSync(join(resources, 'app.asar.unpacked', sharpRelative))
+    assert.ok(afterPack.packagedNativeErrors(workingNativeResult, resources)
+      .some(error => /Sharp.*app\.asar\.unpacked/.test(error)))
+  } finally { rmSync(resources, { recursive: true, force: true }) }
 })

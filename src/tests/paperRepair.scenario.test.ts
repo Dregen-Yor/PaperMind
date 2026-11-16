@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
@@ -73,7 +73,7 @@ describe('repairing a restored paper PDF', () => {
     expect(paperApi.filePath('saved-paper')).toBeNull()
     paperApi.restoreFile('saved-paper', fileData)
     expect(readFileSync(filePath())).toEqual(bytes)
-    expect(paperApi.filePath('saved-paper')).toBe(filePath())
+    expect(paperApi.filePath('saved-paper')).toBe(realpathSync(filePath()))
     expect(paperApi.list()).toEqual([paper])
     expect(highlightApi.listByPaper('saved-paper')).toEqual(notes)
     expect(chatApi.listConversations()).toEqual(conversations)
