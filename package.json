@@ -19,7 +19,7 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:branding": "node --test scripts/tests/icon-assets.test.mjs scripts/tests/dev-branding.test.mjs scripts/tests/linux-install.test.mjs scripts/tests/runtime-security.test.mjs",
-    "test:architecture": "node --test scripts/tests/docling-production-config.test.mjs scripts/tests/ci-workflow.test.mjs",
+    "test:architecture": "node --test scripts/tests/docling-production-config.test.mjs scripts/tests/ci-workflow.test.mjs scripts/tests/release-workflow.test.mjs",
     "icons:generate": "node scripts/generate-icons.mjs",
     "icons:check": "node scripts/check-icons.mjs",
     "bench": "tsx bench/src/cli.ts",

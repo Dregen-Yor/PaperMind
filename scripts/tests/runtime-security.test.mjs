@@ -56,3 +56,20 @@ test('builder afterPack checks the actual executable before writing an approval 
     assert.equal(existsSync(join(directory, 'resources', 'runtime-security.json')), false)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
+
+test('builder afterPack requires native bindings to come from app.asar.unpacked', () => {
+  const workingNativeResult = {
+    ok: true,
+    electron: '44.11.3',
+    node: '24.22.2',
+    chrome: '152.0.7977.169',
+    platform: 'linux',
+    arch: 'x64',
+    sqliteValue: 42,
+    sharp: { width: 2, height: 2, format: 'png' },
+    sqliteBinding: '/resources/app.asar/node_modules/better-sqlite3/prebuilds/linux-x64.node',
+    sharpBinding: '/resources/app.asar.unpacked/node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64.node',
+  }
+  const errors = afterPack.packagedNativeErrors(workingNativeResult)
+  assert.ok(errors.some(error => /app\.asar\.unpacked/.test(error)))
+})
