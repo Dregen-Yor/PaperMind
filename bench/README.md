@@ -13,7 +13,7 @@ npm run bench:product -- --smoke --out /tmp/papermind-product-smoke.json
 
 这会生成有效的合成两页 PDF，通过生产 `extractPdfDocument` 与 Node PDF.js 适配器提取文本/布局/目录；调用真实 `buildEk5Index`、`retrieveRagContext`（`retrievalMode: 'ek5'`）、`generateRagAnswer` 和 `generateDoclingAbstract`。向量与模型回复是固定测试数据，JSON 必须标 `synthetic: true`，只能证明共享链路能执行，不能用于质量、真实模型速度或真实论文结论背书。`--smoke` 不可与真实输入参数混用。
 
-真实运行仅使用提前配置的本地向量模型文件；入口设置 `allowRemoteModels=false`，不会自动下载模型，也不会自动创建 SSH 隧道。以下命令会调用你显式配置的 LLM，使用远程 Docling 时也会发起转换请求：
+真实运行仅使用提前配置的本地向量模型文件；入口设置 `allowRemoteModels=false`，不会自动下载模型，也不会创建 SSH 隧道。以下命令会调用你显式配置的 LLM；使用 `--docling-official` 时还会向项目固定的官方 Docling 地址发起转换请求：
 
 ```bash
 export BENCH_LLM_PROVIDER=openai       # openai compatible | ollama

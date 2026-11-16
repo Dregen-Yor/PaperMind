@@ -120,7 +120,7 @@ paper store 不长期保存 PDF base64；阅读器已有文档代次、旧渲染
 → PaperAbstract 缓存／聊天消息 → 图片及来源跳转
 ```
 
-这条链已取代旧 HuggingFace T5 生产摘要；但它没有复用普通对话 ActiveChatRun。Docling 默认地址会触发固定 SSH 转发，这一点 README 已披露，不能描述成隐蔽上传。
+这条链已取代旧 HuggingFace T5 生产摘要；但它没有复用普通对话 ActiveChatRun。本报告基线中的 Docling 默认地址会触发固定 SSH 转发；后续官方服务重构已删除该路径，只允许项目维护的 HTTPS 地址。
 
 ### 4　网页问答与归档
 
@@ -380,9 +380,9 @@ electron/paperProtocol.ts:29；electron/db/index.ts:182、378；electron/ipc.ts:
 
 ### R06　本地优先与部署环境需要明确区分
 
-electron/doclingClient.ts:8；electron/doclingTunnel.ts:4、5、23；README.md:57
+历史基线的 electron/doclingClient.ts、已删除的 doclingTunnel.ts 与当时 README 配置说明
 
-Docling 默认 loopback 端点会启动固定个人账号／主机的 SSH 转发。README 已明确说明远端解析和免交互 SSH 前提，不是秘密上传；但通用发行物依赖个人环境，其他用户难以复用默认体验。应将“本地 HTTP”“用户配置的 SSH”“其他远程 Docling”显式建为不同连接模式。API Key 明文 SQLite 也是已披露取舍，可按产品威胁模型采用 safeStorage；本次没有将其上升为已利用漏洞。
+本报告基线中的 Docling 默认 loopback 端点会启动固定私人 SSH 转发。后续官方服务重构已经删除该模式、自定义地址与本地连接，只保留项目维护的 HTTPS 服务和用户 API Key。API Key 明文 SQLite 仍是已披露取舍，可按产品威胁模型采用 safeStorage；本次没有将其上升为已利用漏洞。
 
 ### R07　模型与上下文策略缺少真实语料验证
 
@@ -464,7 +464,7 @@ Node 26 环境运行测试时出现 localStorage experimental warning，未造�
 | 会话与任务 | src/stores/chat.ts；src/components/ChatPanel.vue；src/types/chatRun.ts；electron/db/chatRun.ts |
 | 论文与高亮 | src/stores/paper.ts；src/views/LibraryView.vue；src/views/ReaderView.vue；src/components/PdfViewer.vue；src/components/NotesPanel.vue |
 | 当前检索 | src/utils/ek5/store.ts；tocTree.ts；headingGroups.ts；index.ts；src/utils/ragPipeline.ts；answerMessages.ts |
-| 当前摘要 | electron/docling.ts；doclingClient.ts；doclingTunnel.ts；src/utils/doclingDocument.ts；doclingPdf.ts；doclingAbstract.ts；electron/db/paperAbstract.ts |
+| 当前摘要 | electron/docling.ts；doclingClient.ts；src/utils/doclingConfig.ts；src/utils/doclingDocument.ts；doclingPdf.ts；doclingAbstract.ts；electron/db/paperAbstract.ts |
 | 网页归档与问答 | electron/webPreview.ts；electron/db/webQa.ts；src/views/WebPreviewView.vue；src/composables/useWebQa.ts；useWebPageHistory.ts |
 | 评测与交付 | bench/src/runner/qa.ts；summary.ts；bench/src/streaming；vite.config.ts；.github/workflows/ci.yml；release.yml |
 
