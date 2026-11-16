@@ -54,7 +54,6 @@ vi.mock('../../electron/db', () => ({ initDb: startup.initDb, paperApi: { filePa
 vi.mock('../../electron/ipc', () => ({ registerIpc: startup.registerIpc }))
 vi.mock('../../electron/branding', () => ({ configureIdentity: vi.fn(), getIconPath: () => '/icon.png' }))
 vi.mock('../../electron/webPreview', () => ({ registerPreviewWindow: vi.fn(), unregisterPreviewWindow: vi.fn() }))
-vi.mock('../../electron/doclingTunnel', () => ({ stopManagedDoclingTunnel: vi.fn() }))
 vi.mock('../../electron/paperProtocol', () => ({ servePaperRequest: vi.fn() }))
 
 let finishReady: () => void

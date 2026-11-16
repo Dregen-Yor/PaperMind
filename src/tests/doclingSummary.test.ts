@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { convertPdf, convertPdfForSummary } from '../../electron/doclingClient'
-import { DEFAULT_DOCLING_SETTINGS, MAX_IMAGE_BYTES, isParsedDocument, normalizeDoclingDocument } from '../utils/doclingDocument'
+import { MAX_IMAGE_BYTES, isParsedDocument, normalizeDoclingDocument } from '../utils/doclingDocument'
 
 const image = 'data:image/png;base64,aGVsbG8='
 const source = () => ({
@@ -99,41 +99,35 @@ describe('Docling materials for document summaries', () => {
 })
 
 describe('Docling summary conversion', () => {
-  const settings = { ...DEFAULT_DOCLING_SETTINGS, baseUrl: 'http://127.0.0.1:5002' }
+  const credentials = { apiKey: 'official-key' }
   const response = (status = 'success') => new Response(JSON.stringify({ status, document: { json_content: source() } }))
 
-  it('uploads PDFs using the deployed parsing presets and honors OCR/formula settings', async () => {
+  it('uploads PDFs using the same official parsing contract', async () => {
     const request = vi.fn().mockResolvedValue(response())
-    const document = await convertPdfForSummary(new Uint8Array([37, 80, 68, 70]), 'study.pdf', { ...settings, ocr: false, formula: false }, request)
+    const document = await convertPdfForSummary(new Uint8Array([37, 80, 68, 70]), 'study.pdf', credentials, request)
     const [url, init] = request.mock.calls[0]
-    expect(url).toBe('http://127.0.0.1:5002/v1/convert/file')
+    expect(url).toBe('https://docling.example.com/v1/convert/file')
     expect(Object.fromEntries(init.body.entries())).toMatchObject({
       layout_preset: 'layout_heron_default', ocr_engine: 'rapidocr', ocr_preset: 'rapidocr',
       table_structure_preset: 'tableformer_v1_accurate', code_formula_preset: 'codeformulav2',
-      do_ocr: 'false', do_formula_enrichment: 'false', do_table_structure: 'true',
+      do_ocr: 'true', do_formula_enrichment: 'true', do_table_structure: 'true',
       include_images: 'true', image_export_mode: 'embedded',
+      from_formats: 'pdf', to_formats: 'json', target_type: 'inbody',
+      images_scale: '2', table_mode: 'accurate', document_timeout: '60',
     })
     expect(init.body.get('files').name).toBe('study.pdf')
     expect(document.items.filter(item => item.kind === 'picture')).toHaveLength(3)
   })
 
-  it('opens the same managed tunnel before summary uploads', async () => {
-    const order: string[] = []
-    const connect = async () => { order.push('connect') }
-    const request = vi.fn(async () => { order.push('upload'); return response() })
-    await convertPdfForSummary(new Uint8Array(), 'study.pdf', DEFAULT_DOCLING_SETTINGS, request, connect)
-    expect(order).toEqual(['connect', 'upload'])
-  })
-
   it('rejects partial conversions instead of generating a purportedly complete summary', async () => {
-    await expect(convertPdfForSummary(new Uint8Array(), 'study.pdf', settings, vi.fn().mockResolvedValue(response('partial_success')))).rejects.toThrow(/部分.*完整摘要/)
-    expect((await convertPdf(new Uint8Array(), 'study.pdf', settings, vi.fn().mockResolvedValue(response('partial_success')))).warnings.join()).toContain('部分')
+    await expect(convertPdfForSummary(new Uint8Array(), 'study.pdf', credentials, vi.fn().mockResolvedValue(response('partial_success')))).rejects.toThrow(/部分.*完整摘要/)
+    expect((await convertPdf(new Uint8Array(), 'study.pdf', credentials, vi.fn().mockResolvedValue(response('partial_success')))).warnings.join()).toContain('部分')
   })
 
   it('rejects oversized uploads and failed summary conversions', async () => {
     const request = vi.fn().mockResolvedValue(response('failure'))
-    await expect(convertPdfForSummary(new Uint8Array(64 * 1024 * 1024 + 1), 'large.pdf', settings, request)).rejects.toThrow('上传大小上限')
+    await expect(convertPdfForSummary(new Uint8Array(64 * 1024 * 1024 + 1), 'large.pdf', credentials, request)).rejects.toThrow('上传大小上限')
     expect(request).not.toHaveBeenCalled()
-    await expect(convertPdfForSummary(new Uint8Array(), 'study.pdf', settings, request)).rejects.toThrow('解析失败')
+    await expect(convertPdfForSummary(new Uint8Array(), 'study.pdf', credentials, request)).rejects.toThrow('解析失败')
   })
 })

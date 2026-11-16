@@ -41,7 +41,7 @@ it.each(['paper', 'web'] as const)('parses %s, generates once, persists source-o
       uploads++
       expect((init!.body as FormData).get('layout_preset')).toBe('layout_heron_default')
       return new Response(JSON.stringify(doclingResponse), { headers: { 'Content-Type': 'application/json' } })
-    }, async () => {}),
+    }),
   })
   window.db = { ...originalDb, documentSummary: {
     parse: parser.parse, get: async (...args) => repository.get(...args), save: async record => repository.save(record),

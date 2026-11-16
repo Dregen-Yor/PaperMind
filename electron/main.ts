@@ -4,7 +4,6 @@ import { initDb, paperApi } from './db'
 import { registerIpc } from './ipc'
 import { configureIdentity, getIconPath } from './branding'
 import { registerPreviewWindow, unregisterPreviewWindow } from './webPreview'
-import { stopManagedDoclingTunnel } from './doclingTunnel'
 import { servePaperRequest } from './paperProtocol'
 
 protocol.registerSchemesAsPrivileged([{
@@ -112,6 +111,4 @@ if (!app.requestSingleInstanceLock()) {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
-
-  app.on('before-quit', stopManagedDoclingTunnel)
 }

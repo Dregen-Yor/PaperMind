@@ -15,7 +15,7 @@ const HELP = `Product E-k5 / Docling shared-algorithm benchmark (not Electron UI
   --questions-json FILE                        array {question,history?,referenceAnswers?,referencePages?}; pages 0-based
   --history-json FILE                          shared [{role:user|assistant,content}]
   --docling-json FILE                           {sourceSha256,document:<raw or normalized Docling>}
-  --docling-url URL                             explicit remote convertPdf; no SSH/tunnel
+  --docling-official                            convert with the fixed official Docling service
   --extracted-json FILE                         optional {sourceSha256,document:{pages,layoutLines,outline}}
   --max-context-chars N                         default 120000 characters; overflow rejects
   --reference-summary FILE                      optional UTF-8 reference; report ROUGE-L
@@ -28,8 +28,8 @@ BENCH_PRODUCT_MAX_TOKENS=0, BENCH_PRODUCT_SYSTEM_PROMPT, BENCH_DOCLING_API_KEY.
 `
 function parse(argv: string[]) {
   const values = new Map<string, string[]>()
-  const flags = new Set(['--smoke', '--help'])
-  const named = new Set(['--pdf', '--title', '--question', '--task', '--questions-json', '--history-json', '--docling-json', '--docling-url', '--extracted-json', '--max-context-chars', '--reference-summary', '--out'])
+  const flags = new Set(['--smoke', '--help', '--docling-official'])
+  const named = new Set(['--pdf', '--title', '--question', '--task', '--questions-json', '--history-json', '--docling-json', '--extracted-json', '--max-context-chars', '--reference-summary', '--out'])
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
     if (flags.has(key)) { values.set(key, ['true']); continue }
@@ -63,7 +63,7 @@ async function main() {
     : args.get('--docling-json') ? json<HashBoundInput>(args.get('--docling-json')!) : undefined
   if (extractedInput) readExtractedInput(extractedInput, sourceHash)
   if (doclingInput) readDoclingInput(doclingInput, sourceHash)
-  if (!smoke && task !== 'qa' && !doclingInput && !args.get('--docling-url')) throw new Error('摘要需要 --docling-json 或显式 --docling-url')
+  if (!smoke && task !== 'qa' && !doclingInput && !args.get('--docling-official')) throw new Error('摘要需要 --docling-json 或 --docling-official')
   const sharedHistory = args.get('--history-json') ? history(json<unknown>(args.get('--history-json')!)) : []
   const questions: ProductQuestion[] = smoke ? [{ question: 'What method is used?', referencePages: [0] }]
     : [...args.all('--question').map(question => ({ question, history: sharedHistory })),
@@ -97,8 +97,8 @@ async function main() {
   let gitSha = 'unknown'
   let dirty = true
   try { gitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); dirty = !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim() } catch { /* outside checkout */ }
-  const doclingUrl = args.get('--docling-url')
-  if (doclingInput && doclingUrl) throw new Error('--docling-json 和 --docling-url 只能选一个')
+  const useOfficialDocling = !!args.get('--docling-official')
+  if (doclingInput && useOfficialDocling) throw new Error('--docling-json 和 --docling-official 只能选一个')
   const result = await runProductBenchmark({ pdfBytes, title: smoke ? 'Synthetic laser study' : args.get('--title') ?? basename(pdfPath!), synthetic: smoke,
     task: task as 'qa' | 'summary' | 'all', questions, profile, embedder, gitSha, dirty,
     packageVersion: json<{ version: string }>(fileURLToPath(new URL('../../package.json', import.meta.url))).version,
@@ -111,10 +111,9 @@ async function main() {
     extractedInput, doclingInput, complete: model.complete, chat: model.chat, summaryCompletion: model.completion,
     maxContextChars: args.get('--max-context-chars') ? Number(args.get('--max-context-chars')) : undefined,
     referenceSummary: args.get('--reference-summary') ? readFileSync(args.get('--reference-summary')!, 'utf8') : undefined,
-    convertDocling: doclingUrl ? async () => {
+    convertDocling: useOfficialDocling ? async () => {
       const { convertPdf } = await import('../../electron/doclingClient')
-      return convertPdf(pdfBytes, basename(pdfPath!), { baseUrl: doclingUrl, apiKey: process.env.BENCH_DOCLING_API_KEY ?? '', timeoutSeconds: 600, ocr: true, formula: true }, fetch,
-        async () => { /* explicitly no managed SSH/tunnel: CLI connects only to supplied URL */ })
+      return convertPdf(pdfBytes, basename(pdfPath!), { apiKey: process.env.BENCH_DOCLING_API_KEY ?? '' }, fetch)
     } : undefined,
   })
   const output = JSON.stringify({ ...result, runtime: { embedderInitMs, embedderRevision, backend: smoke ? 'synthetic' : task === 'summary' ? 'not-used-summary-only' : 'node-onnx-local-files', applicationBackend: 'browser-wasm' } }, null, 2) + '\n'

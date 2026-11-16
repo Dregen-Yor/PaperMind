@@ -166,9 +166,9 @@ export async function runProductBenchmark(args: ProductRunArgs) {
     const summaryStarted = performance.now()
     try {
       const parsed = args.doclingInput ? readDoclingInput(args.doclingInput, pdfSha256) : await args.convertDocling?.()
-      if (!parsed) throw new Error('摘要需要 --docling-json 或显式 --docling-url')
+      if (!parsed) throw new Error('摘要需要 --docling-json 或 --docling-official')
       if (parsed.items.some(item => item.pages.some(page => page >= document.pages.length))) throw new Error('Docling 页码超出 PDF 页数')
-      result.source.docling = args.doclingInput ? 'provided-json' : 'remote-convertPdf-no-ssh'
+      result.source.docling = args.doclingInput ? 'provided-json' : 'official-convertPdf'
       result.source.doclingJsonSha256 = sha256(JSON.stringify(args.doclingInput?.document ?? parsed))
       const profileIdentity = JSON.stringify(args.profile)
       const runKey = await abstractRunKey(parsed, args.title, profileIdentity, '')

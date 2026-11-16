@@ -28,12 +28,12 @@ export BENCH_EMBEDDER_CACHE_DIR=/absolute/path/to/preprovisioned-model-cache
 
 npm run bench:product -- --task qa --pdf /path/paper.pdf --question '研究采用什么方法？' --out /tmp/product-qa.json
 npm run bench:product -- --task all --pdf /path/paper.pdf --title '论文实际标题' --question '主要结论是什么？' --docling-json /path/paper.docling.json --out /tmp/product-all.json
-npm run bench:product -- --task summary --pdf /path/paper.pdf --docling-url http://your-docling-host:5001 --out /tmp/product-summary.json
+npm run bench:product -- --task summary --pdf /path/paper.pdf --docling-official --out /tmp/product-summary.json
 ```
 
 `BENCH_EMBEDDER_REVISION` 必须是不可变的 40 位 commit SHA；模型固定为产品的 `Xenova/bge-small-en-v1.5` / q8，Node 使用本地文件、ONNX backend。应用默认 revision 为 `main`、运行于浏览器 WASM；必须自行核对两侧实际权重，不能仅因模型名称相同就声称运行环境完全等价。`BENCH_LLM_REVISION` 是操作者声明的部署版本，入口不远程证明其真实性。summary-only 不加载向量模型。
 
-输入 Docling JSON 使用 `{ "sourceSha256": "原始PDF字节SHA-256", "document": ... }` 封装；document 可以是原始 DoclingDocument 或应用的 version=1 归一化文档。入口校验声明的 hash 与当前 PDF 字节完全一致，记录输入 JSON 内容 hash；声明绑定本身不证明解析质量。`--docling-url` 与 `--docling-json` 互斥；远程转换复用 `electron/doclingClient.convertPdf`（OCR/formula 开启、600 秒超时），注入空 connect 回调确保不建立 SSH。服务 key 从 `BENCH_DOCLING_API_KEY` 读取，结果不含 key。
+输入 Docling JSON 使用 `{ "sourceSha256": "原始PDF字节SHA-256", "document": ... }` 封装；document 可以是原始 DoclingDocument 或应用的 version=1 归一化文档。入口校验声明的 hash 与当前 PDF 字节完全一致，记录输入 JSON 内容 hash；声明绑定本身不证明解析质量。`--docling-official` 与 `--docling-json` 互斥；远程转换复用 `electron/doclingClient.convertPdf`，固定使用官方 HTTPS 地址、60 秒上限以及项目维护的 OCR/公式/表格配置。服务 key 从 `BENCH_DOCLING_API_KEY` 读取，结果不含 key。
 
 可用 `--extracted-json FILE` 显式从已提取阶段进入，封装为 `{ "sourceSha256": "...", "document": { "pages": [...], "layoutLines": [...], "outline": [...] } }`；结果将标 `provided-extracted-document`，不将该次输入说成 PDF 解析测量。正常 `--pdf` 入口使用真实共享 PDF.js 提取，安装目录内 worker/fonts 由 Node 适配器解析。
 
