@@ -77,10 +77,10 @@ active unified-summary path.
 
 ## Commands
 
-Use Node `24.22.1` and npm 10.
+Use Node `24.22.1` and npm `10.9.4`.
 
 ```bash
-npm install
+npm ci
 npm run dev
 npm run typecheck
 npm test

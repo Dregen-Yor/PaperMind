@@ -17,29 +17,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x64 - AppImage
           - name: linux-x64
-            os: ubuntu-latest
-            eb_args: --linux
-            arch_flag: x64
+            os: ubuntu-22.04
+            eb_args: --linux --x64
 
-          # macOS Intel x64 - dmg
           - name: darwin-x64
-            os: macos-13
+            os: macos-15-intel
             eb_args: --mac --x64
-            arch_flag: x64
 
-          # macOS Apple Silicon arm64 - dmg
           - name: darwin-arm64
-            os: macos-latest
+            os: macos-15
             eb_args: --mac --arm64
-            arch_flag: arm64
 
-          # Windows x64 - NSIS installer
           - name: win32-x64
-            os: windows-latest
+            os: windows-2025
             eb_args: --win --x64
-            arch_flag: x64
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,32 +41,36 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: '.nvmrc'
-          check-latest: true
+          check-latest: false
           cache: npm
 
-      - name: Verify Node security baseline
-        run: node scripts/check-runtime.mjs
-
       - name: Use pinned npm version
+        working-directory: ${{ runner.temp }}
         run: npm install --global npm@10.9.4 --ignore-scripts
 
-      # Linux 需要 fuse（AppImage 运行时依赖）及原生构建工具
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y libfuse2 python3 make g++
+      - name: Verify exact toolchain
+        run: |
+          node --version
+          npm --version
+          npm run verify:toolchain
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify Electron security approval
-        run: npm run security:runtime
+      - name: Verify installed Electron and native dependencies
+        run: npm run verify:install
 
-      # 禁用 macOS 代码签名（未配置证书时跳过，产出未签名包）
-      - name: Build
+      - name: Verify dependency contract stayed unchanged
+        run: git diff --exit-code -- package.json package-lock.json .npmrc
+
+      - name: Build renderer, main and preload sources
+        run: npm run build:source
+
+      - name: Build unsigned installer
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx vue-tsc --noEmit && npx vite build && npx electron-builder ${{ matrix.eb_args }}
+        run: npm exec electron-builder -- ${{ matrix.eb_args }}
 
       # 将 electron-builder 产物重命名为统一的 <name>-<version>-<platform>.* 格式
       - name: Rename artifacts
@@ -101,14 +97,19 @@ jobs:
           esac
 
           mv "$SRC" "$OUTDIR/$DEST"
-          echo "ASSET=$OUTDIR/$DEST" >> "$GITHUB_ENV"
+          ASSET="$OUTDIR/$DEST"
+          (cd "$OUTDIR" && shasum -a 256 "$DEST" > "$DEST.sha256")
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          echo "CHECKSUM=$ASSET.sha256" >> "$GITHUB_ENV"
           echo "DEST=$DEST" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pkg-${{ matrix.name }}
-          path: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.CHECKSUM }}
           if-no-files-found: error
           retention-days: 1
 

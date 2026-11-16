@@ -15,15 +15,17 @@ if (process.argv.includes('--electron') || process.argv.includes('--executable')
   const position = process.argv.indexOf('--executable')
   const executable = position < 0 ? require('electron') : process.argv[position + 1]
   if (!executable) throw new Error('缺少待检查的 Electron 可执行文件')
-  const probe = spawnSync(executable, ['-p', 'JSON.stringify(process.versions)'], {
+  const probe = spawnSync(executable, ['-p', 'JSON.stringify({ versions: process.versions, platform: process.platform, arch: process.arch })'], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024,
   })
   if (probe.status !== 0 || probe.error) errors.push('无法读取实际 Electron 可执行程序的运行时版本')
   else {
     try {
-      const versions = JSON.parse(probe.stdout.trim())
-      inspectedVersions = versions
-      console.log(JSON.stringify({ electron: versions.electron, node: versions.node, chrome: versions.chrome }))
+      const result = JSON.parse(probe.stdout.trim())
+      const versions = result.versions
+      inspectedVersions = { ...versions, platform: result.platform, arch: result.arch }
+      console.log(JSON.stringify({ electron: versions.electron, node: versions.node, chrome: versions.chrome,
+        platform: result.platform, arch: result.arch }))
       errors.push(...electronSecurityErrors(versions, manifest.devDependencies.electron))
     } catch { errors.push('Electron 运行时未返回有效版本信息') }
   }

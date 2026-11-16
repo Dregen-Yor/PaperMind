@@ -1,5 +1,12 @@
 {
   "advisory": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
   "minimumNodeByMajor": { "22": "22.23.4", "24": "24.22.1", "26": "26.12.1" },
-  "approvedElectron": []
+  "approvedElectron": [
+    {
+      "electron": "44.11.3",
+      "node": "24.22.2",
+      "chromium": "152.0.7977.169",
+      "evidence": "https://releases.electronjs.org/release/v44.11.3"
+    }
+  ]
 }

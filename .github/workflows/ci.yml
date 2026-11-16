@@ -9,9 +9,17 @@ permissions:
   contents: read
 
 jobs:
-  typecheck:
-    name: Type Check
-    runs-on: ubuntu-latest
+  install-test-build:
+    name: Install · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-2025
+          - macos-15-intel
+          - macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -20,45 +28,38 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: '.nvmrc'
-          check-latest: true
+          check-latest: false
           cache: npm
 
-      - name: Verify Node security baseline
-        run: node scripts/check-runtime.mjs
-
       - name: Use pinned npm version
+        working-directory: ${{ runner.temp }}
         run: npm install --global npm@10.9.4 --ignore-scripts
 
-      # 跳过 postinstall（electron-rebuild），类型检查不需要原生模块
+      - name: Verify exact toolchain
+        run: |
+          node --version
+          npm --version
+          npm run verify:toolchain
+
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: npm ci
+
+      - name: Verify installed Electron and native dependencies
+        run: npm run verify:install
+
+      - name: Verify dependency contract stayed unchanged
+        run: git diff --exit-code -- package.json package-lock.json .npmrc
+
+      - name: Run full tests on Linux
+        if: runner.os == 'Linux'
+        run: npm test
+
+      - name: Run security tests on Linux
+        if: runner.os == 'Linux'
+        run: npm run security:test
 
       - name: TypeScript type check
         run: npm run typecheck
 
-  test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: '.nvmrc'
-          check-latest: true
-          cache: npm
-
-      - name: Verify Node security baseline
-        run: node scripts/check-runtime.mjs
-
-      - name: Use pinned npm version
-        run: npm install --global npm@10.9.4 --ignore-scripts
-
-      # 测试层完全 mock 了 window.db，无需编译 better-sqlite3
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Run tests
-        run: npm test
+      - name: Build renderer, main and preload sources
+        run: npm run build:source

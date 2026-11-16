@@ -14,9 +14,23 @@ export function nodeSecurityErrors(version) {
 
 export function electronSecurityErrors(versions, expectedElectron, policy = defaults) {
   const errors = nodeSecurityErrors(versions.node)
-  if (!versions.electron || versions.electron !== expectedElectron) errors.push('实际 Electron 运行时与锁定版本不一致')
-  const approved = policy.approvedElectron.find(entry => entry.electron === versions.electron && entry.node === versions.node
+  if (!versions.electron || versions.electron !== expectedElectron) {
+    errors.push(`实际 Electron 运行时与锁定版本不一致: expected=${expectedElectron} actual=${versions.electron ?? 'missing'}`)
+  }
+  const approved = policy.approvedElectron.find(entry => entry.electron === expectedElectron
     && /^https:\/\/(releases\.electronjs\.org|www\.electronjs\.org|github\.com\/electron\/electron)\//.test(entry.evidence))
-  if (!approved) errors.push('该 Electron / Node 组合尚无经核验的官方修复记录，禁止打包与发布')
+  if (!approved) {
+    errors.push('该 Electron / Node / Chromium 组合尚无经核验的官方修复记录，禁止打包与发布')
+    return errors
+  }
+  if (versions.node !== approved.node) {
+    errors.push(`Electron 内嵌 Node 版本不一致: expected=${approved.node} actual=${versions.node ?? 'missing'}`)
+  }
+  if (versions.chrome !== approved.chromium) {
+    errors.push(`Electron Chromium 版本不一致: expected=${approved.chromium} actual=${versions.chrome ?? 'missing'}`)
+  }
+  if (errors.length) {
+    errors.push('实际 Electron / Node / Chromium 组合不匹配已批准运行时，禁止打包与发布')
+  }
   return errors
 }
