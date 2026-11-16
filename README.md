@@ -23,20 +23,30 @@ PaperMind 是一个跑在你电脑上的论文阅读工作台：左侧读 PDF，
 
 ## 快速开始
 
-**前置依赖**：Node.js `22.14+ / 24+`，npm 10。SQLite 原生依赖需要 Node-API 10，不能使用 Node.js 20。
+**前置依赖**：Node.js `24.22.1` 与 npm `10.9.4`，版本必须完全一致。
 
 ```bash
-# 安装依赖（自动为 Electron 重建 better-sqlite3）
-npm install
-
-# 开发模式（Vite + Electron）
+git clone <repository-url>
+cd PaperMind
+npm ci
 npm run dev
+```
 
-# 类型检查 / 单元测试
+`npm ci` 会先清理现有 `node_modules`，严格按 `package-lock.json` 安装且不会修改依赖清单；清单与锁文件不一致时会直接失败。Electron、better-sqlite3 和 Sharp 均使用对应平台的预编译产物，支持矩阵内无需安装 Python、C/C++ 编译器或 `node-gyp`。自定义 npm registry、网络代理或 `ELECTRON_MIRROR` 只能配置在用户本地环境中，不要写入仓库。
+
+| 操作系统 | 架构与最低版本 | 官方支持状态 |
+|----------|----------------|--------------|
+| Windows | Windows 11 x64 | 支持 |
+| macOS | macOS 13+，Intel x64 或 Apple Silicon arm64 | 支持 |
+| Linux | x64，glibc 2.34+ | 支持 |
+
+当前发布产物未进行代码签名或公证。macOS 的 Gatekeeper 与 Windows 的 SmartScreen 可能在首次运行时拦截应用；请只使用可信来源的发布包并核对 SHA-256 校验和。
+
+常用验证与构建命令：
+
+```bash
 npm run typecheck
 npm test
-
-# 构建安装包（产物在 release/）
 npm run build
 ```
 
@@ -95,6 +105,18 @@ PaperMind/
 ## 参与贡献
 
 欢迎 Issue 与 PR。基于 `main` 创建功能分支（如 `feat/your-feature`），保持现有代码风格（TypeScript strict、Vue `<script setup>`、setup 风格 store），逻辑变更请在 `src/tests/` 补充测试；提交 PR 前确保 `npm test` 与 `npm run typecheck` 全部通过，并在描述中说明变更、验证方式与是否有破坏性改动。
+
+### 维护者升级依赖
+
+只有维护者有意升级依赖时才执行第一行；普通用户不能用它代替 `npm ci`。
+
+```bash
+npm install --save-exact <package>@<explicit-version>
+npm ci
+npm run verify:install
+npm run typecheck
+npm test
+```
 
 ## License
 

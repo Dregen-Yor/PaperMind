@@ -42,15 +42,15 @@ is distributed across handlers, repositories, and shared validators.
 
 ## Build, Test, and Development Commands
 
-The supported toolchain is Node `24.22.1` and npm 10, as pinned by `.nvmrc`,
+The supported toolchain is Node `24.22.1` and npm `10.9.4`, as pinned by `.nvmrc`,
 `package.json`, and the runtime gate.
 
-- `npm install` installs dependencies and rebuilds native modules.
+- `npm ci` installs the exact locked dependency graph and prepares the verified
+  Electron/native runtime.
 - `npm run dev` starts Vite and Electron.
 - `npm run typecheck` runs strict Vue/TypeScript checks.
 - `npm test` runs Vitest and script-level checks.
 - `npm run build` checks icons, type-checks, bundles, and creates installers.
-- `npm run rebuild` rebuilds `better-sqlite3`.
 - `npm run bench` and `npm run bench:product` run evaluation CLIs.
 
 Do not bypass `scripts/check-runtime.mjs` to make an unsupported runtime pass.
