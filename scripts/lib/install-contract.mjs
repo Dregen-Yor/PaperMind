@@ -158,6 +158,9 @@ export function manifestErrors({ manifest, lock, nvmrc, npmrc }) {
   if (manifest?.devDependencies?.['@electron/rebuild'] !== undefined) {
     errors.push('@electron/rebuild is forbidden; supported platforms must use bundled prebuilds')
   }
+  if (lockPackages['node_modules/better-sqlite3']?.gypfile !== false) {
+    errors.push('better-sqlite3 lock metadata must set gypfile=false to use bundled prebuilds')
+  }
 
   const scripts = manifest?.scripts ?? {}
   for (const [name, command] of Object.entries(scripts)) {

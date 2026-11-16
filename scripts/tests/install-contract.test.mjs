@@ -37,7 +37,7 @@ test('Windows 10 x64 is best-effort instead of a hard platform failure', () => {
 const validManifest = {
   packageManager: 'npm@10.9.4',
   engines: { node: '24.22.1', npm: '10.9.4' },
-  dependencies: { sharp: '0.34.5' },
+  dependencies: { sharp: '0.34.5', 'better-sqlite3': '13.0.3' },
   devDependencies: { electron: '44.11.3' },
   scripts: { postinstall: 'node scripts/prepare-install.mjs' },
 }
@@ -45,7 +45,15 @@ const validManifest = {
 const validLock = {
   lockfileVersion: 3,
   packages: {
-    '': { dependencies: { sharp: '0.34.5' }, devDependencies: { electron: '44.11.3' } },
+    '': {
+      dependencies: { sharp: '0.34.5', 'better-sqlite3': '13.0.3' },
+      devDependencies: { electron: '44.11.3' },
+    },
+    'node_modules/better-sqlite3': {
+      version: '13.0.3',
+      integrity: 'sha512-fixture',
+      gypfile: false,
+    },
     'node_modules/sharp': {
       version: '0.34.5',
       integrity: 'sha512-fixture',
@@ -73,6 +81,14 @@ test('requires the npm lifecycle policy that disables native source-build select
     npmrc: validNpmrc.replace(/^node-options=.*$/m, ''),
   })
   assert.ok(errors.some(error => error.includes('node-options') && error.includes('prebuilt')))
+})
+
+test('requires better-sqlite3 lock metadata to preserve bundled prebuild selection', () => {
+  const lock = structuredClone(validLock)
+  delete lock.packages['node_modules/better-sqlite3'].gypfile
+
+  const errors = manifestErrors({ manifest: validManifest, lock, nvmrc: '24.22.1', npmrc: validNpmrc })
+  assert.ok(errors.some(error => error.includes('better-sqlite3') && error.includes('gypfile=false')))
 })
 
 test('rejects ranges, registry URLs, native rebuilds, node-gyp and missing optional targets', () => {
