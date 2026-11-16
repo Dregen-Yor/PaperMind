@@ -98,7 +98,7 @@ jobs:
 
           mv "$SRC" "$OUTDIR/$DEST"
           ASSET="$OUTDIR/$DEST"
-          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          (cd "$OUTDIR" && shasum -a 256 "$DEST" > "$DEST.sha256")
           echo "ASSET=$ASSET" >> "$GITHUB_ENV"
           echo "CHECKSUM=$ASSET.sha256" >> "$GITHUB_ENV"
           echo "DEST=$DEST" >> "$GITHUB_ENV"

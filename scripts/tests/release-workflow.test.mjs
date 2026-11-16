@@ -30,7 +30,7 @@ test('every release matrix entry uses the reproducible install and source build 
 })
 
 test('release artifacts include per-file and aggregate SHA-256 checksums', () => {
-  assert.match(workflow, /shasum -a 256 "\$ASSET" > "\$ASSET\.sha256"/)
+  assert.match(workflow, /\(cd "\$OUTDIR" && shasum -a 256 "\$DEST" > "\$DEST\.sha256"\)/)
   assert.match(workflow, /sha256sum \* \| tee checksums-sha256\.txt/)
   assert.match(workflow, /files: artifacts\/\*/)
 })

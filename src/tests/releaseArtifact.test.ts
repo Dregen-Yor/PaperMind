@@ -25,7 +25,8 @@ describe('release artifact names', () => {
       const checksum = `${artifact}.sha256`
       expect(readdirSync(join(root, 'release')).sort()).toEqual([artifact, checksum])
       expect(readFileSync(join(root, 'release', checksum), 'utf8'))
-        .toMatch(new RegExp(`^[a-f0-9]{64}  release/${artifact}\\n$`))
+        .toMatch(new RegExp(`^[a-f0-9]{64}  ${artifact}\\n$`))
+      execFileSync('shasum', ['-a', '256', '-c', checksum], { cwd: join(root, 'release') })
       const outputs = readFileSync(join(root, 'github-env'), 'utf8')
       expect(outputs).toContain(`ASSET=release/${artifact}`)
       expect(outputs).toContain(`CHECKSUM=release/${checksum}`)

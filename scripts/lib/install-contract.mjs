@@ -4,6 +4,7 @@ import os from 'node:os'
 export const EXPECTED_NODE = '24.22.1'
 export const EXPECTED_NPM = '10.9.4'
 export const EXPECTED_ELECTRON = '44.11.3'
+export const PREBUILT_ONLY_NODE_OPTIONS = '--import=data:text/javascript,process.env.SHARP_IGNORE_GLOBAL_LIBVIPS%3D%271%27%3Bdelete%20process.env.npm_config_build_from_source'
 
 function compareVersions(actual, expected) {
   const left = String(actual).split('.').map(Number)
@@ -174,9 +175,11 @@ export function manifestErrors({ manifest, lock, nvmrc, npmrc }) {
     ['save-exact', 'true'],
     ['omit-lockfile-registry-resolved', 'true'],
     ['include', 'optional'],
+    ['node-options', PREBUILT_ONLY_NODE_OPTIONS],
   ]) {
     if (npmConfig.get(key) !== expected) {
-      errors.push(`.npmrc ${key} mismatch: expected=${expected} actual=${npmConfig.get(key) ?? 'missing'}`)
+      const purpose = key === 'node-options' ? ' (required for prebuilt-only native installation)' : ''
+      errors.push(`.npmrc ${key} mismatch${purpose}: expected=${expected} actual=${npmConfig.get(key) ?? 'missing'}`)
     }
   }
   for (const key of npmConfig.keys()) {

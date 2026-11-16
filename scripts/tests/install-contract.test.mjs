@@ -11,6 +11,9 @@ const supported = {
   glibc: null,
 }
 
+const prebuiltNodeOptions = '--import=data:text/javascript,process.env.SHARP_IGNORE_GLOBAL_LIBVIPS%3D%271%27%3Bdelete%20process.env.npm_config_build_from_source'
+const validNpmrc = `engine-strict=true\nsave-exact=true\nomit-lockfile-registry-resolved=true\ninclude=optional\nnode-options=${prebuiltNodeOptions}\n`
+
 test('accepts the exact toolchain on a supported platform', () => {
   assert.deepEqual(toolchainErrors(supported), [])
 })
@@ -61,8 +64,15 @@ test('accepts an exact registry-neutral manifest and lock', () => {
     manifest: validManifest,
     lock: validLock,
     nvmrc: '24.22.1\n',
-    npmrc: 'engine-strict=true\nsave-exact=true\nomit-lockfile-registry-resolved=true\ninclude=optional\n',
+    npmrc: validNpmrc,
   }), [])
+})
+
+test('requires the npm lifecycle policy that disables native source-build selection', () => {
+  const errors = manifestErrors({ manifest: validManifest, lock: validLock, nvmrc: '24.22.1',
+    npmrc: validNpmrc.replace(/^node-options=.*$/m, ''),
+  })
+  assert.ok(errors.some(error => error.includes('node-options') && error.includes('prebuilt')))
 })
 
 test('rejects ranges, registry URLs, native rebuilds, node-gyp and missing optional targets', () => {
