@@ -86,27 +86,20 @@
       </section>
 
       <section class="settings-card">
-        <h3>Docling 文档解析</h3>
-        <p class="card-desc">在论文阅读页的「论文摘要」中生成图文解读。默认通过 SSH 自动连接 101.76.222.151 上的 Docling 服务；PDF 将发送到该服务，解读使用当前对话模型，原文图片保存在本地。</p>
+        <h3>官方 Docling 文档解析服务</h3>
+        <p class="card-desc">论文 PDF、OCR、公式和表格解析内容会发送到 PaperMind 官方服务。服务地址和解析能力由项目统一维护，普通用户只能配置 API Key。</p>
+        <div class="setting-row">
+          <label>官方服务地址</label>
+          <span>{{ OFFICIAL_DOCLING_CONFIG.baseUrl }}</span>
+        </div>
         <p v-if="chatStore.doclingConfigError" class="card-desc" role="alert">{{ chatStore.doclingConfigError }}</p>
         <el-form label-position="top">
-          <el-form-item label="Docling 服务根地址">
-            <el-input data-test="docling-base-url" v-model="doclingLocal.baseUrl" type="url" autocomplete="off" placeholder="http://127.0.0.1:5001" />
-          </el-form-item>
-          <el-form-item label="API Key（可选）">
+          <el-form-item data-test="docling-api-key" label="API Key（可选）">
             <el-input v-model="doclingLocal.apiKey" type="password" show-password autocomplete="off" placeholder="服务启用认证时填写" />
           </el-form-item>
-          <el-form-item label="解析超时（秒）">
-            <el-input-number v-model="doclingLocal.timeoutSeconds" :min="30" :max="1800" :step="30" />
-          </el-form-item>
-          <div class="action-row">
-            <el-checkbox v-model="doclingLocal.ocr">扫描文档 OCR</el-checkbox>
-            <el-checkbox v-model="doclingLocal.formula">公式识别</el-checkbox>
-          </div>
-          <p class="card-desc">公式识别需要服务端相应模型。更改解析选项后，下次摘要会重新解析论文。</p>
           <div class="action-row">
             <el-button data-test="docling-save" type="primary" :loading="savingDocling" @click="saveDocling">保存设置</el-button>
-            <el-button :loading="testingDocling" @click="testDocling">测试连接</el-button>
+            <el-button data-test="docling-test" :loading="testingDocling" @click="testDocling">测试连接</el-button>
           </div>
           <p data-test="docling-save-state" class="card-desc" role="status">{{ doclingDirty ? '有未保存的修改，请点击「保存设置」' : '设置已保存；修改后请点击「保存设置」' }}</p>
         </el-form>
@@ -269,24 +262,26 @@ import {
 import { storeToRefs } from 'pinia'
 import { usePaperStore } from '../stores/paper'
 import { previewBackup, type BackupPreview } from '../utils/backupPreview'
+import type { DoclingCredentials } from '../types/doclingConfig'
+import { OFFICIAL_DOCLING_CONFIG } from '../utils/doclingConfig'
 
 const paperMindMark = new URL('../../assets/brand/papermind-mark.svg', import.meta.url).href
 
 const chatStore = useChatStore()
 const paperStore = usePaperStore()
-const { profiles, chatProfileId, doclingConfig } =
+const { profiles, chatProfileId, doclingCredentials } =
   storeToRefs(chatStore)
 
 // 本地绑定，避免直接修改 store ref（select @change 时再写入）
 const chatProfileIdLocal = ref(chatProfileId.value)
 const savingChatProfile = ref(false)
 watch(chatProfileId, id => { if (!savingChatProfile.value) chatProfileIdLocal.value = id })
-const doclingLocal = reactive({ ...doclingConfig.value })
+const doclingLocal = reactive<DoclingCredentials>({ ...doclingCredentials.value })
 const savingDocling = ref(false)
 const testingDocling = ref(false)
-const doclingDirty = computed(() => JSON.stringify(doclingLocal) !== JSON.stringify(doclingConfig.value))
-watch(doclingConfig, (config, previous) => {
-  if (JSON.stringify(doclingLocal) === JSON.stringify(previous)) Object.assign(doclingLocal, config)
+const doclingDirty = computed(() => doclingLocal.apiKey !== doclingCredentials.value.apiKey)
+watch(doclingCredentials, (credentials, previous) => {
+  if (doclingLocal.apiKey === previous.apiKey) Object.assign(doclingLocal, credentials)
 })
 const rebuildingTrees = ref(false)
 
@@ -403,10 +398,10 @@ async function doRemove(id: string) {
 async function saveDocling() {
   if (savingDocling.value) return
   savingDocling.value = true
-  const snapshot = { ...doclingLocal }
+  const snapshot = { apiKey: doclingLocal.apiKey }
   try {
-    await chatStore.setDoclingConfig(snapshot)
-    if (JSON.stringify(doclingLocal) === JSON.stringify(snapshot)) Object.assign(doclingLocal, doclingConfig.value)
+    await chatStore.setDoclingCredentials(snapshot)
+    if (doclingLocal.apiKey === snapshot.apiKey) Object.assign(doclingLocal, doclingCredentials.value)
     ElMessage.success('Docling 设置已保存')
   }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '保存失败') }
@@ -433,7 +428,7 @@ async function saveChatProfileSelection(id: string) {
 }
 async function testDocling() {
   testingDocling.value = true
-  try { ElMessage.success(await window.db.docling.testConnection({ ...doclingLocal })) }
+  try { ElMessage.success(await window.db.docling.testConnection({ apiKey: doclingLocal.apiKey.trim() })) }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '连接失败') }
   finally { testingDocling.value = false }
 }
@@ -532,7 +527,7 @@ async function confirmRestore() {
   try {
     await window.db.data.import(restorePreview.value.data)
     // The restored settings replace local drafts as well; do not block the required reload.
-    Object.assign(doclingLocal, doclingConfig.value)
+    Object.assign(doclingLocal, doclingCredentials.value)
     dialogVisible.value = false
     restoredForReload = true
     ElMessage.success('已恢复，正在刷新…')

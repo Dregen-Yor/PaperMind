@@ -71,17 +71,17 @@ describe('backup recovery consent and unsaved settings', () => {
   })
   it('blocks navigation with unsaved Docling settings and lets the user keep editing', async () => {
     const { router } = await setup()
-    await wrapper!.get('input[data-test="docling-base-url"]').setValue('http://example.test:5001')
+    await wrapper!.get('[data-test="docling-api-key"] input').setValue('candidate-key')
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
     await router.push('/library')
     expect(confirm).toHaveBeenCalled()
     expect(router.currentRoute.value.path).toBe('/settings')
-    expect((wrapper!.get('input[data-test="docling-base-url"]').element as HTMLInputElement).value).toBe('http://example.test:5001')
+    expect((wrapper!.get('[data-test="docling-api-key"] input').element as HTMLInputElement).value).toBe('candidate-key')
   })
   it('shows explicit and automatic save modes and keeps failed settings dirty', async () => {
     const { store } = await setup()
-    vi.spyOn(store, 'setDoclingConfig').mockRejectedValueOnce(new Error('写入失败'))
-    await wrapper!.get('input[data-test="docling-base-url"]').setValue('http://example.test:5001')
+    vi.spyOn(store, 'setDoclingCredentials').mockRejectedValueOnce(new Error('写入失败'))
+    await wrapper!.get('[data-test="docling-api-key"] input').setValue('candidate-key')
     await wrapper!.get('[data-test="docling-save"]').trigger('click')
     await flushPromises()
     expect(wrapper!.text()).toContain('自动保存')
@@ -99,17 +99,17 @@ describe('backup recovery consent and unsaved settings', () => {
   })
   it('warns before closing a window with an unsaved Docling edit', async () => {
     await setup()
-    await wrapper!.get('input[data-test="docling-base-url"]').setValue('http://example.test:5001')
+    await wrapper!.get('[data-test="docling-api-key"] input').setValue('candidate-key')
     const event = new Event('beforeunload', { cancelable: true })
     window.dispatchEvent(event)
     expect(event.defaultPrevented).toBe(true)
   })
   it('keeps edited Docling fields intact if a late initial settings load arrives', async () => {
     const { store } = await setup()
-    await wrapper!.get('input[data-test="docling-base-url"]').setValue('http://example.test:5001')
-    store.doclingConfig = { ...store.doclingConfig, baseUrl: 'http://saved.test:5001' }
+    await wrapper!.get('[data-test="docling-api-key"] input').setValue('candidate-key')
+    store.doclingCredentials = { apiKey: 'saved-key' }
     await flushPromises()
-    expect((wrapper!.get('input[data-test="docling-base-url"]').element as HTMLInputElement).value).toBe('http://example.test:5001')
+    expect((wrapper!.get('[data-test="docling-api-key"] input').element as HTMLInputElement).value).toBe('candidate-key')
   })
   it('allows the required reload after a successful confirmed restore', async () => {
     await setup()

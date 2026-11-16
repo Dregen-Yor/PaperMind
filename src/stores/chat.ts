@@ -26,7 +26,7 @@ import type { ChatRunStatus } from '../types/chatRun'
 import type { Message, Conversation } from '../types/chat'
 import type { PaperAbstractReport, PaperAbstractState } from '../utils/paperAbstract'
 import type { DoclingCredentials } from '../types/doclingConfig'
-import { DOCLING_SETTINGS_KEY, normalizeDoclingCredentials, OFFICIAL_DOCLING_CONFIG } from '../utils/doclingConfig'
+import { DOCLING_SETTINGS_KEY, normalizeDoclingCredentials } from '../utils/doclingConfig'
 import { useVisualSummaryStore } from './visualSummary'
 import { hashVisualSource } from '../utils/visualSummary'
 import {
@@ -306,15 +306,6 @@ export const useChatStore = defineStore('chat', () => {
   const indexedPapers = ref<Set<string>>(new Set())
   const abstractToken = ref('')
   const doclingCredentials = ref<DoclingCredentials>({ apiKey: '' })
-  const legacyDoclingUiConfig = (credentials: DoclingCredentials) => ({
-    ...credentials,
-    baseUrl: OFFICIAL_DOCLING_CONFIG.baseUrl,
-    timeoutSeconds: OFFICIAL_DOCLING_CONFIG.timeoutSeconds,
-    ocr: OFFICIAL_DOCLING_CONFIG.conversion.ocr.enabled,
-    formula: OFFICIAL_DOCLING_CONFIG.conversion.formula.enabled,
-  })
-  // Removed with the legacy controls in SettingsView; persistence already accepts credentials only.
-  const doclingConfig = ref(legacyDoclingUiConfig(doclingCredentials.value))
   const doclingConfigError = ref('')
   const abstractProgress = ref<Record<string, string>>({})
   const paperAbstractStates = ref<Record<string, PaperAbstractState>>({})
@@ -420,7 +411,6 @@ export const useChatStore = defineStore('chat', () => {
     abstractToken.value = (await window.db.settings.get('huggingface_token')) ?? ''
     try {
       doclingCredentials.value = normalizeDoclingCredentials(await window.db.settings.get(DOCLING_SETTINGS_KEY))
-      doclingConfig.value = legacyDoclingUiConfig(doclingCredentials.value)
     }
     catch (error) { doclingConfigError.value = error instanceof Error ? error.message : 'Docling 配置无效' }
     // 语义树默认关闭（方案 §6.3）：只有显式存过「开」才开启，未存过一律保持关闭。
@@ -491,10 +481,8 @@ export const useChatStore = defineStore('chat', () => {
     const credentials = normalizeDoclingCredentials(value)
     await window.db.settings.set(DOCLING_SETTINGS_KEY, credentials)
     doclingCredentials.value = credentials
-    doclingConfig.value = legacyDoclingUiConfig(credentials)
     doclingConfigError.value = ''
   }
-  const setDoclingConfig = setDoclingCredentials
 
   async function setAbstractToken(token: string) {
     abstractToken.value = token.trim()
@@ -1515,7 +1503,7 @@ export const useChatStore = defineStore('chat', () => {
     retrievalContextChars, setRetrievalContextChars, rebuildEk5Indexes, vectorModelState,
     conversations, profiles, chatProfileId, indexProfileId,
     chatProfile, indexProfile,
-    loaded, indexingPapers, indexedPapers, abstractToken, doclingCredentials, doclingConfig, doclingConfigError, abstractProgress, paperAbstractStates, setDoclingCredentials, setDoclingConfig,
+    loaded, indexingPapers, indexedPapers, abstractToken, doclingCredentials, doclingConfigError, abstractProgress, paperAbstractStates, setDoclingCredentials,
     treeEnabled, treeReadyPapers, treeIndexingPapers,
     init,
     addProfile, updateProfile, removeProfile,

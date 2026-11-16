@@ -56,7 +56,7 @@ At #14 the settings page manages:
 
 - OpenAI, Anthropic, and Ollama profiles;
 - active chat/index profiles and E-k5 context budget/rebuild;
-- generic Docling URL, key, timeout, OCR, and formula options;
+- the official Docling service address as read-only context and an API Key field;
 - default-redacted backup export, restore preview, and clear-data actions.
 
 It does not expose the legacy semantic-tree controls or Hugging Face summary
