@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateBackupInput } from '../../electron/db/backupValidation'
+import { normalizeSettingForImport, validateBackupInput } from '../../electron/db/backupValidation'
 
 const profile = {
   id: 'local', name: '', provider: 'ollama', model: '', apiKey: '',
@@ -11,6 +11,12 @@ function backupWith(key: string, value: unknown) {
 }
 
 describe('backup settings validation', () => {
+  it('migrates legacy Docling deployment settings to API-key-only credentials', () => {
+    expect(normalizeSettingForImport({
+      key: 'docling_config',
+      value: JSON.stringify({ apiKey: ' key ', baseUrl: 'http://127.0.0.1:5001', timeoutSeconds: 600, ocr: false, formula: false }),
+    })).toEqual({ key: 'docling_config', value: JSON.stringify({ apiKey: 'key' }) })
+  })
   it.each(['', '{', 'undefined', '{"apiKey":"private-backup-secret"'])('rejects malformed JSON without disclosing its content (%j)', value => {
     let message = ''
     try { validateBackupInput({ version: 1, settings: [{ key: 'future_setting', value }] }) }
@@ -79,11 +85,7 @@ describe('backup settings validation', () => {
     ['semantic_tree_enabled', 'yes'], ['semantic_tree_enabled', 1],
     ['llm_max_tokens_unlimited_migrated', 'true'],
     ['docling_config', []], ['docling_config', 'config'],
-    ['docling_config', { apiKey: 123 }], ['docling_config', { baseUrl: 123 }],
-    ['docling_config', { baseUrl: 'file:///tmp/docling' }],
-    ['docling_config', { baseUrl: 'https://user:private-backup-secret@example.com' }],
-    ['docling_config', { timeoutSeconds: 29 }], ['docling_config', { timeoutSeconds: 1801 }],
-    ['docling_config', { ocr: 'false' }], ['docling_config', { formula: 0 }],
+    ['docling_config', { apiKey: 123 }],
   ])('rejects invalid known setting %s (%j) without disclosing values', (key, value) => {
     let message = ''
     try { validateBackupInput(backupWith(key as string, value)) }
@@ -97,8 +99,8 @@ describe('backup settings validation', () => {
     ['huggingface_token', null], ['ek5_context_chars', 4000], ['ek5_context_chars', 1_000_000],
     ['semantic_tree_enabled', true], ['semantic_tree_enabled', false], ['semantic_tree_enabled', 'false'],
     ['llm_max_tokens_unlimited_migrated', true],
-    ['docling_config', { baseUrl: '', apiKey: '', timeoutSeconds: 600, ocr: false, formula: true }],
-    ['docling_config', { baseUrl: 'http://localhost:5001', timeoutSeconds: null }],
+    ['docling_config', { apiKey: '' }],
+    ['docling_config', { apiKey: 'legacy', baseUrl: 'file:///tmp/docling', timeoutSeconds: 2, ocr: 'false', formula: 0 }],
   ])('allows supported known setting %s (%j)', (key, value) => {
     expect(() => validateBackupInput(backupWith(key as string, value))).not.toThrow()
   })

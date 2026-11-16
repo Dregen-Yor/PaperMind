@@ -1,15 +1,19 @@
 import { createHash } from 'node:crypto'
-import { isParsedDocument, normalizeDoclingSettings, type DoclingSettings, type ParsedDocument } from '../src/utils/doclingDocument'
+import type { DoclingCredentials, OfficialDoclingConfig } from '../src/types/doclingConfig'
+import { normalizeDoclingCredentials, OFFICIAL_DOCLING_CONFIG } from '../src/utils/doclingConfig'
+import { isParsedDocument, type ParsedDocument } from '../src/utils/doclingDocument'
 import type { ParsedSummaryInput } from '../src/utils/parsedSummary'
 import type { PreviewSnapshot } from '../src/types/webPreview'
 import type { DocumentSummaryRecord, DocumentSummaryWrite, SummarySourceKind } from '../src/types/documentSummary'
+import { officialDoclingConfigHash } from './docling'
 
 const PROTOCOL = 'parsed-materials-v1'
 interface Dependencies {
   readPaper: (id: string) => { base64: string; title: string; name: string } | null
   getSnapshot: (id: string) => PreviewSnapshot | null
-  getSettings: () => unknown
-  convertPdf: (bytes: Uint8Array, name: string, settings: DoclingSettings) => Promise<ParsedDocument>
+  getCredentials: () => unknown
+  getOfficialConfig?: () => OfficialDoclingConfig
+  convertPdf: (bytes: Uint8Array, name: string, credentials: DoclingCredentials) => Promise<ParsedDocument>
   parseHtml: (snapshot: PreviewSnapshot) => Promise<ParsedDocument>
   repository: {
     get: (kind: SummarySourceKind, id: string, slot: 'materials') => DocumentSummaryRecord | null
@@ -29,13 +33,13 @@ export function createSummaryParser(deps: Dependencies) {
     const paper = kind === 'paper' ? deps.readPaper(sourceId) : null
     const snapshot = kind === 'web' ? deps.getSnapshot(sourceId) : null
     if (!paper && !snapshot) throw new Error('摘要原文已不存在')
-    const settings = kind === 'paper' ? normalizeDoclingSettings(deps.getSettings()) : null
+    const credentials = kind === 'paper' ? normalizeDoclingCredentials(deps.getCredentials()) : null
     const sourceHash = paper ? hash(paper.base64) : `${sourceId}:${snapshot!.contentHash}:${snapshot!.capturedAt}`
     const parserKey = hash(JSON.stringify({ protocol: PROTOCOL, kind,
-      ...(settings ? { baseUrl: settings.baseUrl, ocr: settings.ocr, formula: settings.formula,
-        presets: 'heron-tableformer-accurate-rapidocr-codeformulav2-v1' } : { htmlParser: 'html-native-mhtml-v2' }),
+      ...(credentials ? { officialConfigHash: officialDoclingConfigHash(deps.getOfficialConfig?.() ?? OFFICIAL_DOCLING_CONFIG) }
+        : { htmlParser: 'html-native-mhtml-v2' }),
     }))
-    return { kind, sourceId, sourceHash, parserKey, title: paper?.title ?? snapshot!.title, paper, snapshot, settings }
+    return { kind, sourceId, sourceHash, parserKey, title: paper?.title ?? snapshot!.title, paper, snapshot, credentials }
   }
   function hydrate(input: ParsedSummaryInput): ParsedSummaryInput {
     const hydrated = structuredClone(input)
@@ -70,7 +74,7 @@ export function createSummaryParser(deps: Dependencies) {
         } catch { /* Invalid or incomplete material caches are rebuilt from the immutable source. */ }
       }
       const document = source.paper
-        ? await deps.convertPdf(new Uint8Array(Buffer.from(source.paper.base64, 'base64')), source.paper.name, source.settings!)
+        ? await deps.convertPdf(new Uint8Array(Buffer.from(source.paper.base64, 'base64')), source.paper.name, source.credentials!)
         : await deps.parseHtml(source.snapshot!)
       check()
       if (!isParsedDocument(document) || !document.items.length) throw new Error('原文未解析出可用于摘要的材料')

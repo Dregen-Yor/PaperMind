@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createDoclingFacade } from '../../electron/docling'
-import { DEFAULT_DOCLING_SETTINGS, normalizeDoclingDocument } from '../utils/doclingDocument'
+import { OFFICIAL_DOCLING_CONFIG } from '../utils/doclingConfig'
+import { normalizeDoclingDocument } from '../utils/doclingDocument'
 const fixture = () => {
-  let config = { ...DEFAULT_DOCLING_SETTINGS, baseUrl: 'http://localhost:5001' }
+  let credentials = { apiKey: 'key' }
+  let officialConfig = structuredClone(OFFICIAL_DOCLING_CONFIG)
   const document = normalizeDoclingDocument({ texts: [{ text: 'Evidence' }] })
   const repository = { get: vi.fn().mockReturnValue(null), save: vi.fn((_id, record) => record), readAsset: vi.fn(), exportBackup: vi.fn(), importBackup: vi.fn() }
   const convert = vi.fn().mockResolvedValue(document)
-  const facade = createDoclingFacade({ readPaper: () => ({ bytes: new Uint8Array([1, 2]), name: 'p.pdf' }), getSettings: () => config, repository, convert })
-  return { facade, repository, convert, setConfig: (c: typeof config) => { config = c }, config }
+  const deps = { readPaper: () => ({ bytes: new Uint8Array([1, 2]), name: 'p.pdf' }), getCredentials: () => credentials, repository, convert, getOfficialConfig: () => officialConfig }
+  const facade = createDoclingFacade(deps)
+  return {
+    facade, repository, convert,
+    setCredentials: (value: unknown) => { credentials = value as typeof credentials },
+    setOfficialConfig: (value: typeof officialConfig) => { officialConfig = value },
+  }
 }
 describe('Docling cache orchestration', () => {
   it('uses file and parsing configuration fingerprints and reuses valid cache', async () => {
@@ -18,17 +25,19 @@ describe('Docling cache orchestration', () => {
     expect((await facade.convert('paper')).cached).toBe(true)
     expect(convert).toHaveBeenCalledTimes(1)
   })
-  it('rejects stale saves when parser configuration changes', async () => {
-    const { facade, repository, setConfig, config } = fixture()
+  it('rejects stale saves when the official parser configuration changes', async () => {
+    const { facade, repository, setOfficialConfig } = fixture()
     const first = await facade.convert('paper')
-    setConfig({ ...config, formula: false })
+    setOfficialConfig({ ...structuredClone(OFFICIAL_DOCLING_CONFIG), schemaVersion: 2 } as never)
     expect(() => facade.save('paper', first)).toThrow('配置')
     expect(repository.save).not.toHaveBeenCalled()
   })
-  it('does not invalidate cache on an authentication-only change', async () => {
-    const { facade, setConfig, config } = fixture()
+  it('ignores legacy deployment fields and authentication-only changes in cache identity', async () => {
+    const { facade, convert, setCredentials } = fixture()
     const first = await facade.convert('paper')
-    setConfig({ ...config, apiKey: 'new-key' })
+    setCredentials({ apiKey: 'new-key', baseUrl: 'http://127.0.0.1:5001', timeoutSeconds: 600, ocr: false, formula: false })
     expect(facade.save('paper', first).configHash).toBe(first.configHash)
+    await facade.convert('another-paper')
+    expect(convert).toHaveBeenLastCalledWith(expect.any(Uint8Array), 'p.pdf', { apiKey: 'new-key' })
   })
 })

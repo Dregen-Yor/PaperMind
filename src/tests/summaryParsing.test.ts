@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { createSummaryParser } from '../../electron/summaryParsing'
 import { parseHtmlSummary } from '../../electron/htmlSummary'
+import { OFFICIAL_DOCLING_CONFIG } from '../utils/doclingConfig'
 import type { ParsedDocument } from '../utils/doclingDocument'
 
 const document = (): ParsedDocument => ({ version: 1, warnings: [], items: [
@@ -17,7 +18,8 @@ function fixture() {
     readAsset: vi.fn(id => assets.get(id) ?? null),
   }
   const deps = {
-    repository, getSettings: vi.fn(() => ({})),
+    repository, getCredentials: vi.fn(() => ({ apiKey: 'key' })),
+    getOfficialConfig: vi.fn(() => OFFICIAL_DOCLING_CONFIG),
     readPaper: vi.fn(() => ({ base64: 'YQ==', title: '论文', name: 'paper.pdf' })),
     getSnapshot: vi.fn(() => ({ html: '<article><p>完整的正文材料</p></article>', title: '网页', finalUrl: 'https://example.org', capturedAt: 1, contentHash: 'html-hash', byteLength: 50 })),
     convertPdf: vi.fn(async () => document()), parseHtml: vi.fn(async () => document()),
@@ -34,7 +36,7 @@ describe('summary parsing boundary', () => {
     expect(f.parseHtml).toHaveBeenCalledWith(expect.objectContaining({ html: expect.stringContaining('<article>') }))
     const paper = await f.parser.parse('paper', 'paper')
     expect(paper.document.items[0].text).toBe('完整的正文材料')
-    expect(f.convertPdf).toHaveBeenCalledWith(new Uint8Array([97]), 'paper.pdf', expect.objectContaining({ ocr: true }))
+    expect(f.convertPdf).toHaveBeenCalledWith(new Uint8Array([97]), 'paper.pdf', { apiKey: 'key' })
   })
   it('deduplicates parsing, persists source-owned images and hydrates cached assets', async () => {
     const f = fixture()
@@ -50,11 +52,11 @@ describe('summary parsing boundary', () => {
     expect(cached.document.items[1].images[0].data).toBe('data:image/png;base64,YQ==')
     expect(f.convertPdf).toHaveBeenCalledTimes(1)
   })
-  it('ignores legacy visual cache and invalidates changed parser settings', async () => {
+  it('ignores legacy visual cache and invalidates changed official parser configuration', async () => {
     const f = fixture()
     f.records.set('paper:p:materials', { sourceHash: 'old', payload: JSON.stringify({ protocol: 'visual-materials-v2-padded-crops', items: [] }) })
     await f.parser.parse('paper', 'p')
-    f.getSettings.mockReturnValue({ formula: false })
+    f.getOfficialConfig.mockReturnValue({ ...structuredClone(OFFICIAL_DOCLING_CONFIG), schemaVersion: 2 } as never)
     await f.parser.parse('paper', 'p')
     expect(f.convertPdf).toHaveBeenCalledTimes(2)
   })

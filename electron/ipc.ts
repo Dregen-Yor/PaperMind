@@ -10,7 +10,7 @@ import { captureWebSummaryPdf } from './webSummaryCapture'
 import { convertPdfForSummary, testDoclingConnection } from './doclingClient'
 import { createSummaryParser } from './summaryParsing'
 import { parseHtmlSummary } from './htmlSummary'
-import { DOCLING_SETTINGS_KEY } from '../src/utils/doclingDocument'
+import { DOCLING_SETTINGS_KEY, normalizeDoclingCredentials, parseDoclingCredentials } from '../src/utils/doclingConfig'
 import { backupFileName } from '../src/utils/exportSanitize'
 import { clearPreviewData, previewControllerForSender } from './webPreview'
 import { paperContentUrl } from './paperProtocol'
@@ -21,7 +21,7 @@ import type { IpcHandlers } from '../src/types/ipcContract'
 export function registerIpc() {
   const docling = createDoclingFacade({
     repository: getDoclingRepository(),
-    getSettings: () => settingsApi.get(DOCLING_SETTINGS_KEY),
+    getCredentials: () => normalizeDoclingCredentials(settingsApi.get(DOCLING_SETTINGS_KEY)),
     readPaper: id => {
       const data = paperApi.readFile(id)
       return data ? { bytes: Buffer.from(data, 'base64'), name: paperApi.get(id)?.fileName || 'paper.pdf' } : null
@@ -39,7 +39,7 @@ export function registerIpc() {
       return paper && base64 ? { base64, title: paper.title, name: paper.fileName || 'paper.pdf' } : null
     },
     getSnapshot: webQa.getSnapshot,
-    getSettings: () => settingsApi.get(DOCLING_SETTINGS_KEY),
+    getCredentials: () => normalizeDoclingCredentials(settingsApi.get(DOCLING_SETTINGS_KEY)),
     convertPdf: convertPdfForSummary,
     parseHtml: parseHtmlSummary,
   })
@@ -70,7 +70,7 @@ export function registerIpc() {
     'docling:convert': (_e, id) => docling.convert(id),
     'docling:save': (_e, id, record) => docling.save(id, record),
     'docling:readAsset': (_e, id) => docling.readAsset(id),
-    'docling:testConnection': (_e, settings) => testDoclingConnection(settings),
+    'docling:testConnection': (_e, credentials) => testDoclingConnection(parseDoclingCredentials(credentials)),
     'abstractCheckpoint:get': (_e, paperId, runKey, stage, position) => abstractCheckpoint.get(paperId, runKey, stage, position),
     'abstractCheckpoint:save': (_e, paperId, runKey, stage, position, content) => abstractCheckpoint.save(paperId, runKey, stage, position, content),
     'paperAbstract:get': (_e, paperId) => paperAbstract.get(paperId),

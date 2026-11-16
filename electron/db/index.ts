@@ -15,7 +15,7 @@ import { stripApiKeysFromSettings } from '../../src/utils/exportSanitize'
 import { planFragmentMerge } from '../../src/utils/highlightMerge'
 import { isSafePaperId, storedPaperFilePath } from '../paperProtocol'
 import { migrateChatRuns } from './chatRun'
-import { validateBackupInput, validatePaperCreateInput, validateChatMessageWrite, validateChatMessagePatch } from './backupValidation'
+import { normalizeSettingForImport, validateBackupInput, validatePaperCreateInput, validateChatMessageWrite, validateChatMessagePatch } from './backupValidation'
 import { createPaperFileTransactions, type PaperFileChange } from './paperFileTransactions'
 import type { KnowledgeBase } from '../../src/types/paper'
 
@@ -553,7 +553,8 @@ export function importAll(input: unknown) {
     }
 
     for (const s of settings) {
-      db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(s.key, s.value)
+      const normalized = normalizeSettingForImport(s)
+      db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(normalized.key, normalized.value)
     }
 
     // Creating the fallback library belongs to the same atomic restore.

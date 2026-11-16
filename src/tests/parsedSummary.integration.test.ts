@@ -33,7 +33,7 @@ it.each(['paper', 'web'] as const)('parses %s, generates once, persists source-o
     } },
   }
   const parser = createSummaryParser({
-    repository, getSettings: () => ({ baseUrl: 'http://127.0.0.1:5001' }),
+    repository, getCredentials: () => ({ apiKey: '' }),
     readPaper: () => ({ base64: Buffer.from('%PDF-test').toString('base64'), name: 'paper.pdf', title: 'Paper' }),
     getSnapshot: () => ({ html: `<article><h2 id="results">Full archived evidence</h2><table><tr><td>93.2%</td></tr></table><img alt="Result" src="${png}"></article>`, title: 'Page', finalUrl: 'https://example.org/', capturedAt: 1, contentHash: 'web-hash', byteLength: 100 }),
     parseHtml: parseHtmlSummary,

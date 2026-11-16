@@ -37,7 +37,7 @@ const db: DbApi = {
     convert: (paperId: string) => invoke('docling:convert', paperId),
     save: (paperId, record) => invoke('docling:save', paperId, record),
     readAsset: (id: string) => invoke('docling:readAsset', id),
-    testConnection: settings => invoke('docling:testConnection', settings),
+    testConnection: credentials => invoke('docling:testConnection', credentials),
   },
   abstractCheckpoint: {
     get: (paperId: string, runKey: string, stage: string, position: number) => invoke('abstractCheckpoint:get', paperId, runKey, stage, position),

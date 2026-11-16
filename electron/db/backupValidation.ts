@@ -4,7 +4,7 @@ import type { PaperCreateInput } from '../../src/types/ipcContract'
 import type { ChatMessageWrite, ChatMessagePatch } from '../../src/types/chatRun'
 import type { WebQaBackup } from '../../src/types/webQa'
 import { canonicalWebPageUrl } from '../../src/utils/webPageUrl'
-import { normalizeDoclingSettings } from '../../src/utils/doclingDocument'
+import { normalizeDoclingCredentials } from '../../src/utils/doclingConfig'
 import { validateDocumentSummaryBackup } from './documentSummary'
 import { decodeWebVisualPdf } from './webVisualPdf'
 
@@ -111,18 +111,24 @@ function validateSetting(key: string, raw: unknown) {
       return
     case 'docling_config': {
       if (value === null) return
-      const config = object(value, detail)
-      for (const field of ['baseUrl', 'apiKey']) {
-        if (config[field] !== undefined) text(config[field], `${detail}.${field}`)
-      }
-      for (const field of ['ocr', 'formula']) {
-        if (config[field] !== undefined && typeof config[field] !== 'boolean') invalid(`${detail}.${field}`)
-      }
-      // Reuse the runtime URL/timeout rules and their default-field migration,
-      // but never expose parse errors or connection credentials in the error.
-      try { normalizeDoclingSettings(config) }
+      try { normalizeDoclingCredentials(value) }
       catch { invalid(detail) }
     }
+  }
+}
+
+export function normalizeSettingForImport(row: { key: string; value: string }): { key: string; value: string } {
+  if (row.key !== 'docling_config') return row
+  let value: unknown
+  try {
+    value = JSON.parse(row.value)
+  } catch {
+    invalid('settings.docling_config 不是有效的 JSON')
+  }
+  try {
+    return { key: row.key, value: JSON.stringify(normalizeDoclingCredentials(value)) }
+  } catch {
+    invalid('settings.docling_config')
   }
 }
 

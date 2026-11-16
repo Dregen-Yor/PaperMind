@@ -6,13 +6,13 @@ vi.mock('../utils/visualSummaryPdf', () => ({ renderSummaryPdf: vi.fn().mockReso
 vi.mock('../utils/visualSummary', async original => ({ ...await original<object>(), hashVisualSource: vi.fn().mockResolvedValue('visual-test-hash') }))
 
 import { useChatStore } from '../stores/chat'
-import { DEFAULT_DOCLING_SETTINGS, normalizeDoclingDocument } from '../utils/doclingDocument'
+import { normalizeDoclingDocument } from '../utils/doclingDocument'
 import { renderSummaryPdf } from '../utils/visualSummaryPdf'
 const db = () => (globalThis as any).mockDb
 const ok = (content: string, reason = 'stop') => ({ ok: true, json: async () => ({ choices: [{ message: { content }, finish_reason: reason }] }) })
 const configure = async () => {
   const store = useChatStore(); await store.init()
-  await store.setDoclingConfig({ ...DEFAULT_DOCLING_SETTINGS, baseUrl: 'http://localhost:5001' })
+  await store.setDoclingCredentials({ apiKey: 'docling-key' })
   await store.updateProfile(store.chatProfileId, { apiKey: 'test', model: 'my-chat-model' })
   return store
 }

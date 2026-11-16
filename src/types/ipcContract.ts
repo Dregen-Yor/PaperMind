@@ -1,4 +1,5 @@
-import type { DoclingRecord, DoclingSettings } from '../utils/doclingDocument'
+import type { DoclingCredentials } from './doclingConfig'
+import type { DoclingRecord } from '../utils/doclingDocument'
 import type { PaperAbstractReport } from '../utils/paperAbstract'
 import type { ChatMessageWrite, ChatMessagePatch } from './chatRun'
 import type { PreviewBounds, PreviewSnapshot } from './webPreview'
@@ -37,7 +38,7 @@ export interface DbApi {
     convert: (paperId: string) => Promise<DoclingRecord>
     save: (paperId: string, record: DoclingRecord) => Promise<DoclingRecord>
     readAsset: (id: string) => Promise<string | null>
-    testConnection: (settings: DoclingSettings) => Promise<string>
+    testConnection: (credentials: DoclingCredentials) => Promise<string>
   }
   abstractCheckpoint: {
     get: (paperId: string, runKey: string, stage: string, position: number) => Promise<string | null>

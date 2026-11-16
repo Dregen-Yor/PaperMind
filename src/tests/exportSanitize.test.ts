@@ -57,9 +57,13 @@ describe('导出脱敏（#5）', () => {
     expect(profiles[1]).toEqual({ name: 'x', apiKey: '' })
   })
 
-  it('redacts Docling credentials while preserving deployment settings', () => {
-    const rows = [{ key: 'docling_config', value: JSON.stringify({ apiKey: 'secret', baseUrl: 'http://localhost:5001', ocr: true }) }]
-    expect(JSON.parse(stripApiKeysFromSettings(rows)[0].value)).toEqual({ apiKey: '', baseUrl: 'http://localhost:5001', ocr: true })
+  it('redacts API-key-only and legacy Docling credentials', () => {
+    const rows = [
+      { key: 'docling_config', value: JSON.stringify({ apiKey: 'secret' }) },
+      { key: 'docling_config', value: JSON.stringify({ apiKey: 'old-secret', baseUrl: 'http://localhost:5001', ocr: true }) },
+    ]
+    expect(JSON.parse(stripApiKeysFromSettings(rows)[0].value)).toEqual({ apiKey: '' })
+    expect(JSON.parse(stripApiKeysFromSettings(rows)[1].value)).toEqual({ apiKey: '', baseUrl: 'http://localhost:5001', ocr: true })
   })
 
   it('文件名带可读日期', () => {

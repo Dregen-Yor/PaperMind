@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_DOCLING_SETTINGS, isParsedDocument, normalizeDoclingDocument, normalizeDoclingSettings } from '../utils/doclingDocument'
+import { isParsedDocument, normalizeDoclingDocument } from '../utils/doclingDocument'
 
 const prov = (page = 2, origin = 'BOTTOMLEFT') => [{ page_no: page, bbox: { l: 10, r: 90, t: origin === 'BOTTOMLEFT' ? 80 : 20, b: origin === 'BOTTOMLEFT' ? 20 : 80, coord_origin: origin } }]
 const fixture = () => ({
@@ -69,13 +69,8 @@ describe('Docling document boundary', () => {
     document.items[0].id = 'picture-2'
     expect(isParsedDocument(document)).toBe(false)
   })
-  it('defaults unset deployment settings to the managed Docling endpoint and rejects invalid URLs', () => {
-    expect(DEFAULT_DOCLING_SETTINGS.baseUrl).toBe('http://127.0.0.1:5001')
-    expect(normalizeDoclingSettings(null).baseUrl).toBe(DEFAULT_DOCLING_SETTINGS.baseUrl)
-    expect(normalizeDoclingSettings({ baseUrl: '' }).baseUrl).toBe(DEFAULT_DOCLING_SETTINGS.baseUrl)
-    expect(() => normalizeDoclingSettings({ baseUrl: 'file:///tmp/model' })).toThrow('HTTP')
-    expect(() => normalizeDoclingSettings({ timeoutSeconds: 2 })).toThrow('超时')
-    expect(() => normalizeDoclingSettings({ baseUrl: 'https://user:secret@host' })).toThrow('凭据')
+  it('normalizes documents without any deployment or credential input', () => {
+    expect(normalizeDoclingDocument(fixture())).toEqual(normalizeDoclingDocument(structuredClone(fixture())))
   })
 })
 

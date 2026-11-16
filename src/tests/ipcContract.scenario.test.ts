@@ -24,6 +24,10 @@ vi.mock('electron', () => ({
     }),
   },
 }))
+vi.mock('../../electron/doclingClient', async importOriginal => ({
+  ...await importOriginal<typeof import('../../electron/doclingClient')>(),
+  testDoclingConnection: vi.fn(async () => 'Docling 官方服务连接成功'),
+}))
 
 import { clearAll, exportAll, getWebQaRepository, getDocumentSummaryRepository, importAll, initDb, paperApi } from '../../electron/db'
 import { registerIpc } from '../../electron/ipc'
@@ -144,6 +148,13 @@ describe('same backup import task before and after IPC boundary changes', () => 
     const update = appPath.handlers.get('chat:updateMessage')!
     expect(() => update(trustedEvent, 'message-1', { runStatus: 'unknown-state' })).toThrow()
     expect(exportAll().conversations[0].messages[0].runStatus).toBe('cancelled')
+  })
+
+  it('accepts only API-key credentials at the Docling IPC boundary', async () => {
+    const testConnection = appPath.handlers.get('docling:testConnection')!
+    await expect(testConnection(trustedEvent, { apiKey: 'key' })).resolves.toContain('连接成功')
+    expect(() => testConnection(trustedEvent, { apiKey: 'key', baseUrl: 'https://other.example' })).toThrow()
+    expect(() => testConnection(trustedEvent, { apiKey: 'key', timeoutSeconds: 120 })).toThrow()
   })
 
   it('rejects every registered privileged channel before dispatch for unknown windows or child frames', () => {

@@ -1,12 +1,4 @@
-import { validateServiceUrl } from './serviceSecurity'
 /** Shared boundary between Docling, Electron persistence and the renderer. Pages are 0-based. */
-export interface DoclingSettings {
-  baseUrl: string
-  apiKey: string
-  timeoutSeconds: number
-  ocr: boolean
-  formula: boolean
-}
 export interface SourceRegion { page: number; x: number; y: number; width: number; height: number }
 export interface TextProvenance { page: number; start: number; end: number; region?: SourceRegion }
 export interface DocumentCell { text: string; region: SourceRegion }
@@ -53,10 +45,6 @@ export function assignTypedDocumentIds(document: ParsedDocument): ParsedDocument
   for (const item of document.items) item.id = `${item.kind}-${++counts[item.kind]}`
   return document
 }
-export const DOCLING_SETTINGS_KEY = 'docling_config'
-export const DEFAULT_DOCLING_SETTINGS: DoclingSettings = {
-  baseUrl: 'http://127.0.0.1:5001', apiKey: '', timeoutSeconds: 600, ocr: true, formula: true,
-}
 export const IMAGE_DATA_PATTERN = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024
 export const ASSET_ID_PATTERN = /^[a-f0-9]{64}$/
@@ -77,24 +65,6 @@ function isDocumentTable(value: unknown): value is DocumentTable {
         && Number.isInteger(cell.colSpan) && cell.colSpan > 0 && cell.column + cell.colSpan <= table.numCols
         && typeof cell.columnHeader === 'boolean' && typeof cell.rowHeader === 'boolean'
     })
-}
-
-export function normalizeDoclingSettings(value: unknown): DoclingSettings {
-  const raw = object(value)
-  let baseUrl = (string(raw.baseUrl).trim() || DEFAULT_DOCLING_SETTINGS.baseUrl).replace(/\/+$/, '')
-  if (baseUrl) {
-    validateServiceUrl(baseUrl)
-    let url: URL
-    try { url = new URL(baseUrl) } catch { throw new Error('Docling 服务地址必须是有效的 HTTP/HTTPS 地址') }
-    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Docling 服务地址必须使用 HTTP/HTTPS')
-    if (url.username || url.password) throw new Error('服务地址不能包含凭据，请使用 API Key 字段')
-    if (url.search || url.hash) throw new Error('请填写 Docling 服务根地址，不包含查询参数或片段')
-    baseUrl = url.href.replace(/\/+$/, '')
-  }
-  if (baseUrl === 'http://localhost:5001') baseUrl = DEFAULT_DOCLING_SETTINGS.baseUrl
-  const timeoutSeconds = raw.timeoutSeconds ?? DEFAULT_DOCLING_SETTINGS.timeoutSeconds
-  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 1800) throw new Error('Docling 超时必须为 30–1800 秒')
-  return { baseUrl, apiKey: string(raw.apiKey).trim(), timeoutSeconds, ocr: raw.ocr !== false, formula: raw.formula !== false }
 }
 
 export function isParsedDocument(value: unknown): value is ParsedDocument {

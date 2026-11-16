@@ -56,6 +56,17 @@ describe('useChatStore', () => {
     expect(store.loaded).toBe(true)
   })
 
+  it('migrates legacy Docling settings and persists only normalized credentials', async () => {
+    ;(globalThis as any).mockDb.settings.get.mockImplementation((key: string) => Promise.resolve(key === 'docling_config'
+      ? { apiKey: ' key ', baseUrl: 'http://127.0.0.1:5001', timeoutSeconds: 600, ocr: false, formula: false }
+      : null))
+    const store = useChatStore()
+    await store.init()
+    expect(store.doclingCredentials).toEqual({ apiKey: 'key' })
+    await store.setDoclingCredentials({ apiKey: ' new-key ' })
+    expect((globalThis as any).mockDb.settings.set).toHaveBeenCalledWith('docling_config', { apiKey: 'new-key' })
+  })
+
   it('init restores saved profiles list', async () => {
     const savedProfiles = [
       { id: 'p1', name: 'Ollama', provider: 'ollama', model: 'llama3',

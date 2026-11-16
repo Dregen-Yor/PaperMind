@@ -131,6 +131,13 @@ export function normalizeDoclingCredentials(value: unknown): DoclingCredentials 
   return { apiKey: credentials.apiKey.trim() }
 }
 
+export function parseDoclingCredentials(value: unknown): DoclingCredentials {
+  const credentials = object(value, 'Docling 凭据')
+  exactKeys(credentials, ['apiKey'], 'Docling 凭据')
+  if (typeof credentials.apiKey !== 'string') throw new Error('Docling API Key 必须是字符串')
+  return { apiKey: credentials.apiKey.trim() }
+}
+
 export function parseOfficialDoclingConfig(value: unknown): Readonly<OfficialDoclingConfig> {
   rejectSensitiveKeys(value)
   const root = object(value, 'Docling 官方配置')
