@@ -22,11 +22,19 @@ test('patched Node alone cannot approve an Electron distribution', () => {
   assert.ok(electronSecurityErrors({ node: '24.20.0', electron: '44.2.0' }, '44.2.0').some(error => error.includes('24.22.1')))
 })
 
-test('approval binds the actual Electron and Node pair and published evidence', () => {
-  const policy = { approvedElectron: [{ electron: '99.0.0', node: '24.22.1', evidence: 'https://releases.electronjs.org/release/v99.0.0' }] }
-  assert.deepEqual(electronSecurityErrors({ node: '24.22.1', electron: '99.0.0' }, '99.0.0', policy), [])
-  assert.ok(electronSecurityErrors({ node: '24.22.0', electron: '99.0.0' }, '99.0.0', policy).length)
-  assert.ok(electronSecurityErrors({ node: '24.22.1', electron: '99.0.0' }, '98.0.0', policy).length)
+test('approval binds Electron, embedded Node, Chromium and official evidence', () => {
+  const policy = { approvedElectron: [{
+    electron: '44.11.3',
+    node: '24.22.2',
+    chromium: '152.0.7977.169',
+    evidence: 'https://releases.electronjs.org/release/v44.11.3',
+  }] }
+  assert.deepEqual(electronSecurityErrors({
+    electron: '44.11.3', node: '24.22.2', chrome: '152.0.7977.169',
+  }, '44.11.3', policy), [])
+  assert.ok(electronSecurityErrors({
+    electron: '44.11.3', node: '24.22.2', chrome: '152.0.7977.168',
+  }, '44.11.3', policy).some(error => error.includes('Chromium')))
 })
 
 test('the executable gate rejects a plain Node binary even when its Node version is patched', () => {
