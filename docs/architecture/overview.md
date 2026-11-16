@@ -1,6 +1,6 @@
 # PaperMind Architecture Overview
 
-本文描述以 PR #14 合入提交 `a9651fd` 为产品基线、叠加本次文档修订后的架构。后续被移除的 #15、#17、#18 不属于当前 `main` 的实现。
+本文描述当前分支在 PR #14 基础上完成官方 Docling 服务重构后的架构。
 
 ## 1. 系统定位
 
@@ -27,7 +27,7 @@ Electron main process
   ├─ typed IPC and caller-frame checks
   ├─ SQLite repositories and managed PDF files
   ├─ local PDF protocol and web preview controllers
-  └─ Docling client / managed SSH tunnel
+  └─ official Docling HTTPS client
                 │
                 ├─ SQLite + userData/papers
                 └─ Docling and captured web resources
@@ -86,14 +86,14 @@ visualSummary store
 - BrowserWindow 使用 sandbox、context isolation，关闭 Node integration，并限制导航和新窗口。
 - `ipcSecurity.ts` 只确认调用来自已注册主窗口的可信主 frame；参数运行时校验分布在 IPC handler、repository、备份校验器和服务 URL 校验器中。
 - provider 密钥在本地设置中保存，并因 renderer 直接请求 provider 而对 renderer 可见。
-- Docling 请求由主进程发出，服务 URL 必须通过安全规则；重定向默认关闭。
+- Docling 请求由主进程发往项目维护的唯一 HTTPS 地址；普通用户只能提供 API Key，请求禁止重定向。
 - 网页内容运行在隔离 preview 窗口中，通过受控快照和缓存接口进入应用数据层。
 
-## 6. #14 Docling 行为
+## 6. Official Docling Boundary
 
-PR #14 的默认 Docling 地址是 `http://127.0.0.1:5001`。使用该默认地址会启动受管 SSH 转发到 `ubuntu@101.76.222.224`。Settings 页面帮助文字仍保留旧主机描述，实际行为以 `electron/doclingTunnel.ts` 为准。
+`config/docling-service.json` 是地址、60 秒时限和 OCR/公式/表格解析能力的唯一项目配置。当前 `https://docling.example.com` 是部署前占位地址，预期在正式服务上线前连接失败；失败会显式返回，不会启动 SSH、本地服务、端口探测或降级解析。
 
-后续 #18 曾改为校园网 HTTPS 服务并移除隧道，但该提交已从当前 `main` 历史中移除，不能作为当前架构依据。
+普通用户只维护 `docling_config.apiKey`。PDF 和提取出的 OCR、公式、表格材料由主进程发往官方服务；网页 HTML/MHTML 材料仍在本地解析。完整字段和所有权见 [configuration.md](./configuration.md)。
 
 ## 7. 已知架构债务
 
@@ -113,4 +113,4 @@ PR #14 的默认 Docling 地址是 `http://127.0.0.1:5001`。使用该默认地�
 - SQLite table、备份范围或文件所有权；
 - 页面、store、核心模块的职责划分。
 
-模块索引见 [modules.md](./modules.md)，关键数据流见 [data-flow.md](./data-flow.md)。
+模块索引见 [modules.md](./modules.md)，关键数据流见 [data-flow.md](./data-flow.md)，配置所有权见 [configuration.md](./configuration.md)。

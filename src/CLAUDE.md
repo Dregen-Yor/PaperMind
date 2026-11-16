@@ -32,7 +32,7 @@ and renders the navigation shell plus `router-view`.
 These modules are intentionally imported outside the renderer:
 
 - `types/ipcContract.ts` and domain types;
-- Docling/summary structures and validators;
+- Docling official configuration, credentials, summary structures, and validators;
 - URL/service security helpers;
 - source-reference and backup sanitization helpers;
 - web archive/read-preview helpers;
@@ -59,6 +59,10 @@ re-exports the database API and declares `window.db`.
 `types/webPreview.d.ts` declares `window.preview` including the state event.
 
 Compile-time contracts do not replace runtime validation in Electron.
+
+`utils/doclingConfig.ts` separates project-owned service configuration from
+the user-owned API key. Renderer code may display the official address but
+must not expose deployment or parser controls.
 
 ## Tests
 

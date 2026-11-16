@@ -76,8 +76,10 @@ the supported runtime.
 - LLM credentials are stored locally in SQLite settings and exposed to the
   renderer because chat and parsed-summary requests are sent directly to the
   configured provider.
-- Docling requests run in the main process. At the #14 baseline, the default
-  loopback URL starts a managed SSH tunnel to the configured remote service.
+- Docling requests run in the main process and use only the project-maintained
+  HTTPS contract in `config/docling-service.json`. Users may set only an API
+  key; do not add URL, timeout, OCR, formula, table, local-service, or SSH
+  controls. The placeholder endpoint is expected to fail until deployment.
 - PDF files live under the managed `userData/papers/` directory; metadata lives
   in SQLite.
 - Reading position is renderer `localStorage` state, not a SQLite record.

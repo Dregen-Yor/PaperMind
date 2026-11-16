@@ -1,6 +1,6 @@
 # PaperMind
 
-> Architecture baseline: `a9651fd` (PR #14, 2026-10-28).
+> Architecture baseline: PR #14 plus the official Docling service refactor.
 > The authoritative architecture map is under [`docs/architecture/`](docs/architecture/overview.md).
 
 PaperMind is a local-first academic reading assistant built with Vue 3, Pinia,
@@ -21,7 +21,7 @@ Electron main/preload
   ├─ sender checks and IPC handlers
   ├─ SQLite + managed PDF files
   ├─ papermind-paper protocol
-  ├─ Docling HTTP client / managed SSH tunnel (#14)
+  ├─ official Docling HTTPS client
   └─ isolated web preview and snapshot capture
 ```
 
@@ -51,7 +51,7 @@ benchmarks, and compatibility. They are not silent production fallbacks.
 PDF and archived HTML share the parsed-summary pipeline:
 
 1. `documentSummary:parse` runs in the main process.
-2. PDF uses Docling; HTML parses the saved snapshot/MHTML.
+2. PDF uses the fixed official Docling service; HTML parses the saved snapshot/MHTML locally.
 3. Materials and original images are cached in
    `document_summary_records` / `document_summary_assets`.
 4. `visualSummary` calls `requestParsedSummary` directly from the renderer.
@@ -104,6 +104,11 @@ Generated outputs are `dist/`, `dist-electron/`, `release/`, benchmark
 Database/IPC changes normally require synchronized updates to the schema or
 repository, IPC contract, handler, preload wrapper, test mock, and focused
 runtime tests.
+
+The official Docling endpoint, 60-second limit, and OCR/formula/table presets
+come only from `config/docling-service.json`. Users configure only
+`docling_config.apiKey`; `https://docling.example.com` is a deployment
+placeholder and is not expected to work yet.
 
 ## Known Architectural Debt
 

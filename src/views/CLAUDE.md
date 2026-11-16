@@ -2,7 +2,7 @@
 
 # src/views/ — Route-Level Screens
 
-The #14 baseline has six route views:
+The current application has six route views:
 
 | View | Route | Responsibility |
 |---|---|---|
@@ -52,7 +52,7 @@ summary all remain bound to the selected snapshot.
 
 ### Settings
 
-At #14 the settings page manages:
+The settings page manages:
 
 - OpenAI, Anthropic, and Ollama profiles;
 - active chat/index profiles and E-k5 context budget/rebuild;

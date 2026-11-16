@@ -1,6 +1,6 @@
 # Data Flow
 
-本文描述 PR #14 基线中实际运行的数据流、持久化边界和失败语义。
+本文描述当前代码中实际运行的数据流、持久化边界和失败语义。
 
 ## 1. Application Startup
 
@@ -66,7 +66,8 @@ PaperAbstractPanel / WebAbstractPanel
   → visualSummary store
   → documentSummary:parse(paper)
   → main reads managed PDF
-  → Docling conversion
+  → official config + stored API Key
+  → HTTPS official Docling conversion
   → document_summary_records + document_summary_assets
   → requestParsedSummary
   → validate asset:ID references
@@ -115,18 +116,15 @@ renderer invoke
 
 TypeScript contract 不替代运行时校验。可信 frame 检查只回答“调用来自哪里”；URL、备份内容、枚举、ID、文件元数据和远程响应仍由各自 handler 或 validator 校验。
 
-## 7. Docling at the #14 Baseline
+## 7. Official Docling Service
 
 ```text
-documentSummary:parse(paper)
-  → convertPdfForSummary
-  → resolve Docling settings
-  → default http://127.0.0.1:5001 ? start managed SSH tunnel
-  → Docling HTTP conversion
-  → normalized ParsedDocument
+Settings API Key → SQLite credentials
+PDF parse → official config + credentials → HTTPS official service
+          → normalized document → cache/summary
 ```
 
-默认 loopback 配置会转发至 `ubuntu@101.76.222.224`。自定义服务 URL 仍需通过 `serviceSecurity` 规则；请求不跟随重定向。Settings 页面中旧主机提示不是行为依据。
+地址、60 秒时限、OCR、公式、表格、布局和图片参数均来自 `config/docling-service.json`，不接受用户覆盖。`https://docling.example.com` 当前是占位地址；不可用时显式失败且不降级。连接测试与转换都禁止重定向，并限制响应大小和并发数。HTML/MHTML 网页材料沿第 4 节的本地解析路径，不发送给 Docling。
 
 ## 8. Backup and Restore
 

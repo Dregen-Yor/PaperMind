@@ -10,7 +10,7 @@
 - typed IPC registration and preload wrappers;
 - SQLite and managed PDF files;
 - `papermind-paper://` local PDF delivery;
-- Docling networking and the #14 managed SSH tunnel;
+- official Docling HTTPS networking and cache identity;
 - isolated web preview, snapshot capture, and cached replay;
 - HTML/PDF material parsing for the unified summary pipeline.
 
@@ -62,18 +62,18 @@ When changing a channel, synchronize `src/types/ipcContract.ts`,
 | `preload.ts` | Context-bridge wrappers |
 | `ipcSecurity.ts` | Application-frame identity check |
 | `paperProtocol.ts` | Safe managed-PDF URL mapping and range responses |
-| `docling.ts` | Legacy Docling facade/repository integration |
-| `doclingClient.ts` | Docling HTTP requests and summary conversion |
-| `doclingTunnel.ts` | #14 SSH forwarding to `ubuntu@101.76.222.224` |
+| `docling.ts` | PDF parse/cache orchestration and official-config identity |
+| `doclingClient.ts` | Official Docling HTTPS requests and summary conversion |
 | `summaryParsing.ts` | Unified paper/web material parsing and cache identity |
 | `htmlSummary.ts` | Parse saved HTML/MHTML into `ParsedDocument` |
 | `webPreview.ts` | Isolated live/cached preview controller |
 | `webSummaryCapture.ts` | Snapshot-time DOM/MHTML/visual-PDF capture |
 | `db/` | SQLite, repositories, backup, and file recovery |
 
-At #14, `DEFAULT_DOCLING_SETTINGS.baseUrl` is `http://127.0.0.1:5001`.
-Using that default starts the managed SSH tunnel. The Settings help text still
-mentions an older host; `doclingTunnel.ts` is authoritative.
+`config/docling-service.json` is authoritative for the endpoint, 60-second
+deadline, and OCR/formula/table presets. Only the API key comes from SQLite
+settings. There is no tunnel, local probe, caller-supplied URL, or fallback.
+The current example domain is intentionally unavailable until deployment.
 
 ## Summary Boundary
 
@@ -87,7 +87,7 @@ surfaces. Do not describe them as the active parsed-summary storage path.
 
 ## Security Notes
 
-- Remote service URLs must pass `serviceSecurity` rules.
+- The official service configuration must pass the strict public HTTPS parser.
 - Redirects are disabled for provider and Docling requests.
 - The renderer never receives an arbitrary filesystem path for PDF reads.
 - API keys are locally stored settings; default backup export strips them.

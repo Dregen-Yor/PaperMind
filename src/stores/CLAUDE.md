@@ -2,7 +2,7 @@
 
 # src/stores/ — Pinia State and Product Orchestration
 
-The #14 baseline has six stores:
+The current application has six stores:
 
 | Store | Responsibility |
 |---|---|
@@ -27,6 +27,7 @@ web composables; do not claim that every IPC call passes through a store.
 - E-k5 indexing and retrieval;
 - query rewriting and final RAG generation;
 - the `/abstract` command and compatibility paper-summary API;
+- API-key-only Docling credentials; service and parser options are not store state;
 - legacy PageIndex/passage/semantic-tree maintenance functions.
 
 ### Production retrieval

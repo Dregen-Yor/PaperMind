@@ -14,7 +14,7 @@ asynchronous to the renderer at the IPC boundary.
 
 ## Schema Snapshot
 
-The #14 schema has 19 tables:
+The current schema has 19 tables:
 
 | Domain | Tables |
 |---|---|
@@ -85,6 +85,8 @@ exported. Do not say that every database row is included.
 `importAll()` validates the full input before destructive writes, stages PDF
 changes, replaces supported domain records, and imports repository-owned
 backups. Version-1 compatibility remains intentional.
+Legacy `docling_config` rows are normalized during import to keep only a
+trimmed `apiKey`; deployment and parser fields are intentionally discarded.
 
 ## Serialization and Contracts
 

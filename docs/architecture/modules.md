@@ -1,6 +1,6 @@
 # Module Map
 
-本文列出 PR #14 基线中的主要模块与真实职责。它描述“现在有什么”，不把计划中的 service 层或历史实验写成已完成实现。
+本文列出当前代码中的主要模块与真实职责。它描述“现在有什么”，不把计划中的 service 层或历史实验写成已完成实现。
 
 ## Renderer and Shared Source
 
@@ -13,7 +13,7 @@
 | `ReaderView.vue` | `/library/:id` | PDF 阅读、批注、问答和论文摘要 |
 | `WebPreviewView.vue` | `/web-preview` | 隔离网页预览、保存和网页问答 |
 | `ChatView.vue` | `/chat` | 通用对话与外部上下文 |
-| `SettingsView.vue` | `/settings` | provider、Docling、OCR/公式和数据设置 |
+| `SettingsView.vue` | `/settings` | provider、官方 Docling API Key 和数据设置 |
 
 `/` 重定向到 `/library`，不存在单独的 Home 页面。路由使用 hash
 history；`LibraryView` 静态导入，其余页面懒加载。
@@ -60,6 +60,7 @@ PDF 阅读位置由 `PdfViewer.vue` 维护在 `localStorage`。批注的共享�
 - 摘要：`parsedSummary.ts` 和摘要资源/Markdown 辅助模块；
 - PDF/内容：PDF 文本、页码、引用、Markdown 和 LaTeX 处理；
 - 安全与契约：服务 URL、IPC 参数和可序列化数据校验；
+- Docling 配置：`doclingConfig.ts` 校验只读官方配置并迁移用户凭据，`doclingDocument.ts` 只定义解析结果；
 - 兼容/实验：PageIndex、段落检索、语义树、旧 abstract reducer。
 
 兼容模块仍可能被测试、benchmark 或维护接口引用，但不等于生产问答会自动回退到它们。被 Electron 或 benchmark 引用的共享工具必须保持无 DOM/renderer 副作用。
@@ -79,8 +80,8 @@ PDF 阅读位置由 `PdfViewer.vue` 维护在 `localStorage`。批注的共享�
 | `ipc.ts` | typed channel 注册和可信 frame gate |
 | `ipcSecurity.ts` | 主窗口 frame 身份检查 |
 | `paperProtocol.ts` | 受管 PDF URL、range response 和路径隔离 |
-| `doclingClient.ts` | Docling HTTP 请求和转换 |
-| `doclingTunnel.ts` | #14 默认 loopback 地址对应的 SSH 转发 |
+| `doclingClient.ts` | 只使用项目官方配置的 Docling HTTPS 请求和转换 |
+| `docling.ts` | PDF 解析缓存编排和官方配置身份 |
 | `summaryParsing.ts` | 论文/网页统一材料解析和缓存身份 |
 | `htmlSummary.ts` | HTML/MHTML 到 `ParsedDocument` |
 | `webPreview.ts` | live/cached preview controller |
@@ -123,9 +124,9 @@ SQLite schema 包含 19 张表，覆盖：
 
 ## Configuration and Generated Content
 
-- `config/`、`public/` 和 `assets/` 保存运行时或构建资源；
+- `config/docling-service.json` 保存项目维护、用户不可覆盖的官方 Docling 契约；`public/` 和 `assets/` 保存其他运行时或构建资源；
 - `.agents/`、`.claude/` 是已跟踪配置；
 - `.worktrees/`、`.superpowers/`、`node_modules/`、构建产物和 release 不属于源代码；
 - `dataset/`、`models/` 和 benchmark 输出是可选本地资产。
 
-整体关系见 [overview.md](./overview.md)，端到端流程见 [data-flow.md](./data-flow.md)。
+整体关系见 [overview.md](./overview.md)，端到端流程见 [data-flow.md](./data-flow.md)，配置边界见 [configuration.md](./configuration.md)。

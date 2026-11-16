@@ -24,8 +24,10 @@ npm run bench:product -- --help
 npm run bench:trees -- --config semantic-tree --dataset qasper --limit 5
 ```
 
-Credentials and endpoints come from documented `BENCH_*` environment
-variables. Never embed them in configs or result artifacts.
+LLM credentials/endpoints and the Docling API key come from documented
+`BENCH_*` environment variables. Live Docling runs use `--docling-official`
+and the same fixed project endpoint as the application; the CLI accepts no
+Docling URL override. Never embed secrets in configs or result artifacts.
 
 ## Structure
 

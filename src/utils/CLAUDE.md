@@ -28,7 +28,8 @@ per-page provenance until it is fixed.
 
 ### Parsed summaries
 
-- `doclingDocument.ts` defines the shared parsed-document model.
+- `doclingConfig.ts` validates the project-owned official service contract and user API-key credentials.
+- `doclingDocument.ts` defines only the shared parsed-document model.
 - `parsedSummary.ts` serializes complete materials/images and calls an
   OpenAI-compatible multimodal endpoint.
 - `visualSummary.ts` defines report types and asset filtering.
