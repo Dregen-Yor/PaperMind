@@ -29,5 +29,8 @@ export function electronSecurityErrors(versions, expectedElectron, policy = defa
   if (versions.chrome !== approved.chromium) {
     errors.push(`Electron Chromium 版本不一致: expected=${approved.chromium} actual=${versions.chrome ?? 'missing'}`)
   }
+  if (errors.length) {
+    errors.push('实际 Electron / Node / Chromium 组合不匹配已批准运行时，禁止打包与发布')
+  }
   return errors
 }

@@ -120,7 +120,9 @@ function findLockUrls(value, path = 'lock') {
   if (!value || typeof value !== 'object') return errors
   for (const [key, entry] of Object.entries(value)) {
     const entryPath = `${path}.${key}`
-    if (key === 'resolved' || (typeof entry === 'string' && /^https?:\/\//i.test(entry))) {
+    const knownRegistryHost = typeof entry === 'string'
+      && /https?:\/\/(?:registry\.npmjs\.org|registry\.npmmirror\.com)(?:[/:?#]|$)/i.test(entry)
+    if (key === 'resolved' || knownRegistryHost) {
       errors.push(`lockfile contains registry URL at ${entryPath}`)
     } else {
       errors.push(...findLockUrls(entry, entryPath))

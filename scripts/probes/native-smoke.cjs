@@ -33,7 +33,7 @@ async function main() {
 
   const sqlitePackage = projectRequire.resolve('better-sqlite3/package.json')
   const sqliteBinding = join(dirname(sqlitePackage), 'prebuilds', `${platformArch}.node`)
-  const sharpBinding = projectRequire.resolve(`@img/sharp-${platformArch}/lib/sharp-${platformArch}.node`)
+  const sharpBinding = projectRequire.resolve(`@img/sharp-${platformArch}/sharp.node`)
   emit({
     ok: true,
     ...runtime,

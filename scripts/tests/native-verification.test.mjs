@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { nativeProbeErrors } from '../lib/native-verification.mjs'
+import { resolve } from 'node:path'
+import { nativeProbeErrors, runNativeProbe } from '../lib/native-verification.mjs'
 import { electronSecurityErrors } from '../lib/runtime-security.mjs'
 
 test('rejects a probe result missing the platform Sharp optional package', () => {
@@ -35,4 +36,10 @@ test('package metadata cannot approve a stale Electron binary result', () => {
     electron: '44.9.3', node: '24.22.0', chrome: '152.0.0.0',
   }, '44.11.3')
   assert.ok(errors.some(error => error.includes('expected=44.11.3') && error.includes('actual=44.9.3')))
+})
+
+test('the native probe resolves Sharp through its exported sharp.node subpath', () => {
+  const result = runNativeProbe({ executable: process.execPath, requireRoot: resolve('package.json') })
+  assert.equal(result.ok, true, result.error)
+  assert.match(result.sharpBinding, /@img\/sharp-[^/]+\/lib\/sharp-[^/]+\.node$/)
 })

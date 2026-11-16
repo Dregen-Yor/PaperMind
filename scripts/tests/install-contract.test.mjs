@@ -43,7 +43,11 @@ const validLock = {
   lockfileVersion: 3,
   packages: {
     '': { dependencies: { sharp: '0.34.5' }, devDependencies: { electron: '44.11.3' } },
-    'node_modules/sharp': { version: '0.34.5', integrity: 'sha512-fixture' },
+    'node_modules/sharp': {
+      version: '0.34.5',
+      integrity: 'sha512-fixture',
+      funding: { url: 'https://opencollective.example/sharp' },
+    },
     'node_modules/electron': { version: '44.11.3', integrity: 'sha512-fixture' },
     'node_modules/@img/sharp-darwin-arm64': { version: '0.34.5', integrity: 'sha512-fixture', optional: true },
     'node_modules/@img/sharp-darwin-x64': { version: '0.34.5', integrity: 'sha512-fixture', optional: true },
