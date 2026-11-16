@@ -38,6 +38,7 @@ describe('Docling HTTP boundary', () => {
   it('reports HTTP authentication and malformed responses', async () => {
     await expect(convertPdf(new Uint8Array(), 'p.pdf', credentials, vi.fn().mockResolvedValue(new Response('', { status: 401 })))).rejects.toThrow('认证')
     await expect(convertPdf(new Uint8Array(), 'p.pdf', credentials, vi.fn().mockResolvedValue(new Response('invalid')))).rejects.toThrow('JSON')
+    await expect(convertPdf(new Uint8Array(), 'p.pdf', credentials, vi.fn().mockResolvedValue(new Response('null')))).rejects.toThrow('解析失败')
   })
   it('only accepts an OpenAPI service with the actual conversion endpoint', async () => {
     const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({ paths: { '/v1/convert/file': { post: {} } } })))

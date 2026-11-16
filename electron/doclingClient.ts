@@ -91,7 +91,10 @@ async function convertPdfDocument(
     document_timeout: String(OFFICIAL_DOCLING_CONFIG.timeoutSeconds),
   }
   for (const [key, option] of Object.entries(options)) body.append(key, option)
-  const result = await requestJson('/v1/convert/file', credentials, { method: 'POST', body }, request) as DoclingResponse
+  const payload = await requestJson('/v1/convert/file', credentials, { method: 'POST', body }, request)
+  const result: DoclingResponse = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as DoclingResponse
+    : {}
   if (!['success', 'partial_success'].includes(result.status ?? '')) throw new Error('Docling 文档解析失败，请检查官方服务状态后重试')
   if (forSummary && result.status === 'partial_success') throw new Error('Docling 仅完成部分解析，无法生成完整摘要，请稍后重试')
   let json = result.document?.json_content
